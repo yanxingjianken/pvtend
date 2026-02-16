@@ -28,10 +28,8 @@ dependencies = [
     "matplotlib",
 ]
 
-[project.optional-dependencies.maps]
-cartopy = ["cartopy"]
-
 [project.optional-dependencies]
+maps = ["cartopy"]
 test = ["pytest", "dask"]
 docs = ["sphinx", "sphinx-rtd-theme", "nbsphinx", "ipykernel"]
 dev = ["pvtend[test,docs]", "pre-commit", "ruff"]
