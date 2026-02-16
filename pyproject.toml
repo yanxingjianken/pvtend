@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "pvtend"
@@ -26,12 +26,14 @@ dependencies = [
     "netCDF4",
     "tqdm",
     "matplotlib",
-    "cartopy",
 ]
+
+[project.optional-dependencies.maps]
+cartopy = ["cartopy"]
 
 [project.optional-dependencies]
 test = ["pytest", "dask"]
-docs = ["sphinx", "sphinx-rtd-theme", "nbsphinx", "pandoc", "ipykernel"]
+docs = ["sphinx", "sphinx-rtd-theme", "nbsphinx", "ipykernel"]
 dev = ["pvtend[test,docs]", "pre-commit", "ruff"]
 
 [project.urls]
