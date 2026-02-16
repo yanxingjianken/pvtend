@@ -26,6 +26,7 @@ dependencies = [
     "netCDF4",
     "tqdm",
     "matplotlib",
+    "scikit-image",
 ]
 
 [project.optional-dependencies]

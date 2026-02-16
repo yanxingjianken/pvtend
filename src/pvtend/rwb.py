@@ -20,7 +20,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
-from skimage.measure import find_contours
+
+try:
+    from skimage.measure import find_contours
+except ImportError:  # pragma: no cover
+    find_contours = None  # type: ignore[assignment]
 
 
 @dataclass
@@ -100,6 +104,11 @@ def sampled_longest_contours(
 
     candidates = []
     for lev in probe:
+        if find_contours is None:
+            raise ImportError(
+                "scikit-image is required for RWB detection. "
+                "Install it with: pip install scikit-image"
+            )
         cs = find_contours(arr, level=lev)
         if not cs:
             continue
