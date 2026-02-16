@@ -126,6 +126,16 @@ src/pvtend/
     └── pkl.py
 ```
 
+## Example Notebooks
+
+Self-contained notebooks using synthetic data (no ERA5 files needed):
+
+| Notebook | Description |
+|----------|-------------|
+| [`examples/01_derivatives_and_grid.ipynb`](examples/01_derivatives_and_grid.ipynb) | Grid setup & finite-difference derivatives on a synthetic Rossby wave |
+| [`examples/02_helmholtz_decomposition.ipynb`](examples/02_helmholtz_decomposition.ipynb) | Helmholtz decomposition of a synthetic vortex+source wind field |
+| [`examples/03_basis_decomposition.ipynb`](examples/03_basis_decomposition.ipynb) | Orthogonal basis decomposition of a synthetic blocking PV tendency |
+
 ## Testing
 
 ```bash
