@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "pvtend"
+version = "0.1.0"
+authors = [
+    { name = "Xingjian Yan" },
+]
+description = "PV tendency decomposition diagnostics for blocking and weather extremes"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+]
+dependencies = [
+    "numpy>=1.22",
+    "scipy",
+    "xarray",
+    "pandas",
+    "netCDF4",
+    "tqdm",
+    "matplotlib",
+    "cartopy",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "dask"]
+docs = ["sphinx", "sphinx-rtd-theme", "nbsphinx", "pandoc", "ipykernel"]
+dev = ["pvtend[test,docs]", "pre-commit", "ruff"]
+
+[project.urls]
+Documentation = "https://pvtend.readthedocs.io/"
+Repository = "https://github.com/yanxingjianken/pvtend"
+"Bug Tracker" = "https://github.com/yanxingjianken/pvtend/issues"
+
+[project.scripts]
+pvtend-pipeline = "pvtend.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
