@@ -29,7 +29,11 @@ class TestVorticityDivergence:
         u = cos_lat
         v = np.zeros_like(u)
 
-        vort, div = compute_vorticity_divergence(u, v, lat, dlon, dlat)
+        # Convert to physical distances [m]
+        dx_arr = R_EARTH * np.cos(np.deg2rad(lat)) * dlon  # (nlat,)
+        dy = R_EARTH * dlat
+
+        vort, div = compute_vorticity_divergence(u, v, dx_arr, dy)
 
         # Divergence of solid body should be ~0
         np.testing.assert_allclose(div[2:-2, 2:-2], 0.0, atol=1e-6)
@@ -76,10 +80,10 @@ class TestHelmholtzDecomposition:
         u = np.sin(np.deg2rad(lat2d) * 2)
         v = np.cos(np.deg2rad(lon2d) * 3) * 0.5
 
-        result = helmholtz_decomposition(u, v, small_grid["lat"], dlon, dlat,
-                                         backend="dct")
-        u_recon = result["u_psi"] + result["u_chi"]
-        v_recon = result["v_psi"] + result["v_chi"]
+        result = helmholtz_decomposition(u, v, small_grid["lat"], small_grid["lon"],
+                                         method="dct")
+        u_recon = result["u_rot"] + result["u_div"] + result["u_har"]
+        v_recon = result["v_rot"] + result["v_div"] + result["v_har"]
 
         # Interior reconstruction should be reasonable
         rel_err_u = np.abs(u_recon[3:-3, 3:-3] - u[3:-3, 3:-3]).mean() / (np.abs(u).max() + 1e-10)

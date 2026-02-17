@@ -20,20 +20,24 @@ class TestDdx:
         dlon_rad = np.deg2rad(small_grid["dlon"])
         cos_lat = np.cos(np.deg2rad(lat2d))
 
+        # dx_arr: zonal grid spacing per latitude row [m]
+        dx_arr = R_EARTH * np.cos(np.deg2rad(lat)) * dlon_rad  # (nlat,)
+
         k = 2
         f = np.sin(np.deg2rad(lon2d) * k)
         expected = k * np.cos(np.deg2rad(lon2d) * k) / (R_EARTH * cos_lat)
 
-        dfdx = ddx(f, dlon_rad, lat)
-        # Loose tolerance due to finite differences on coarse grid
-        np.testing.assert_allclose(dfdx[1:-1, :], expected[1:-1, :],
+        dfdx = ddx(f, dx_arr, periodic=False)
+        # Exclude boundary rows AND columns (non-periodic limited-area grid)
+        np.testing.assert_allclose(dfdx[1:-1, 1:-1], expected[1:-1, 1:-1],
                                    atol=0.1 * np.abs(expected).max())
 
     def test_constant_field(self, small_grid):
         """ddx of a constant should be zero."""
         f = np.ones((small_grid["nlat"], small_grid["nlon"])) * 42.0
         dlon_rad = np.deg2rad(small_grid["dlon"])
-        result = ddx(f, dlon_rad, small_grid["lat"])
+        dx_arr = R_EARTH * np.cos(np.deg2rad(small_grid["lat"])) * dlon_rad
+        result = ddx(f, dx_arr)
         np.testing.assert_allclose(result, 0.0, atol=1e-12)
 
 
@@ -46,11 +50,12 @@ class TestDdy:
         lon = small_grid["lon"]
         lat2d, _ = np.meshgrid(lat, lon, indexing="ij")
         dlat_rad = np.deg2rad(small_grid["dlat"])
+        dy = R_EARTH * dlat_rad  # meridional spacing in metres
 
         f = np.deg2rad(lat2d)  # f = lat_rad
         expected = np.ones_like(f) / R_EARTH
 
-        dfdy = ddy(f, dlat_rad)
+        dfdy = ddy(f, dy)
         # Interior points (not boundaries)
         np.testing.assert_allclose(dfdy[2:-2, :], expected[2:-2, :],
                                    rtol=0.05)

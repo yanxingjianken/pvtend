@@ -407,56 +407,64 @@ class TendencyComputer:
         def _get(name: str) -> np.ndarray:
             return patch[name].values
 
-        # ── Mean advection of mean PV ──
-        for component, grad_suffix, vel_name in [
-            ("x", "_dx", "u"),
-            ("y", "_dy", "v"),
-            ("p", "_dp", "w"),
-        ]:
+        # Naming convention matches step2_compute_tendency_terms_blocking.py
+        # and projection.py's ADVECTION_TERMS, e.g. "u_bar_pv_bar_dx",
+        # "u_rot_pv_anom_dx", "omega_dry_pv_bar_dp", etc.
+
+        # ── Mean / anomaly × mean / anomaly PV gradient ──
+        for component, vel_name in [("x", "u"), ("y", "v"), ("p", "w")]:
+            grad_key = f"d{component}"  # dx, dy, dp
             bar_vel = _get(f"{vel_name}_bar")
-            bar_grad = _get(f"pv_bar_{grad_suffix}")
-            terms[f"{vel_name}_bar_dpvbar_d{component}"] = bar_vel * bar_grad
-
-            # Mean advection of anomaly PV
-            anom_grad = _get(f"pv_anom_{grad_suffix}")
-            terms[f"{vel_name}_bar_dpvanom_d{component}"] = bar_vel * anom_grad
-
-            # Anomaly advection of mean PV
             anom_vel = _get(f"{vel_name}_anom")
-            terms[f"{vel_name}_anom_dpvbar_d{component}"] = anom_vel * bar_grad
+            bar_grad = _get(f"pv_bar_{grad_key}")
+            anom_grad = _get(f"pv_anom_{grad_key}")
 
-            # Anomaly advection of anomaly PV
-            terms[f"{vel_name}_anom_dpvanom_d{component}"] = anom_vel * anom_grad
+            terms[f"{vel_name}_bar_pv_bar_{grad_key}"] = bar_vel * bar_grad
+            terms[f"{vel_name}_bar_pv_anom_{grad_key}"] = bar_vel * anom_grad
+            terms[f"{vel_name}_anom_pv_bar_{grad_key}"] = anom_vel * bar_grad
+            terms[f"{vel_name}_anom_pv_anom_{grad_key}"] = anom_vel * anom_grad
 
         # ── Rotational / divergent / harmonic sub-decomposition ──
         for part in ["rot", "div", "har"]:
-            for component, grad_suffix in [("x", "_dx"), ("y", "_dy")]:
+            for component in ["x", "y"]:
                 vel_name = "u" if component == "x" else "v"
+                grad_key = f"d{component}"
                 anom_part = _get(f"{vel_name}_anom_{part}")
-                bar_grad = _get(f"pv_bar{grad_suffix}")
-                anom_grad = _get(f"pv_anom{grad_suffix}")
-                terms[f"{vel_name}_{part}_dpvbar_d{component}"] = (
+                bar_grad = _get(f"pv_bar_{grad_key}")
+                anom_grad = _get(f"pv_anom_{grad_key}")
+                terms[f"{vel_name}_{part}_pv_bar_{grad_key}"] = (
                     anom_part * bar_grad
                 )
-                terms[f"{vel_name}_{part}_dpvanom_d{component}"] = (
+                terms[f"{vel_name}_{part}_pv_anom_{grad_key}"] = (
                     anom_part * anom_grad
                 )
 
         # ── Moist / dry divergent sub-decomposition ──
         for md in ["moist", "dry"]:
-            for component, grad_suffix in [("x", "_dx"), ("y", "_dy")]:
+            for component in ["x", "y"]:
                 vel_name = "u" if component == "x" else "v"
+                grad_key = f"d{component}"
                 key = f"{vel_name}_anom_div_{md}"
                 if key in patch:
                     vel_md = _get(key)
-                    bar_grad = _get(f"pv_bar{grad_suffix}")
-                    anom_grad = _get(f"pv_anom{grad_suffix}")
-                    terms[f"{vel_name}_div{md}_dpvbar_d{component}"] = (
+                    bar_grad = _get(f"pv_bar_{grad_key}")
+                    anom_grad = _get(f"pv_anom_{grad_key}")
+                    terms[f"{vel_name}_div_{md}_pv_bar_{grad_key}"] = (
                         vel_md * bar_grad
                     )
-                    terms[f"{vel_name}_div{md}_dpvanom_d{component}"] = (
+                    terms[f"{vel_name}_div_{md}_pv_anom_{grad_key}"] = (
                         vel_md * anom_grad
                     )
+
+        # ── Moist / dry omega vertical sub-decomposition ──
+        for md in ["moist", "dry"]:
+            key = f"omega_{md}"
+            if key in patch:
+                vel_md = _get(key)
+                bar_grad = _get("pv_bar_dp")
+                anom_grad = _get("pv_anom_dp")
+                terms[f"omega_{md}_pv_bar_dp"] = vel_md * bar_grad
+                terms[f"omega_{md}_pv_anom_dp"] = vel_md * anom_grad
 
         return terms
 

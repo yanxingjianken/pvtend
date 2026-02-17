@@ -36,18 +36,20 @@ pip install -e ".[dev]"
 ## Quick Start
 
 ```python
-import pvtend
+import numpy as np
+from pvtend import NHGrid, ddx, ddy, compute_orthogonal_basis, project_field
+
+# Grid setup
+grid = NHGrid(lat=np.linspace(90, 0, 61), lon=np.linspace(-180, 178.5, 240))
+dx_arr = grid.dx_arr  # zonal spacing per latitude [m]
+dy = grid.dy           # meridional spacing [m]
 
 # Compute zonal derivative
-import numpy as np
-dfdx = pvtend.ddx(field, dlon_rad=np.deg2rad(0.5),
-                   lat_1d=np.linspace(30, 50, 21))
+dfdx = ddx(field, dx_arr, periodic=False)
 
 # Orthogonal basis decomposition
-from pvtend.decomposition import compute_orthogonal_basis, project_field
-
-basis = compute_orthogonal_basis(q_prime, q_full, x_rel, y_rel, dx, dy)
-result = project_field(tendency, basis, dx, dy)
+basis = compute_orthogonal_basis(pv_anom, pv_dx, pv_dy, x_rel, y_rel)
+result = project_field(tendency, basis)
 print(f"β = {result['beta']:.3e}")  # intensification rate
 ```
 
@@ -128,13 +130,16 @@ src/pvtend/
 
 ## Example Notebooks
 
-Self-contained notebooks using synthetic data (no ERA5 files needed):
+Notebooks using **real ERA5 blocking event data** from the `outputs_tmp` pipeline:
 
 | Notebook | Description |
 |----------|-------------|
-| [`examples/01_derivatives_and_grid.ipynb`](examples/01_derivatives_and_grid.ipynb) | Grid setup & finite-difference derivatives on a synthetic Rossby wave |
-| [`examples/02_helmholtz_decomposition.ipynb`](examples/02_helmholtz_decomposition.ipynb) | Helmholtz decomposition of a synthetic vortex+source wind field |
-| [`examples/03_basis_decomposition.ipynb`](examples/03_basis_decomposition.ipynb) | Orthogonal basis decomposition of a synthetic blocking PV tendency |
+| [`01_rwb_and_derivatives`](examples/01_rwb_and_derivatives.ipynb) | Grid setup, `ddx`/`ddy`/`ddp` derivatives, RWB detection on a real event |
+| [`02_helmholtz_and_qg_omega`](examples/02_helmholtz_and_qg_omega.ipynb) | 3-D Helmholtz decomposition, QG omega solver, moist/dry ω split |
+| [`03_four_basis_projection`](examples/03_four_basis_projection.ipynb) | Orthogonal basis (Φ₁–Φ₄), project dq'/dt → β/αx/αy/γ, lifecycle curves |
+| [`05_grouped_terms_bootstrap`](examples/05_grouped_terms_bootstrap.ipynb) | Grouped PV-tendency terms, bootstrap resampling & significance |
+| [`06_baroclinic_structure`](examples/06_baroclinic_structure.ipynb) | 3-D composite PV anomaly, lon–p cross-sections, 2-PVU tropopause |
+| [`07_facet_blocking_vs_prp`](examples/07_facet_blocking_vs_prp.ipynb) | Facet comparison of blocking vs PRP lifecycle coefficients |
 
 ## Testing
 

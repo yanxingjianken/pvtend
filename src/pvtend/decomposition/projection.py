@@ -30,7 +30,7 @@ from .basis import (
 )
 from .smoothing import gaussian_smooth_nan, fourier_lowpass_nan
 
-# Standard PV budget advection terms
+# Standard PV budget advection terms (12 basic cross-terms)
 ADVECTION_TERMS: tuple[str, ...] = (
     "u_anom_pv_anom_dx", "u_anom_pv_bar_dx",
     "u_bar_pv_anom_dx", "u_bar_pv_bar_dx",
@@ -38,6 +38,35 @@ ADVECTION_TERMS: tuple[str, ...] = (
     "v_bar_pv_anom_dy", "v_bar_pv_bar_dy",
     "w_anom_pv_anom_dp", "w_anom_pv_bar_dp",
     "w_bar_pv_anom_dp", "w_bar_pv_bar_dp",
+)
+
+# Helmholtz-decomposed horizontal eddy advection terms
+HELMHOLTZ_TERMS: tuple[str, ...] = (
+    "u_rot_pv_anom_dx", "u_rot_pv_bar_dx",
+    "v_rot_pv_anom_dy", "v_rot_pv_bar_dy",
+    "u_div_pv_anom_dx", "u_div_pv_bar_dx",
+    "v_div_pv_anom_dy", "v_div_pv_bar_dy",
+    "u_har_pv_anom_dx", "u_har_pv_bar_dx",
+    "v_har_pv_anom_dy", "v_har_pv_bar_dy",
+)
+
+# Moist/dry divergent horizontal eddy advection terms
+MOIST_DRY_H_TERMS: tuple[str, ...] = (
+    "u_div_moist_pv_anom_dx", "u_div_moist_pv_bar_dx",
+    "v_div_moist_pv_anom_dy", "v_div_moist_pv_bar_dy",
+    "u_div_dry_pv_anom_dx", "u_div_dry_pv_bar_dx",
+    "v_div_dry_pv_anom_dy", "v_div_dry_pv_bar_dy",
+)
+
+# Moist/dry omega vertical advection terms
+MOIST_DRY_V_TERMS: tuple[str, ...] = (
+    "omega_moist_pv_anom_dp", "omega_moist_pv_bar_dp",
+    "omega_dry_pv_anom_dp", "omega_dry_pv_bar_dp",
+)
+
+# All advection terms combined
+ALL_ADVECTION_TERMS: tuple[str, ...] = (
+    ADVECTION_TERMS + HELMHOLTZ_TERMS + MOIST_DRY_H_TERMS + MOIST_DRY_V_TERMS
 )
 
 
