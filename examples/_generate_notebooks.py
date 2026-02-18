@@ -879,9 +879,9 @@ plt.show()
 def make_nb07():
     nb = nbf.v4.new_notebook()
     nb.cells = [
-        md("""# 07 — Facet Comparison: Blocking vs Persistent Ridge (PRP)
+        md("""# 07 — Facet Comparison: Blocking vs Propagating Anticyclones (PRP)
 
-Compares the PV-budget decomposition between **blocking** and **PRP** events:
+Compares the PV-budget decomposition between **blocking** and **propagating anticyclone (PRP)** events:
 
 1. Composite-mean basis and coefficients for both event types
 2. Lifecycle coefficient curves side by side
@@ -996,7 +996,7 @@ for etype in event_types:
 
     results[etype] = coefs_dh
 """),
-        md("## 3  Facet plot: blocking vs PRP lifecycle curves"),
+        md("## 3  Facet plot: Blocking vs Propagating lifecycle curves"),
         code("""\
 fig, axes = plt.subplots(2, 3, figsize=(16, 9))
 coef_keys = ["beta", "ax", "ay"]
@@ -1024,7 +1024,7 @@ for row, gname in enumerate(row_groups):
         if row == 0 and col == 0:
             ax.legend(fontsize=9)
 
-fig.suptitle(f"Blocking vs PRP — {STAGE} lifecycle", fontsize=14, y=1.01)
+fig.suptitle(f"Blocking vs Propagating — {STAGE} lifecycle", fontsize=14, y=1.01)
 fig.tight_layout()
 plt.show()
 """),
@@ -1042,7 +1042,7 @@ for ax, ckey, clabel in zip(axes, coef_keys, coef_labels):
     vals_p = [results["prp"][g][ckey][idx0] for g in group_names]
 
     ax.bar(x_pos - width/2, vals_b, width, label="Blocking", color="steelblue")
-    ax.bar(x_pos + width/2, vals_p, width, label="PRP", color="coral")
+    ax.bar(x_pos + width/2, vals_p, width, label="Propagating", color="coral")
     ax.set_xticks(x_pos)
     ax.set_xticklabels([g.replace("_", "\\n") for g in group_names], fontsize=8)
     ax.set_ylabel(clabel)
@@ -1057,10 +1057,10 @@ plt.show()
         md("""\
 ## Summary
 
-- **Blocking** and **PRP** events share similar leading-order advective
+- **Blocking** and **propagating anticyclone (PRP)** events share similar leading-order advective
   contributions but differ systematically in the eddy (nonlinear) terms.
 - The rotational eddy term drives **intensification** (positive β) in blocking
-  but is weaker or opposite-signed for PRP.
+  but is weaker or opposite-signed for propagating anticyclones.
 - The **lifecycle curves** show how these differences evolve from pre-onset
   through decay, with blocking maintaining stronger eddy forcing.
 """),
