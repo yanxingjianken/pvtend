@@ -11,6 +11,7 @@ decomposition on ERA5 pressure-level data.
 
    installation
    quickstart
+   notebooks
    api
 
 Indices and tables
