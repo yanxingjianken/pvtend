@@ -11,7 +11,7 @@
 ## Features
 
 - **PV tendency computation**: Advection, stretching, diabatic, and residual terms
-- **QG omega solver**: Hoskins Q-vector formulation with FFT+Thomas algorithm
+- **QG omega solver**: Hoskins Q-vector formulation with **two methods**: FFT+Thomas (default, fast) and 3-D direct/iterative (BiCGSTAB+ILU, full horizontal Laplacian). Optional `center_lat` for dynamic f₀ (Li & O'Gorman 2020).
 - **Helmholtz decomposition**: 4 backends (direct, FFT, DCT, SOR) for limited-area domains
 - **Moist/dry omega splitting**: Decomposes vertical motion into moist and dry contributions
 - **Orthogonal basis decomposition**: Projects PV tendency onto intensification (β), propagation (αx, αy), and deformation (γ) modes
@@ -105,7 +105,7 @@ src/pvtend/
 ├── preprocessing.py     # ERA5 loading & regridding
 ├── derivatives.py       # Finite difference operators
 ├── climatology.py       # Fourier-filtered climatology
-├── omega.py             # QG omega equation solver
+├── omega.py             # QG omega solver (FFT+Thomas or 3-D direct)
 ├── helmholtz.py         # Helmholtz decomposition
 ├── moist_dry.py         # Moist/dry omega split
 ├── tendency.py          # Main pipeline class
@@ -135,7 +135,7 @@ Notebooks using **real ERA5 blocking event data** from the `outputs_tmp` pipelin
 | Notebook | Description |
 |----------|-------------|
 | [`01_rwb_and_derivatives`](examples/01_rwb_and_derivatives.ipynb) | Grid setup, `ddx`/`ddy`/`ddp` derivatives, RWB detection on a real event |
-| [`02_helmholtz_and_qg_omega`](examples/02_helmholtz_and_qg_omega.ipynb) | 3-D Helmholtz decomposition, QG omega solver, moist/dry ω split |
+| [`02_helmholtz_and_qg_omega`](examples/02_helmholtz_and_qg_omega.ipynb) | 3-D Helmholtz decomposition, QG omega (FFT vs 3-D direct), moist/dry ω split |
 | [`03_four_basis_projection`](examples/03_four_basis_projection.ipynb) | Orthogonal basis (Φ₁–Φ₄), project dq'/dt → β/αx/αy/γ, lifecycle curves |
 | [`05_grouped_terms_bootstrap`](examples/05_grouped_terms_bootstrap.ipynb) | Grouped PV-tendency terms, bootstrap resampling & significance |
 | [`06_baroclinic_structure`](examples/06_baroclinic_structure.ipynb) | 3-D composite PV anomaly, lon–p cross-sections, 2-PVU tropopause |
