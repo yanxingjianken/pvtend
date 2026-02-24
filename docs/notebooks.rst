@@ -8,6 +8,7 @@ blocking-event data.
    :maxdepth: 1
    :caption: Notebooks
 
+   notebooks/00_idealized_pvtend_decomp
    notebooks/01_rwb_and_derivatives
    notebooks/02_helmholtz_and_qg_omega
    notebooks/03_four_basis_projection

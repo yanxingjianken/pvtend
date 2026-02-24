@@ -10,7 +10,7 @@ Coefficients:
     β (beta): Intensification rate [s⁻¹]
     αx (ax): Zonal propagation speed [m/s]
     αy (ay): Meridional propagation speed [m/s]
-    γ (gamma): Deformation rate [s⁻¹]
+    γ (gamma): Deformation rate [m² s⁻¹]
 """
 
 from __future__ import annotations
@@ -150,7 +150,7 @@ def project_field(
         "ax": float(ax),
         "ay": float(ay),
         "gamma": float(gamma),
-        "gamma_km2": float(gamma * 1e6),
+        "gamma_km2": float(gamma / 1e6),
         "beta_raw": float(beta_raw),
         "ax_raw": float(ax_raw),
         "ay_raw": float(ay_raw),

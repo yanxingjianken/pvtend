@@ -7,15 +7,19 @@ Solves the quasi-geostrophic omega equation:
 Q-vector:
     Q = -(R_d/σp) * [(∂Vg/∂x · ∇T), (∂Vg/∂y · ∇T)]
 
-Two solver methods are available:
+Three solver methods are available:
 
-- **fft** (default): FFT in longitude (periodic) + Thomas tridiagonal in
+- **sp19** (default): Empirical scaling ω_dry = 1/3 ω_total following
+  Steinfeld & Pfahl (2019).  Zero cost, structural consistency with
+  ω_total.  Requires *omega_total* as input.
+
+- **fft**: FFT in longitude (periodic) + Thomas tridiagonal in
   pressure.  Drops ∂²ω/∂y² but retains ∂²ω/∂x² via spectral
   representation.  Fast (~2 s) and captures >90 % of spatial variance.
 
-- **direct**: Assembles the full 3-D sparse elliptic operator (retains
-  both horizontal derivatives) and solves with BiCGSTAB+ILU or direct
-  SuperLU.  Closer to Li & O'Gorman (2020) SIP solver.
+- **log20**: Strongly Implicit Procedure (SIP, Stone 1968), full 3-D
+  spherical stencil with tan(φ) metric term.  Closest analogue to
+  Li & O'Gorman (2020).  Numba-accelerated, ~3–6 s per event pair.
 
 BCs: ω = 0 at top and bottom pressure levels.
 Latitude taper: QG invalid below ~15°N.
@@ -27,6 +31,11 @@ References:
     extratropical precipitation extremes to climate change. J. Climate.
     Bluestein H B (1992). Synoptic-Dynamic Meteorology in Midlatitudes,
     Vol. II, eq. 5.7.54.
+    Steinfeld D, Pfahl S (2019). The role of latent heating in
+    atmospheric blocking dynamics. Climate Dyn., 53, 6159-6180.
+    Stone H L (1968). Iterative solution of implicit approximations of
+    multidimensional partial differential equations. SIAM J. Numer.
+    Anal., 5, 530-558.
 """
 
 from __future__ import annotations
@@ -34,7 +43,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
-from .constants import R_EARTH, OMEGA_E, R_DRY, SIGMA0_CONST
+from .constants import R_EARTH, OMEGA_E, R_DRY, SP19_DRY_FRACTION
 
 # Constants for geostrophic wind
 GEO_SMOOTH_SIGMA: float = 1.5   # Gaussian sigma in grid points
@@ -194,39 +203,77 @@ def solve_qg_omega(
     lon: np.ndarray,
     plevs_pa: np.ndarray,
     *,
-    method: str = "fft",
+    method: str = "sp19",
     center_lat: float | None = None,
-    use_constant_sigma: bool = True,
-    sigma0_const: float = SIGMA0_CONST,
+    omega_total: np.ndarray | None = None,
+    dry_fraction: float = SP19_DRY_FRACTION,
+    t_full: np.ndarray | None = None,
+    sip_maxit: int = 300,
+    sip_alpha: float = 0.93,
+    sip_resmax: float = 1e-14,
 ) -> np.ndarray:
     """Solve the QG omega equation for omega_dry.
 
     Args:
         u: Geostrophic zonal wind [m s⁻¹], shape ``(nlev, nlat, nlon)``.
         v: Geostrophic meridional wind [m s⁻¹], shape ``(nlev, nlat, nlon)``.
-        t: Temperature [K], shape ``(nlev, nlat, nlon)``.
+        t: Temperature [K], shape ``(nlev, nlat, nlon)``.  For anomaly
+            solves pass anomaly here and full physical T via *t_full*.
         lat: Ascending latitude [degrees], shape ``(nlat,)``.
         lon: Longitude [degrees], shape ``(nlon,)``.
         plevs_pa: Pressure [Pa], ascending, shape ``(nlev,)``.
-        method: Solver method — ``"fft"`` (FFT + Thomas tridiagonal,
-            default) or ``"direct"`` (full 3-D sparse, BiCGSTAB+ILU).
+        method: Solver method — ``"sp19"`` (Steinfeld & Pfahl 2019
+            empirical scaling, default), ``"fft"`` (FFT + Thomas
+            tridiagonal), or ``"log20"`` (SIP, Li & O'Gorman 2020).
         center_lat: If given, use constant f₀ = 2Ω sin(center_lat) and
             β₀ = 2Ω cos(center_lat)/a instead of latitude-varying values.
             Recommended for event-centred patches (Li & O'Gorman 2020).
-        use_constant_sigma: If True, use constant σ₀ = *sigma0_const*.
-        sigma0_const: Constant static stability [m² Pa⁻² s⁻²].
+        omega_total: Total vertical velocity [Pa s⁻¹], required for
+            ``method="sp19"``.  Shape ``(nlev, nlat, nlon)``.
+        dry_fraction: Fraction ω_dry/ω_total for SP19 (default 1/3).
+        t_full: Full physical temperature [K] for σ₀ computation.
+            Required when *t* is an anomaly field (σ needs T ≈ 200–300 K).
+        sip_maxit: Max SIP iterations for LOG20 (default 300).
+        sip_alpha: SIP relaxation parameter for LOG20 (default 0.93).
+        sip_resmax: SIP convergence threshold for LOG20 (default 1e-14).
 
     Returns:
         ``omega_dry`` — QG vertical velocity [Pa s⁻¹],
         shape ``(nlev, nlat, nlon)``.
 
     Raises:
-        ValueError: If *method* is not ``"fft"`` or ``"direct"``.
+        ValueError: If *method* is not ``"sp19"``, ``"fft"``, or ``"log20"``.
+        ValueError: If *method* is ``"sp19"`` and *omega_total* is None.
     """
-    from .derivatives import gradient_periodic
+    _valid_methods = ("sp19", "fft", "log20")
+    if method not in _valid_methods:
+        raise ValueError(
+            f"method must be one of {_valid_methods}, got {method!r}"
+        )
 
-    if method not in ("fft", "direct"):
-        raise ValueError(f"method must be 'fft' or 'direct', got {method!r}")
+    # ---- SP19: empirical scaling (no elliptic solve) ----
+    if method == "sp19":
+        if omega_total is None:
+            raise ValueError(
+                "omega_total is required for method='sp19' "
+                "(Steinfeld & Pfahl 2019 scaling)"
+            )
+        return dry_fraction * omega_total
+
+    # ---- LOG20: SIP iterative solver ----
+    if method == "log20":
+        omega_dry, _info = solve_qg_omega_sip(
+            u, v, t, lat, lon, plevs_pa,
+            center_lat=center_lat,
+            t_full=t_full,
+            maxit=sip_maxit,
+            alpha=sip_alpha,
+            resmax=sip_resmax,
+        )
+        return omega_dry
+
+    # ---- FFT: compute Q-vector RHS and solve ----
+    from .derivatives import gradient_periodic
 
     nlev, nlat, nlon = u.shape
     lat_rad = np.deg2rad(lat)
@@ -248,32 +295,32 @@ def solve_qg_omega(
         f_arr = np.sign(f_arr) * np.maximum(np.abs(f_arr), f_min)
         beta_arr = 2 * OMEGA_E * np.cos(lat_rad) / R_EARTH
 
-    # Static stability profile
+    # Static stability profile σ₀(p) — domain-mean T (Bluestein eq 4.3.6)
+    # Use t_full (physical temperature) when available; otherwise t itself.
+    t_for_sigma = t_full if t_full is not None else t
     kappa = R_DRY / 1004.0
-    if use_constant_sigma:
-        sigma0 = np.full(nlev, sigma0_const)
-    else:
-        T_mean = np.nanmean(t, axis=(1, 2))
-        theta_m = T_mean * (1e5 / plevs_pa) ** kappa
-        sigma0 = np.zeros(nlev)
-        for k in range(1, nlev - 1):
-            dp_s = plevs_pa[k + 1] - plevs_pa[k - 1]
-            dlnt = np.log(theta_m[k + 1]) - np.log(theta_m[k - 1])
-            sigma0[k] = -(R_DRY * T_mean[k] / plevs_pa[k]) * (dlnt / dp_s)
-        sigma0[0] = sigma0[1]
-        sigma0[-1] = sigma0[-2]
-        sigma0 = np.maximum(sigma0, 1e-7)
+    T_mean = np.nanmean(t_for_sigma, axis=(1, 2))
+    theta_m = T_mean * (1e5 / plevs_pa) ** kappa
+    sigma0 = np.zeros(nlev)
+    for k in range(1, nlev - 1):
+        dp_s = plevs_pa[k + 1] - plevs_pa[k - 1]
+        dlnt = np.log(theta_m[k + 1]) - np.log(theta_m[k - 1])
+        sigma0[k] = -(R_DRY * T_mean[k] / plevs_pa[k]) * (dlnt / dp_s)
+    sigma0[0] = sigma0[1]
+    sigma0[-1] = sigma0[-2]
+    sigma0 = np.maximum(sigma0, 1e-7)
 
     # Latitude taper for QG validity
     lat_taper_full = lat_taper(lat)
     u_tapered = u * lat_taper_full[None, :, None]
     v_tapered = v * lat_taper_full[None, :, None]
 
-    # Temperature gradients
+    # Smooth T before computing gradients (Li & O'Gorman 2020 approach)
     dT_dx = np.zeros_like(t)
     dT_dy = np.zeros_like(t)
     for k in range(nlev):
-        dT_dx[k], dT_dy[k] = gradient_periodic(t[k], dx_arr, dy)
+        t_k = gaussian_smooth_2d(t[k], sigma=GEO_SMOOTH_SIGMA)
+        dT_dx[k], dT_dy[k] = gradient_periodic(t_k, dx_arr, dy)
 
     # Wind gradients
     dug_dx = np.zeros_like(u)
@@ -303,17 +350,11 @@ def solve_qg_omega(
         beta_term *= lat_taper_full[:, None]
         rhs_qv[k] = -2.0 * div_Q - beta_term
 
-    # ---- Dispatch to solver ----
-    if method == "direct":
-        omega_dry = _solve_3d_sparse(
-            rhs_qv, lat, lat_rad, plevs_pa, sigma0, f_arr,
-            dx_arr, dy, nlev, nlat, nlon,
-        )
-    else:
-        omega_dry = _solve_fft_thomas(
-            rhs_qv, lat, lat_rad, plevs_pa, sigma0, f_arr,
-            nlev, nlat, nlon,
-        )
+    # ---- FFT + Thomas tridiagonal solver ----
+    omega_dry = _solve_fft_thomas(
+        rhs_qv, lat, lat_rad, plevs_pa, sigma0, f_arr,
+        nlev, nlat, nlon,
+    )
 
     omega_dry *= lat_taper_full[None, :, None]
     return omega_dry
@@ -374,155 +415,658 @@ def _solve_fft_thomas(
 
 
 # =========================================================================
-#  Internal solver: 3-D sparse operator (BiCGSTAB+ILU or direct SuperLU)
+#  SIP (Strongly Implicit Procedure) QG omega solver — Li & O'Gorman (2020)
 # =========================================================================
 
-def _solve_3d_sparse(
-    rhs: np.ndarray,
-    lat: np.ndarray,
-    lat_rad: np.ndarray,
-    plevs_pa: np.ndarray,
-    sigma0: np.ndarray,
-    f_arr: np.ndarray,
-    dx_arr: np.ndarray,
-    dy: float,
-    nlev: int,
-    nlat: int,
-    nlon: int,
-    *,
-    use_bicgstab: bool = True,
-    rtol: float = 1e-8,
-) -> np.ndarray:
-    """Full 3-D sparse solver retaining both horizontal Laplacian terms.
+# --- numba availability check (once at import) ---
+try:
+    from numba import njit as _njit
+    _HAS_NUMBA = True
+except ImportError:
+    _HAS_NUMBA = False
 
-    Builds the sparse operator A for the interior grid and solves
-    A ω = b with ILU-preconditioned BiCGSTAB (default) or direct
-    SuperLU factorisation.
+
+def _compute_sigma_3d(
+    t: np.ndarray,
+    plevs_pa: np.ndarray,
+) -> np.ndarray:
+    """Compute 3-D static stability σ(x, y, p) from local temperature.
+
+    .. math::
+
+        \\sigma(x,y,p) = -\\frac{R_d\\,T(x,y,p)}{p}
+                          \\frac{\\partial\\ln\\theta}{\\partial p}
+
+    (Bluestein 1992, eq. 4.3.6; MetPy static_stability).
+
+    Parameters
+    ----------
+    t : (nlev, nlat, nlon)
+        Temperature [K].
+    plevs_pa : (nlev,)
+        Pressure [Pa], ascending.
+
+    Returns
+    -------
+    sigma_3d : (nlev, nlat, nlon)
+        Static stability [m² Pa⁻² s⁻²], clipped ≥ 1e-7.
+    """
+    kappa = R_DRY / 1004.0
+    theta = t * (1e5 / plevs_pa[:, None, None]) ** kappa
+    nlev = t.shape[0]
+    sigma_3d = np.zeros_like(t)
+    for k in range(1, nlev - 1):
+        dp = plevs_pa[k + 1] - plevs_pa[k - 1]
+        dlntheta = np.log(theta[k + 1]) - np.log(theta[k - 1])
+        sigma_3d[k] = -(R_DRY * t[k] / plevs_pa[k]) * (dlntheta / dp)
+    sigma_3d[0] = sigma_3d[1]
+    sigma_3d[-1] = sigma_3d[-2]
+    return np.maximum(sigma_3d, 1e-7)
+
+
+def _compute_qg_rhs(
+    u: np.ndarray,
+    v: np.ndarray,
+    t: np.ndarray,
+    lat: np.ndarray,
+    lon: np.ndarray,
+    plevs_pa: np.ndarray,
+    *,
+    center_lat: float | None = None,
+    t_full: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, float, float, np.ndarray]:
+    """Compute the Q-vector + β-term RHS shared by FFT and SIP solvers.
+
+    The RHS is in σ₀-divided form:  ``Q = -R_d/(σ₀ p)·(∂Vg/∂·)·∇T``,
+    where σ₀(p) is computed from **domain-mean** T.
+
+    When solving for anomaly fields (t = T − T̄), pass the **full
+    physical temperature** via *t_full* so that σ₀ is computed
+    correctly (σ requires T ≈ 200–300 K, not anomaly ≈ 0 K).
+
+    Zonal gradients use periodic wrapping when the longitude span ≥ 350°
+    (full NH ring) and one-sided differences otherwise (local patch).
+
+    Returns
+    -------
+    rhs : (nlev, nlat, nlon)
+        Q-vector divergence + β-term forcing (σ₀-divided).
+    sigma0 : (nlev,)
+        Domain-mean static stability profile.
+    f0 : float
+        Constant Coriolis parameter at *center_lat*.
+    beta0 : float
+        β₀ = 2Ω cos(φ₀)/a.
+    taper : (nlat,)
+        Latitude taper mask.
+    """
+    from .derivatives import ddx, ddy
+
+    nlev, nlat, nlon = u.shape
+    lat_rad = np.deg2rad(lat)
+    dlat = np.abs(lat[1] - lat[0]) if nlat > 1 else 1.5
+    dlon = np.abs(lon[1] - lon[0]) if nlon > 1 else 1.5
+    dy = np.deg2rad(dlat) * R_EARTH
+    dx_arr = np.deg2rad(dlon) * R_EARTH * np.cos(lat_rad)
+    dx_arr = np.maximum(dx_arr, dy * 0.1)
+
+    # Detect full ring vs local patch
+    lon_span = dlon * nlon
+    periodic = lon_span > 350.0
+
+    def _grad(field_2d):
+        """Horizontal gradient respecting periodic/non-periodic lon."""
+        return ddx(field_2d, dx_arr, periodic=periodic), ddy(field_2d, dy)
+
+    # Coriolis and beta
+    f_min = 2 * OMEGA_E * np.sin(np.deg2rad(F_MIN_LAT))
+    if center_lat is not None:
+        f0_val = 2 * OMEGA_E * np.sin(np.deg2rad(center_lat))
+        beta0_val = 2 * OMEGA_E * np.cos(np.deg2rad(center_lat)) / R_EARTH
+    else:
+        f0_val = 2 * OMEGA_E * np.sin(np.deg2rad(45.0))
+        beta0_val = 2 * OMEGA_E * np.cos(np.deg2rad(45.0)) / R_EARTH
+
+    f_arr = np.full(nlat, f0_val) if center_lat is not None else (
+        np.sign(2 * OMEGA_E * np.sin(lat_rad))
+        * np.maximum(np.abs(2 * OMEGA_E * np.sin(lat_rad)), f_min)
+    )
+    beta_arr = np.full(nlat, beta0_val) if center_lat is not None else (
+        2 * OMEGA_E * np.cos(lat_rad) / R_EARTH
+    )
+
+    # Static stability profile σ₀(p) — domain-mean T (Bluestein eq 4.3.6)
+    # Use t_full (physical temperature) when available; otherwise t itself.
+    t_for_sigma = t_full if t_full is not None else t
+    kappa = R_DRY / 1004.0
+    T_mean = np.nanmean(t_for_sigma, axis=(1, 2))
+    theta_m = T_mean * (1e5 / plevs_pa) ** kappa
+    sigma0 = np.zeros(nlev)
+    for k in range(1, nlev - 1):
+        dp_s = plevs_pa[k + 1] - plevs_pa[k - 1]
+        dlnt = np.log(theta_m[k + 1]) - np.log(theta_m[k - 1])
+        sigma0[k] = -(R_DRY * T_mean[k] / plevs_pa[k]) * (dlnt / dp_s)
+    sigma0[0] = sigma0[1]
+    sigma0[-1] = sigma0[-2]
+    sigma0 = np.maximum(sigma0, 1e-7)
+
+    # Latitude taper for QG validity
+    lat_taper_full = lat_taper(lat)
+
+    u_tapered = u * lat_taper_full[None, :, None]
+    v_tapered = v * lat_taper_full[None, :, None]
+
+    # Smooth T before computing gradients (Li & O'Gorman 2020 approach)
+    dT_dx = np.zeros_like(t)
+    dT_dy = np.zeros_like(t)
+    for k in range(nlev):
+        t_k = gaussian_smooth_2d(t[k], sigma=GEO_SMOOTH_SIGMA)
+        dT_dx[k], dT_dy[k] = _grad(t_k)
+
+    # Wind gradients
+    dug_dx = np.zeros_like(u)
+    dug_dy = np.zeros_like(u)
+    dvg_dx = np.zeros_like(v)
+    dvg_dy = np.zeros_like(v)
+    for k in range(nlev):
+        dug_dx[k], dug_dy[k] = _grad(u_tapered[k])
+        dvg_dx[k], dvg_dy[k] = _grad(v_tapered[k])
+
+    # Q-vector divergence and beta term → RHS
+    rhs = np.zeros_like(u)
+    for k in range(nlev):
+        coef = -R_DRY / (sigma0[k] * plevs_pa[k])
+        Q1 = coef * (dug_dx[k] * dT_dx[k] + dvg_dx[k] * dT_dy[k])
+        Q2 = coef * (dug_dy[k] * dT_dx[k] + dvg_dy[k] * dT_dy[k])
+        Q1 *= lat_taper_full[:, None]
+        Q2 *= lat_taper_full[:, None]
+        dQ1_dx, _ = _grad(Q1)
+        _, dQ2_dy = _grad(Q2)
+        div_Q = dQ1_dx + dQ2_dy
+        beta_term = (
+            beta_arr[:, None]
+            * (R_DRY / (sigma0[k] * plevs_pa[k]))
+            * dT_dx[k]
+        )
+        beta_term *= lat_taper_full[:, None]
+        rhs[k] = -2.0 * div_Q - beta_term
+
+    return rhs, sigma0, f0_val, beta0_val, lat_taper_full
+
+
+# ---------------------------------------------------------------------------
+#  SIP core iteration (pure-Python fallback + optional numba)
+# ---------------------------------------------------------------------------
+
+def _sip_core_python(
+    AP: np.ndarray,
+    AE: np.ndarray,
+    AW: np.ndarray,
+    AN: np.ndarray,
+    AS: np.ndarray,
+    AT: np.ndarray,
+    AB: np.ndarray,
+    Q: np.ndarray,
+    T: np.ndarray,
+    Nk: int,
+    Nj: int,
+    Ni: int,
+    alpha: float,
+    maxit: int,
+    resmax: float,
+    periodic_lon: int = 1,
+) -> tuple[int, float]:
+    """Pure-Python SIP core (Stone 1968) — fallback when numba is absent.
+
+    All arrays are ``(Nk, Nj, Ni)`` — (pressure, lat, lon).
+    *T* is modified **in-place** (initial guess + boundary values pre-set).
+    Lat/pressure boundaries are always Dirichlet.
+    Longitude (i-axis) is periodic when *periodic_lon* == 1;
+    otherwise Dirichlet (for local patches).
+
+    Returns
+    -------
+    n_iters : int
+        Number of SIP iterations performed.
+    rsm : float
+        Final relative residual.
+    """
+    LB  = np.zeros((Nk, Nj, Ni))
+    LW  = np.zeros((Nk, Nj, Ni))
+    LS  = np.zeros((Nk, Nj, Ni))
+    LPR = np.zeros((Nk, Nj, Ni))
+    UN  = np.zeros((Nk, Nj, Ni))
+    UE  = np.zeros((Nk, Nj, Ni))
+    UT  = np.zeros((Nk, Nj, Ni))
+    RES = np.zeros((Nk, Nj, Ni))
+
+    # i-loop bounds: periodic → 0..Ni-1; Dirichlet → 1..Ni-2
+    i_lo = 0 if periodic_lon else 1
+    i_hi = Ni if periodic_lon else Ni - 1
+
+    # ── Step A — ILU-like factorisation (once) ──
+    for k in range(1, Nk - 1):
+        for j in range(1, Nj - 1):
+            for i in range(i_lo, i_hi):
+                if periodic_lon:
+                    iw = (i - 1) % Ni
+                else:
+                    iw = i - 1
+
+                lb_val = AB[k, j, i] / (1.0 + alpha * (UN[k - 1, j, i]
+                                                         + UE[k - 1, j, i]))
+                lw_val = AW[k, j, i] / (1.0 + alpha * (UN[k, j, iw]
+                                                         + UT[k, j, iw]))
+                ls_val = AS[k, j, i] / (1.0 + alpha * (UE[k, j - 1, i]
+                                                         + UT[k, j - 1, i]))
+
+                p1 = alpha * (lb_val * UN[k - 1, j, i]
+                              + lw_val * UN[k, j, iw])
+                p2 = alpha * (lb_val * UE[k - 1, j, i]
+                              + ls_val * UE[k, j - 1, i])
+                p3 = alpha * (lw_val * UT[k, j, iw]
+                              + ls_val * UT[k, j - 1, i])
+
+                lpr_val = 1.0 / (AP[k, j, i] + p1 + p2 + p3
+                                  - lb_val * UT[k - 1, j, i]
+                                  - lw_val * UE[k, j, iw]
+                                  - ls_val * UN[k, j - 1, i]
+                                  + 1e-20)
+
+                un_val = (AN[k, j, i] - p1) * lpr_val
+                ue_val = (AE[k, j, i] - p2) * lpr_val
+                ut_val = (AT[k, j, i] - p3) * lpr_val
+
+                LB[k, j, i]  = lb_val
+                LW[k, j, i]  = lw_val
+                LS[k, j, i]  = ls_val
+                LPR[k, j, i] = lpr_val
+                UN[k, j, i]  = un_val
+                UE[k, j, i]  = ue_val
+                UT[k, j, i]  = ut_val
+
+    # ── Step B — SIP iteration loop ──
+    res0 = 0.0
+    n_iters = 0
+    rsm = 1.0
+
+    for it in range(1, maxit + 1):
+        resl = 0.0
+
+        # — forward sweep —
+        for k in range(1, Nk - 1):
+            for j in range(1, Nj - 1):
+                for i in range(i_lo, i_hi):
+                    if periodic_lon:
+                        iw = (i - 1) % Ni
+                        ie = (i + 1) % Ni
+                    else:
+                        iw = i - 1
+                        ie = i + 1
+
+                    res_val = (Q[k, j, i]
+                               - AE[k, j, i] * T[k, j, ie]
+                               - AW[k, j, i] * T[k, j, iw]
+                               - AN[k, j, i] * T[k, j + 1, i]
+                               - AS[k, j, i] * T[k, j - 1, i]
+                               - AT[k, j, i] * T[k + 1, j, i]
+                               - AB[k, j, i] * T[k - 1, j, i]
+                               - AP[k, j, i] * T[k, j, i])
+                    resl += abs(res_val)
+
+                    res_val = ((res_val
+                                - LB[k, j, i] * RES[k - 1, j, i]
+                                - LW[k, j, i] * RES[k, j, iw]
+                                - LS[k, j, i] * RES[k, j - 1, i])
+                               * LPR[k, j, i])
+                    RES[k, j, i] = res_val
+
+        # — backward sweep —
+        for k in range(Nk - 2, 0, -1):
+            for j in range(Nj - 2, 0, -1):
+                for i in range(i_hi - 1, i_lo - 1, -1):
+                    if periodic_lon:
+                        ie = (i + 1) % Ni
+                    else:
+                        ie = i + 1
+                    RES[k, j, i] = (RES[k, j, i]
+                                    - UN[k, j, i] * RES[k, j + 1, i]
+                                    - UE[k, j, i] * RES[k, j, ie]
+                                    - UT[k, j, i] * RES[k + 1, j, i])
+                    T[k, j, i] += RES[k, j, i]
+
+        # — convergence check —
+        n_iters = it
+        if it == 1:
+            res0 = resl + 1e-30
+        rsm = resl / res0
+        if rsm < resmax:
+            break
+
+    return n_iters, rsm
+
+
+if _HAS_NUMBA:
+    @_njit(cache=True)
+    def _sip_core(
+        AP: np.ndarray,
+        AE: np.ndarray,
+        AW: np.ndarray,
+        AN: np.ndarray,
+        AS: np.ndarray,
+        AT: np.ndarray,
+        AB: np.ndarray,
+        Q: np.ndarray,
+        T: np.ndarray,
+        Nk: int,
+        Nj: int,
+        Ni: int,
+        alpha: float,
+        maxit: int,
+        resmax: float,
+        periodic_lon: int = 1,
+    ) -> tuple[int, float]:
+        """Numba-accelerated SIP core (Stone 1968).
+
+        All arrays are ``(Nk, Nj, Ni)``.  *T* modified **in-place**.
+        Lat/pressure boundaries Dirichlet.
+        Longitude: periodic when *periodic_lon* == 1, Dirichlet otherwise.
+        """
+        LB  = np.zeros((Nk, Nj, Ni))
+        LW  = np.zeros((Nk, Nj, Ni))
+        LS  = np.zeros((Nk, Nj, Ni))
+        LPR = np.zeros((Nk, Nj, Ni))
+        UN  = np.zeros((Nk, Nj, Ni))
+        UE  = np.zeros((Nk, Nj, Ni))
+        UT  = np.zeros((Nk, Nj, Ni))
+        RES = np.zeros((Nk, Nj, Ni))
+
+        # i-loop bounds: periodic → 0..Ni-1; Dirichlet → 1..Ni-2
+        i_lo = 0 if periodic_lon else 1
+        i_hi = Ni if periodic_lon else Ni - 1
+
+        # ── Step A — ILU-like factorisation ──
+        for k in range(1, Nk - 1):
+            for j in range(1, Nj - 1):
+                for i in range(i_lo, i_hi):
+                    if periodic_lon:
+                        iw = (i - 1) % Ni
+                    else:
+                        iw = i - 1
+
+                    lb_val = AB[k, j, i] / (1.0 + alpha * (UN[k - 1, j, i]
+                                                             + UE[k - 1, j, i]))
+                    lw_val = AW[k, j, i] / (1.0 + alpha * (UN[k, j, iw]
+                                                             + UT[k, j, iw]))
+                    ls_val = AS[k, j, i] / (1.0 + alpha * (UE[k, j - 1, i]
+                                                             + UT[k, j - 1, i]))
+
+                    p1 = alpha * (lb_val * UN[k - 1, j, i]
+                                  + lw_val * UN[k, j, iw])
+                    p2 = alpha * (lb_val * UE[k - 1, j, i]
+                                  + ls_val * UE[k, j - 1, i])
+                    p3 = alpha * (lw_val * UT[k, j, iw]
+                                  + ls_val * UT[k, j - 1, i])
+
+                    lpr_val = 1.0 / (AP[k, j, i] + p1 + p2 + p3
+                                      - lb_val * UT[k - 1, j, i]
+                                      - lw_val * UE[k, j, iw]
+                                      - ls_val * UN[k, j - 1, i]
+                                      + 1e-20)
+
+                    un_val = (AN[k, j, i] - p1) * lpr_val
+                    ue_val = (AE[k, j, i] - p2) * lpr_val
+                    ut_val = (AT[k, j, i] - p3) * lpr_val
+
+                    LB[k, j, i]  = lb_val
+                    LW[k, j, i]  = lw_val
+                    LS[k, j, i]  = ls_val
+                    LPR[k, j, i] = lpr_val
+                    UN[k, j, i]  = un_val
+                    UE[k, j, i]  = ue_val
+                    UT[k, j, i]  = ut_val
+
+        # ── Step B — SIP iteration loop ──
+        res0 = 0.0
+        n_iters = 0
+        rsm = 1.0
+
+        for it in range(1, maxit + 1):
+            resl = 0.0
+
+            # — forward sweep —
+            for k in range(1, Nk - 1):
+                for j in range(1, Nj - 1):
+                    for i in range(i_lo, i_hi):
+                        if periodic_lon:
+                            iw = (i - 1) % Ni
+                            ie = (i + 1) % Ni
+                        else:
+                            iw = i - 1
+                            ie = i + 1
+
+                        res_val = (Q[k, j, i]
+                                   - AE[k, j, i] * T[k, j, ie]
+                                   - AW[k, j, i] * T[k, j, iw]
+                                   - AN[k, j, i] * T[k, j + 1, i]
+                                   - AS[k, j, i] * T[k, j - 1, i]
+                                   - AT[k, j, i] * T[k + 1, j, i]
+                                   - AB[k, j, i] * T[k - 1, j, i]
+                                   - AP[k, j, i] * T[k, j, i])
+                        resl += abs(res_val)
+
+                        res_val = ((res_val
+                                    - LB[k, j, i] * RES[k - 1, j, i]
+                                    - LW[k, j, i] * RES[k, j, iw]
+                                    - LS[k, j, i] * RES[k, j - 1, i])
+                                   * LPR[k, j, i])
+                        RES[k, j, i] = res_val
+
+            # — backward sweep —
+            for k in range(Nk - 2, 0, -1):
+                for j in range(Nj - 2, 0, -1):
+                    for i in range(i_hi - 1, i_lo - 1, -1):
+                        if periodic_lon:
+                            ie = (i + 1) % Ni
+                        else:
+                            ie = i + 1
+                        RES[k, j, i] = (RES[k, j, i]
+                                        - UN[k, j, i] * RES[k, j + 1, i]
+                                        - UE[k, j, i] * RES[k, j, ie]
+                                        - UT[k, j, i] * RES[k + 1, j, i])
+                        T[k, j, i] += RES[k, j, i]
+
+            # — convergence —
+            n_iters = it
+            if it == 1:
+                res0 = resl + 1e-30
+            rsm = resl / res0
+            if rsm < resmax:
+                break
+
+        return n_iters, rsm
+else:
+    _sip_core = _sip_core_python
+
+
+def solve_qg_omega_sip(
+    u: np.ndarray,
+    v: np.ndarray,
+    t: np.ndarray,
+    lat: np.ndarray,
+    lon: np.ndarray,
+    plevs_pa: np.ndarray,
+    *,
+    center_lat: float | None = None,
+    omega_b: np.ndarray | None = None,
+    t_full: np.ndarray | None = None,
+    maxit: int = 300,
+    alpha: float = 0.93,
+    resmax: float = 1e-14,
+) -> tuple[np.ndarray, dict]:
+    """Solve the QG omega equation using the SIP (Strongly Implicit Procedure).
+
+    Matches the Li & O'Gorman (2020) solver from
+    ``dante831/QG-omega/source/SIP_inversion.m``.
+
+    Same RHS computation as :func:`solve_qg_omega` (Q-vector + β-term),
+    but retains **both** ∂²ω/∂x² and ∂²ω/∂y² on the LHS using the
+    full 7-point spherical stencil (no FFT in longitude).
+
+    **Static stability**: uses domain-mean σ₀(p) throughout, matching
+    the original Li & O'Gorman MATLAB reference.
+
+    **Boundary conditions**: Dirichlet ω = 0 on all faces.  When the
+    longitude span covers a full ring (≥ 350°), periodic wrapping is
+    used in longitude instead.
 
     Args:
-        rhs: RHS forcing, shape ``(nlev, nlat, nlon)``.
-        lat: Latitude [deg], shape ``(nlat,)``.
-        lat_rad: Latitude [rad], shape ``(nlat,)``.
-        plevs_pa: Pressure [Pa], shape ``(nlev,)``.
-        sigma0: Static stability profile, shape ``(nlev,)``.
-        f_arr: Coriolis parameter, shape ``(nlat,)``.
-        dx_arr: Zonal grid spacing [m], shape ``(nlat,)``.
-        dy: Meridional grid spacing [m].
-        nlev, nlat, nlon: Grid dimensions.
-        use_bicgstab: If True, use BiCGSTAB+ILU; else direct SuperLU.
-        rtol: Relative tolerance for BiCGSTAB.
+        u: Geostrophic zonal wind [m s⁻¹], ``(nlev, nlat, nlon)``.
+        v: Geostrophic meridional wind [m s⁻¹], ``(nlev, nlat, nlon)``.
+        t: Temperature [K], ``(nlev, nlat, nlon)``.  For anomaly solves,
+            pass the anomaly field here and the **full** physical
+            temperature via *t_full*.
+        lat: Ascending latitude [degrees], ``(nlat,)``.
+        lon: Longitude [degrees], ``(nlon,)``.
+        plevs_pa: Pressure [Pa], ascending, ``(nlev,)``.
+        center_lat: Latitude for constant f₀ and β₀.
+        omega_b: Boundary omega ``(nlev, nlat, nlon)`` (None → 0).
+        t_full: Full physical temperature [K] for σ₀ and σ_3d
+            computation.  When ``None`` (default), *t* itself is used.
+            **Must be supplied when *t* is an anomaly field**,
+            otherwise σ ≈ 0 → NaN.
+        maxit: Max SIP iterations (default 300).
+        alpha: SIP relaxation parameter (default 0.93).
+        resmax: Convergence threshold (default 1e-14).
 
     Returns:
-        ``omega_dry``, shape ``(nlev, nlat, nlon)``.
+        ``(omega_dry, info)`` where *omega_dry* is ``(nlev, nlat, nlon)``
+        QG vertical velocity [Pa s⁻¹] and *info* is a dict with keys
+        ``'iters'``, ``'final_residual'``, ``'numba'``, ``'solve_time'``.
+
+    References:
+        Stone H L (1968). Iterative solution of implicit approximations
+        of multidimensional partial differential equations. SIAM J. Numer.
+        Anal., 5, 530–558.
+
+        Li L, O'Gorman P A (2020). Response of vertical velocities in
+        extratropical precipitation extremes to climate change. J. Climate.
     """
-    from scipy import sparse
-    from scipy.sparse.linalg import bicgstab, spilu, spsolve, LinearOperator
+    import time as _time
+    t0_wall = _time.perf_counter()
 
-    n_int = nlev - 2  # interior pressure levels
-    if n_int < 1:
-        return np.zeros((nlev, nlat, nlon))
+    nlev, nlat, nlon = u.shape
 
-    # Vertical FD coefficients (non-uniform spacing)
-    dp = np.diff(plevs_pa)
-    sigma0_int = sigma0[1 : nlev - 1]
-    f2 = f_arr ** 2
+    # --- 1. Compute Q-vector RHS (σ₀-divided, shared with FFT solver) ---
+    rhs, sigma0, f0, beta0, lat_taper_full = _compute_qg_rhs(
+        u, v, t, lat, lon, plevs_pa,
+        center_lat=center_lat,
+        t_full=t_full,
+    )
 
-    # Total number of interior unknowns
-    N = n_int * nlat * nlon
+    # Detect full ring vs local patch — controls BCs in SIP core
+    dlon_deg = np.abs(lon[1] - lon[0]) if len(lon) > 1 else 1.5
+    lon_span = dlon_deg * len(lon)
+    periodic_lon = 1 if lon_span > 350.0 else 0
 
-    # Helper: flat index
-    def _idx(k_int: int, j: int, i: int) -> int:
-        return k_int * nlat * nlon + j * nlon + (i % nlon)
+    # --- 2. Grid parameters in spherical coordinates ---
+    r = R_EARTH
+    phi = np.deg2rad(lat)                       # (nlat,)
+    dlat_deg = np.abs(lat[1] - lat[0]) if nlat > 1 else 1.5
+    dphi = np.deg2rad(dlat_deg)
+    dlambda = np.deg2rad(dlon_deg)
+    f2_0 = f0 ** 2
 
-    # Build sparse operator in COO format
-    rows: list[int] = []
-    cols: list[int] = []
-    vals: list[float] = []
-    b_vec = np.zeros(N)
+    # --- 3. Build 7-point stencil coefficients ---
+    #   σ₀-divided form (domain-mean σ₀ throughout, matching
+    #   Li & O'Gorman 2020 and the original MATLAB code):
+    #     AW = AE = 1/(r²cos²φ Δλ²)
+    #     AS = 1/(r²Δφ²) + tanφ/(2r²Δφ)
+    #     AN = 1/(r²Δφ²) - tanφ/(2r²Δφ)
+    #     AB = 2 f₀²/(σ₀ Δp₁ (Δp₁+Δp₂))
+    #     AT = 2 f₀²/(σ₀ Δp₂ (Δp₁+Δp₂))
+    #     AP = -2/(r²cos²φΔλ²) - 2/(r²Δφ²) - 2f₀²/(σ₀ Δp₁ Δp₂)
+    AP = np.zeros((nlev, nlat, nlon))
+    AE = np.zeros((nlev, nlat, nlon))
+    AW = np.zeros((nlev, nlat, nlon))
+    AN = np.zeros((nlev, nlat, nlon))
+    AS = np.zeros((nlev, nlat, nlon))
+    AT = np.zeros((nlev, nlat, nlon))
+    AB = np.zeros((nlev, nlat, nlon))
 
-    for k_int in range(n_int):
-        k = k_int + 1  # actual pressure index
-        hm = dp[k - 1]
-        hp = dp[k]
-        h_sum = hm + hp
-        f2_over_s = f2 / sigma0_int[k_int]  # (nlat,) — varies with lat
+    cos2_phi = np.cos(phi) ** 2
+    tan_phi = np.tan(phi)
 
-        for j in range(nlat):
-            dx_j = dx_arr[j]
-            f2s_j = f2_over_s[j]
+    for k in range(1, nlev - 1):
+        dp1 = plevs_pa[k] - plevs_pa[k - 1]
+        dp2 = plevs_pa[k + 1] - plevs_pa[k]
+        s0k = sigma0[k]
 
-            for i in range(nlon):
-                flat = _idx(k_int, j, i)
-                b_vec[flat] = rhs[k, j, i]
+        ab_val = 2.0 * f2_0 / (s0k * dp1 * (dp1 + dp2))
+        at_val = 2.0 * f2_0 / (s0k * dp2 * (dp1 + dp2))
+        vert_diag = -2.0 * f2_0 / (s0k * dp1 * dp2)
 
-                # Self: vertical + zonal + meridional contributions
-                vert_self = -f2s_j * (2.0 / h_sum) * (1.0 / hm + 1.0 / hp)
-                zonal_self = -2.0 / (dx_j ** 2)
-                merid_self = -2.0 / (dy ** 2) if 0 < j < nlat - 1 else (
-                    -1.0 / (dy ** 2) if j in (0, nlat - 1) else 0.0
-                )
-                # At lat boundaries: Dirichlet → meridional only has one
-                # neighbour contributing -1/dy²
-                if j == 0 or j == nlat - 1:
-                    merid_self = -1.0 / (dy ** 2)
+        for j in range(1, nlat - 1):
+            c2 = cos2_phi[j]
+            tp = tan_phi[j]
 
-                diag = vert_self + zonal_self + merid_self
-                rows.append(flat)
-                cols.append(flat)
-                vals.append(diag)
+            ew = 1.0 / (r ** 2 * c2 * dlambda ** 2)
+            ns_base = 1.0 / (r ** 2 * dphi ** 2)
+            ns_tan  = tp / (2.0 * r ** 2 * dphi)
 
-                # Vertical neighbours (k-1, k+1 in interior)
-                if k_int > 0:
-                    rows.append(flat)
-                    cols.append(_idx(k_int - 1, j, i))
-                    vals.append(f2s_j * (2.0 / h_sum) / hm)
-                # else: k_int=0 → lower BC ω=0, no contribution
+            # Horizontal coefficients — uniform σ₀ (no local σ_ratio)
+            AW[k, j, :] = ew
+            AE[k, j, :] = ew
+            AS[k, j, :] = ns_base + ns_tan
+            AN[k, j, :] = ns_base - ns_tan
 
-                if k_int < n_int - 1:
-                    rows.append(flat)
-                    cols.append(_idx(k_int + 1, j, i))
-                    vals.append(f2s_j * (2.0 / h_sum) / hp)
+            # Vertical coefficients
+            AB[k, j, :] = ab_val
+            AT[k, j, :] = at_val
 
-                # Zonal neighbours (periodic)
-                rows.append(flat)
-                cols.append(_idx(k_int, j, (i + 1) % nlon))
-                vals.append(1.0 / (dx_j ** 2))
+            # Diagonal
+            AP[k, j, :] = -2.0 * ew - 2.0 * ns_base + vert_diag
 
-                rows.append(flat)
-                cols.append(_idx(k_int, j, (i - 1) % nlon))
-                vals.append(1.0 / (dx_j ** 2))
+    # --- 4. Prepare solution array with BCs ---
+    T_sol = np.zeros((nlev, nlat, nlon))
+    if omega_b is not None:
+        T_sol[0, :, :]  = omega_b[0, :, :]
+        T_sol[-1, :, :] = omega_b[-1, :, :]
+        T_sol[:, 0, :]  = omega_b[:, 0, :]
+        T_sol[:, -1, :] = omega_b[:, -1, :]
+    # For Dirichlet lon BCs, also fix i=0 and i=-1
+    if not periodic_lon and omega_b is not None:
+        T_sol[:, :, 0]  = omega_b[:, :, 0]
+        T_sol[:, :, -1] = omega_b[:, :, -1]
 
-                # Meridional neighbours (Dirichlet at boundaries)
-                if j > 0:
-                    rows.append(flat)
-                    cols.append(_idx(k_int, j - 1, i))
-                    vals.append(1.0 / (dy ** 2))
-                if j < nlat - 1:
-                    rows.append(flat)
-                    cols.append(_idx(k_int, j + 1, i))
-                    vals.append(1.0 / (dy ** 2))
+    # --- 5. Solve with SIP core ---
+    n_iters, final_res = _sip_core(
+        AP, AE, AW, AN, AS, AT, AB, rhs, T_sol,
+        nlev, nlat, nlon, alpha, maxit, resmax,
+        periodic_lon,
+    )
 
-    A = sparse.coo_matrix(
-        (vals, (rows, cols)), shape=(N, N)
-    ).tocsr()
+    omega_dry = T_sol
 
-    # Solve
-    if use_bicgstab:
-        ilu = spilu(A.tocsc(), drop_tol=1e-4)
-        M = LinearOperator(A.shape, matvec=ilu.solve)
-        omega_flat, info = bicgstab(A, b_vec, M=M, rtol=rtol, maxiter=500)
-        if info != 0:
-            import warnings
-            warnings.warn(
-                f"BiCGSTAB did not converge (info={info}); "
-                "falling back to direct solver.",
-                stacklevel=2,
-            )
-            omega_flat = spsolve(A, b_vec)
-    else:
-        omega_flat = spsolve(A, b_vec)
+    # --- 6. Apply latitude taper ---
+    omega_dry *= lat_taper_full[None, :, None]
 
-    # Reshape back to 3-D
-    omega_dry = np.zeros((nlev, nlat, nlon))
-    omega_dry[1 : nlev - 1] = omega_flat.reshape(n_int, nlat, nlon)
-    return omega_dry
+    # --- 7. Remove zonal mean (match FFT where m=0 is excluded) ---
+    # Only remove zonal mean when longitude covers a full ring (~360°);
+    # on a local patch the "zonal mean" is NOT the true m=0 wavenumber
+    # and removing it would destroy the signal.
+    if periodic_lon:
+        zmean = np.mean(omega_dry, axis=-1, keepdims=True)
+        omega_dry -= zmean
+
+    # --- 8. Clean NaN / inf ---
+    omega_dry = np.nan_to_num(omega_dry, nan=0.0, posinf=0.0, neginf=0.0)
+
+    elapsed = _time.perf_counter() - t0_wall
+    info = {
+        "iters": n_iters,
+        "final_residual": float(final_res),
+        "numba": _HAS_NUMBA,
+        "solve_time": elapsed,
+    }
+    return omega_dry, info

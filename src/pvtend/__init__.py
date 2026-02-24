@@ -25,7 +25,7 @@ from pvtend._version import __version__
 from pvtend.grid import NHGrid, default_nh_grid, EventPatch
 from pvtend.constants import (
     R_EARTH, OMEGA_E, G0, R_DRY, KAPPA, H_SCALE,
-    SIGMA0_CONST,
+    SP19_DRY_FRACTION,
 )
 
 # Derivatives and climatology
@@ -33,7 +33,7 @@ from pvtend.derivatives import ddx, ddy, ddp, ddt
 from pvtend.climatology import compute_climatology, load_climatology
 
 # Solvers
-from pvtend.omega import solve_qg_omega
+from pvtend.omega import solve_qg_omega, solve_qg_omega_sip
 from pvtend.helmholtz import helmholtz_decomposition, helmholtz_decomposition_3d
 from pvtend.moist_dry import decompose_omega
 
@@ -57,13 +57,15 @@ __all__ = [
     # Grid
     "NHGrid", "default_nh_grid", "EventPatch",
     # Constants
-    "R_EARTH", "OMEGA_E", "G0", "R_DRY", "KAPPA", "H_SCALE", "SIGMA0_CONST",
+    "R_EARTH", "OMEGA_E", "G0", "R_DRY", "KAPPA", "H_SCALE",
+    "SP19_DRY_FRACTION",
     # Derivatives
     "ddx", "ddy", "ddp", "ddt",
     # Climatology
     "compute_climatology", "load_climatology",
     # Solvers
-    "solve_qg_omega", "helmholtz_decomposition", "helmholtz_decomposition_3d",
+    "solve_qg_omega", "solve_qg_omega_sip",
+    "helmholtz_decomposition", "helmholtz_decomposition_3d",
     "decompose_omega",
     # Decomposition
     "OrthogonalBasisFields", "compute_orthogonal_basis",

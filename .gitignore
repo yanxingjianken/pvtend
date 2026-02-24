@@ -34,6 +34,9 @@ docs/_build/
 *.swp
 *.swo
 
+# Downloaded data (large)
+examples/era5_jan2025/
+
 # OS
 .DS_Store
 Thumbs.db

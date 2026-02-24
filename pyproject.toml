@@ -27,13 +27,15 @@ dependencies = [
     "tqdm",
     "matplotlib",
     "scikit-image",
+    "cdsapi",
 ]
 
 [project.optional-dependencies]
 maps = ["cartopy"]
+sip = ["numba"]
 test = ["pytest", "dask"]
 docs = ["sphinx", "sphinx-rtd-theme", "nbsphinx", "ipykernel"]
-dev = ["pvtend[test,docs]", "pre-commit", "ruff"]
+dev = ["pvtend[test,docs,sip]", "pre-commit", "ruff"]
 
 [project.urls]
 Documentation = "https://pvtend.readthedocs.io/"

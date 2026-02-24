@@ -12,7 +12,7 @@ KAPPA: float = R_DRY / CP_DRY     # Poisson constant ≈ 0.286
 H_SCALE: float = 7000.0           # Scale height [m]
 
 # --- QG omega equation defaults ---
-SIGMA0_CONST: float = 2.0e-6      # Constant static stability [m² Pa⁻² s⁻²]
+SP19_DRY_FRACTION: float = 1.0 / 3.0  # ω_dry / ω_total ratio (Steinfeld & Pfahl 2019)
 F_MIN_LAT: float = 5.0            # Min latitude for f clamping [deg]
 GEO_SMOOTH_SIGMA: float = 1.5     # Gaussian smoothing sigma for geostrophic wind [grid pts]
 LAT_QG_LO: float = 15.0           # QG taper: zero below this [deg]

@@ -8,6 +8,12 @@
 
 `pvtend` diagnoses the growth, propagation, and decay of mid-latitude weather events by decomposing potential vorticity (PV) tendencies on ERA5 pressure-level data into physically meaningful components using an orthogonal basis framework.
 
+### Event catalogues
+
+Blocking and PRP-high events are identified as persistent anticyclonic anomalies in 500 hPa geopotential height.
+**TempestExtremes** tracks contiguous Z500 anomaly features that exceed a fixed threshold for ≥5 days, producing a CSV catalogue with columns for event ID, centre lat/lon, onset/peak/decay timestamps, and area.
+The CSV is the single input for `pvtend-pipeline compute`, which extracts event-centred patches and runs the full PV-tendency decomposition for each event in the catalogue.
+
 ## Features
 
 - **PV tendency computation**: Advection, stretching, diabatic, and residual terms
@@ -134,6 +140,7 @@ Notebooks using **real ERA5 blocking event data** from the `outputs_tmp` pipelin
 
 | Notebook | Description |
 |----------|-------------|
+| [`00_idealized_pvtend_decomp`](examples/00_idealized_pvtend_decomp.ipynb) | Idealized Gaussian PV anomaly: prescribed β/αx/αy/γ at two timesteps, basis visualisation, Gram-Schmidt, projection & reconstruction |
 | [`01_rwb_and_derivatives`](examples/01_rwb_and_derivatives.ipynb) | Grid setup, `ddx`/`ddy`/`ddp` derivatives, RWB detection on a real event |
 | [`02_helmholtz_and_qg_omega`](examples/02_helmholtz_and_qg_omega.ipynb) | 3-D Helmholtz decomposition, QG omega (FFT vs 3-D direct), moist/dry ω split |
 | [`03_four_basis_projection`](examples/03_four_basis_projection.ipynb) | Orthogonal basis (Φ₁–Φ₄), project dq'/dt → β/αx/αy/γ, lifecycle curves |
