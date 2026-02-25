@@ -24,6 +24,9 @@ import numpy as np
 
 from .smoothing import gaussian_smooth_nan, fourier_lowpass_nan
 
+# Default mask threshold for q' region (SI units, PVU)
+from ..constants import MASK_PV_THRESHOLD as _DEFAULT_MASK_THRESHOLD
+
 # Fixed pre-normalization constants (scale SI fields to O(1))
 PRENORM_PHI1: float = 1e6   # q' (PVU)
 PRENORM_PHI2: float = 1e12  # ∂q/∂x (PVU/m)
@@ -146,6 +149,7 @@ def compute_orthogonal_basis(
     *,
     geopotential: np.ndarray | None = None,
     mask_negative: bool = True,
+    mask_threshold: float | None = None,
     apply_smoothing: bool = True,
     smoothing_deg: float = 6.0,
     smoothing_method: str = "gaussian",
@@ -161,7 +165,11 @@ def compute_orthogonal_basis(
         x_rel: 1D relative x-coordinates (degrees).
         y_rel: 1D relative y-coordinates (degrees).
         geopotential: Optional geopotential for overlay plots.
-        mask_negative: Restrict basis to q' < 0 region.
+        mask_negative: If True and mask_threshold is None, use MASK_PV_THRESHOLD.
+            If False, no PV-anomaly masking is applied.
+        mask_threshold: Explicit PV anomaly threshold in SI units (e.g. -0.5e-6).
+            Grid points with q' <= threshold are included. Overrides mask_negative.
+            Default (None) falls back to MASK_PV_THRESHOLD when mask_negative=True.
         apply_smoothing: Apply spatial smoothing after pre-normalization.
         smoothing_deg: Smoothing FWHM (degrees).
         smoothing_method: 'gaussian' or 'fourier'.
@@ -196,8 +204,16 @@ def compute_orthogonal_basis(
     # Step 4: Mask
     mask = np.isfinite(phi_int_s) & np.isfinite(phi_dx_s) & \
            np.isfinite(phi_dy_s) & np.isfinite(phi_def_s)
-    if mask_negative:
-        mask &= phi_int_s < 0.0
+    # Determine effective threshold
+    if mask_threshold is not None:
+        _thr_si = mask_threshold
+    elif mask_negative:
+        _thr_si = _DEFAULT_MASK_THRESHOLD
+    else:
+        _thr_si = None
+    if _thr_si is not None:
+        # Convert SI threshold to pre-normalized units
+        mask &= phi_int_s <= (_thr_si * PRENORM_PHI1)
 
     # Step 5: Weights
     X_grid, Y_grid = np.meshgrid(x_rel, y_rel)

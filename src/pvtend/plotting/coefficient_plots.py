@@ -41,7 +41,7 @@ def plot_coefficient_curves(
         "beta": r"$\beta$ (intensification) [s$^{-1}$]",
         "ax": r"$\alpha_x$ (zonal propagation) [m/s]",
         "ay": r"$\alpha_y$ (meridional propagation) [m/s]",
-        "gamma": r"$\gamma$ (deformation) [s$^{-1}$]",
+        "gamma": r"$\gamma$ (deformation) [m^2s$^{-1}$]",
     }
     default_colors = {
         "beta": "C0",

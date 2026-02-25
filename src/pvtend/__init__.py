@@ -25,7 +25,7 @@ from pvtend._version import __version__
 from pvtend.grid import NHGrid, default_nh_grid, EventPatch
 from pvtend.constants import (
     R_EARTH, OMEGA_E, G0, R_DRY, KAPPA, H_SCALE,
-    SP19_DRY_FRACTION,
+    SP19_DRY_FRACTION, MASK_PV_THRESHOLD,
 )
 
 # Derivatives and climatology
@@ -58,7 +58,7 @@ __all__ = [
     "NHGrid", "default_nh_grid", "EventPatch",
     # Constants
     "R_EARTH", "OMEGA_E", "G0", "R_DRY", "KAPPA", "H_SCALE",
-    "SP19_DRY_FRACTION",
+    "SP19_DRY_FRACTION", "MASK_PV_THRESHOLD",
     # Derivatives
     "ddx", "ddy", "ddp", "ddt",
     # Climatology

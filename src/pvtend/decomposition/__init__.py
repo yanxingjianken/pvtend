@@ -14,6 +14,7 @@ from .basis import (
     PRENORM_PHI3,
     PRENORM_PHI4,
 )
+from ..constants import MASK_PV_THRESHOLD
 from .projection import project_field, collect_term_fields
 from .smoothing import gaussian_smooth_nan, fourier_lowpass_nan
 
@@ -28,4 +29,5 @@ __all__ = [
     "PRENORM_PHI2",
     "PRENORM_PHI3",
     "PRENORM_PHI4",
+    "MASK_PV_THRESHOLD",
 ]

@@ -23,6 +23,10 @@ LAT_QG_POLAR: float = 80.0        # QG taper: polar taper start [deg]
 DEFAULT_LEVELS: list[int] = [1000, 850, 700, 500, 400, 300, 250, 200, 100]
 WAVG_LEVELS: list[int] = [300, 250, 200]
 
+# --- Mask threshold for negative PV anomaly region ---
+# Only grid points with q' < 0 (SI) are included in the orthogonal-basis mask.
+MASK_PV_THRESHOLD: float = 0.0   # [PVU in SI]  (strict < 0)
+
 # --- Climatology ---
 CLIM_VARIABLES: list[str] = ["u", "v", "w", "t", "pv", "z"]
 MONTH_ABBREVS: list[str] = [
