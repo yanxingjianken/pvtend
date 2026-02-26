@@ -60,6 +60,9 @@ from pvtend.composites import CompositeState, load_composite_state
 # Tendency computation
 from pvtend.tendency import TendencyComputer, TendencyConfig
 
+# Plotting (composite explorer + baroclinic)
+from pvtend.plotting import plot_var, plot_baroclinic_tilt
+
 __all__ = [
     "__version__",
     # Grid
@@ -87,4 +90,6 @@ __all__ = [
     "interp_event_fields_to_theta", "interp_event_field_to_single_theta",
     # Tendency
     "TendencyComputer", "TendencyConfig",
+    # Plotting
+    "plot_var", "plot_baroclinic_tilt",
 ]

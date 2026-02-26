@@ -390,10 +390,82 @@ Plotting
 
 Publication-quality visualisation tools for PV tendency analysis.
 
+Basis & coefficient plots
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
 .. autosummary::
    :toctree: generated/
 
    plotting.plot_four_basis
+   plotting.plot_basis_with_contours
    plotting.plot_coefficient_curves
    plotting.plot_field_2d
    plotting.plot_wind_overlay
+
+
+.. _composite-explorer:
+
+Composite explorer
+~~~~~~~~~~~~~~~~~~
+
+:func:`~pvtend.plotting.plot_var` is a **self-contained** single-variable
+composite viewer that loads NPZ events, computes a bootstrap significance
+mask (N = 1000, 95 % CI by default), and optionally projects onto the
+dh − 1 orthogonal basis.
+
+**Two layout modes:**
+
+* ``projection=False`` → **2-panel** figure: composite mean + hatched
+  bootstrap significance.
+* ``projection=True``  → **6-panel** figure: adds 2 × 2 projection rows
+  (INT / PRP / DEF / Residual) with β, αₓ, αy, γ in the subtitle.
+
+**Supported options:**
+
+.. list-table::
+   :widths: 20 50
+   :header-rows: 1
+
+   * - Parameter
+     - Description
+   * - ``data_root``
+     - Path to composite archive (blocking **or** PRP)
+   * - ``stage``
+     - ``"onset"`` / ``"peak"`` / ``"decay"``
+   * - ``dh``
+     - Lifecycle hour offset (any integer)
+   * - ``level``
+     - ``"wavg"`` or int hPa (e.g. 200, 500)
+   * - ``var_spec``
+     - ``str``, ``list[str]`` (``'-'``-negation), or ``callable(event)``
+   * - ``projection``
+     - ``True`` for 6-panel, ``False`` for 2-panel
+
+Helper functions :func:`~pvtend.plotting.load_events`,
+:func:`~pvtend.plotting.get_field`, and
+:func:`~pvtend.plotting.bootstrap_sig` are also public so notebooks can
+do ad-hoc analysis without re-implementing loaders.
+
+.. autosummary::
+   :toctree: generated/
+
+   plotting.plot_var
+   plotting.load_events
+   plotting.get_field
+   plotting.bootstrap_sig
+
+
+.. _baroclinic-tilt:
+
+Baroclinic tilt overlay
+~~~~~~~~~~~~~~~~~~~~~~~
+
+:func:`~pvtend.plotting.plot_baroclinic_tilt` shows the **westward tilt
+with height** characteristic of baroclinic blocking by overlaying
+upper-level v′ (bold black contours, significant only) on lower-level v′
+(blue-red shading).  Panels are generated per lifecycle stage.
+
+.. autosummary::
+   :toctree: generated/
+
+   plotting.plot_baroclinic_tilt
