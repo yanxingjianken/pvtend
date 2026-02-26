@@ -41,7 +41,7 @@ html_context = {
     "github_version": "main",
     "conf_py_path": "/docs/",
 }
-html_static_path = []
+html_static_path = ["_static"]
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3/", None),

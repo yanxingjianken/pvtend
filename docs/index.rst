@@ -14,6 +14,15 @@ pressure-level data onto physically meaningful components using an orthogonal
 basis framework.  This is the Part I work of Yan et al. (in prep.) about
 blocking lifecycle analyses on onset, peak, decay stages.
 
+.. image:: _static/reconstruction_demo.png
+   :alt: Idealized four-basis reconstruction demo
+   :width: 100%
+   :align: center
+
+*Idealized validation: a Gaussian PV anomaly with prescribed propagation,
+intensification, and deformation is decomposed into four orthogonal bases
+and reconstructed with near-zero residual.*
+
 Features
 --------
 
