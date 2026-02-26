@@ -4,19 +4,19 @@
 [![Documentation](https://readthedocs.org/projects/pvtend/badge/?version=latest)](https://pvtend.readthedocs.io/en/latest/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**PV tendency decomposition for atmospheric blocking and precursor reverse-flow (PRP) event lifecycle analysis.**
+**PV tendency decomposition for atmospheric blocking, propagating anticyclones, and all synoptic-scale cyclonic event lifecycle analysis.**
 
-`pvtend` diagnoses the growth, propagation, and decay of mid-latitude weather events by decomposing potential vorticity (PV) tendencies on ERA5 pressure-level data into physically meaningful components using an orthogonal basis framework.
+`pvtend` diagnoses the growth, propagation, and decay of mid-latitude weather events by decomposing potential vorticity (PV) tendencies from ERA5 pressure-level data onto physically meaningful components using an orthogonal basis framework. This is the Part I work of Yan et al. (in prep.) about blocking lifecycle analyses on onset, peak, decay stages.
 
 ### Event catalogues
 
 Blocking and PRP-high events are identified as persistent anticyclonic anomalies in 500 hPa geopotential height.
-**TempestExtremes** tracks contiguous Z500 anomaly features that exceed a fixed threshold for ≥5 days, producing a CSV catalogue with columns for event ID, centre lat/lon, onset/peak/decay timestamps, and area.
-The CSV is the single input for `pvtend-pipeline compute`, which extracts event-centred patches and runs the full PV-tendency decomposition for each event in the catalogue.
+We are using [**TempestExtremes** v2.1](https://gmd.copernicus.org/articles/14/5023/2021/) to track contiguous Z500 anomaly features that exceed a fixed threshold for ≥5 days, producing CSV catalogues with columns for event ID, centre lat/lon, onset/peak/decay timestamps, and area. Following the threshold as in [Drouard et al. (2021)](https://agupubs.onlinelibrary.wiley.com/doi/abs/10.1029/2020JD034082), we separate the tracked features into blocking and propagating (prp) high pressure systems.
+The CSVs are the inputs for `pvtend-pipeline compute`, which extracts event-centred patches and runs the full PV-tendency decomposition for each event in the blocking/prp catalogue.
 
 ## Features
 
-- **PV tendency computation**: Advection, stretching, diabatic, and residual terms
+- **PV tendency computation**: RHS has zonal advection, baroclinic counter propagation, vertical advection, and approximated diabatic heating terms.
 - **QG omega solver**: Hoskins Q-vector formulation with **two methods**: FFT+Thomas (default, fast) and 3-D direct/iterative (BiCGSTAB+ILU, full horizontal Laplacian). Optional `center_lat` for dynamic f₀ (Li & O'Gorman 2020).
 - **Helmholtz decomposition**: 4 backends (direct, FFT, DCT, SOR) for limited-area domains
 - **Moist/dry omega splitting**: Decomposes vertical motion into moist and dry contributions
@@ -112,8 +112,9 @@ src/pvtend/
 ├── derivatives.py       # Finite difference operators
 ├── climatology.py       # Fourier-filtered climatology
 ├── omega.py             # QG omega solver (FFT+Thomas or 3-D direct)
-├── helmholtz.py         # Helmholtz decomposition
+├── helmholtz.py         # Helmholtz decomposition (direct/FFT/DCT/SOR)
 ├── moist_dry.py         # Moist/dry omega split
+├── isentropic.py        # Isentropic PV-tendency diagnostics
 ├── tendency.py          # Main pipeline class
 ├── rwb.py               # Rossby wave breaking
 ├── composites.py        # Composite lifecycle
@@ -126,7 +127,9 @@ src/pvtend/
 │   ├── __init__.py
 │   ├── basis_plots.py
 │   ├── coefficient_plots.py
-│   └── field_plots.py
+│   ├── field_plots.py
+│   ├── composite_explorer.py  # plot_var: single-variable composite explorer with bootstrap
+│   └── baroclinic.py          # plot_baroclinic_tilt: two-level v′ overlay
 └── io/                  # File I/O
     ├── __init__.py
     ├── era5.py
@@ -136,7 +139,7 @@ src/pvtend/
 
 ## Example Notebooks
 
-Notebooks using **real ERA5 blocking event data** from the `outputs_tmp` pipeline:
+Notebooks using **real ERA5 blocking event data** from the `composite_blocking_tempest`, `composite_prp_tempest` (single event npz), `tempest_extreme_4_basis/outputs`, and `tempest_extreme_4_basis/outputs_prp` (composite pkl) pipeline:
 
 | Notebook | Description |
 |----------|-------------|
@@ -144,9 +147,12 @@ Notebooks using **real ERA5 blocking event data** from the `outputs_tmp` pipelin
 | [`01_rwb_and_derivatives`](examples/01_rwb_and_derivatives.ipynb) | Grid setup, `ddx`/`ddy`/`ddp` derivatives, RWB detection on a real event |
 | [`02_helmholtz_and_qg_omega`](examples/02_helmholtz_and_qg_omega.ipynb) | 3-D Helmholtz decomposition, QG omega (FFT vs 3-D direct), moist/dry ω split |
 | [`03_four_basis_projection`](examples/03_four_basis_projection.ipynb) | Orthogonal basis (Φ₁–Φ₄), project dq'/dt → β/αx/αy/γ, lifecycle curves |
+| [`04_single_var_composite`](examples/04_single_var_composite.ipynb) | Single-variable composite explorer on pressure levels using `pvtend.plotting.plot_var` |
+| [`04_single_var_isentropic_composite`](examples/04_single_var_isentropic_composite.ipynb) | Same as 04 but for isentropic-level composites |
 | [`05_grouped_terms_bootstrap`](examples/05_grouped_terms_bootstrap.ipynb) | Grouped PV-tendency terms, bootstrap resampling & significance |
-| [`06_baroclinic_structure`](examples/06_baroclinic_structure.ipynb) | 3-D composite PV anomaly, lon–p cross-sections, 2-PVU tropopause |
-| [`07_facet_blocking_vs_prp`](examples/07_facet_blocking_vs_prp.ipynb) | Facet comparison of blocking vs PRP lifecycle coefficients |
+| [`05_stacked_bar_beta`](examples/05_stacked_bar_beta.ipynb) | Stacked-bar β decomposition by PV-tendency term across lifecycle hours |
+| [`06_baroclinic_structure`](examples/06_baroclinic_structure.ipynb) | 3-D composite PV anomaly, lon–p cross-sections, 2-PVU tropopause, v′ tilt via `plot_baroclinic_tilt` |
+| [`07_facet_blocking_vs_prp`](examples/07_facet_blocking_vs_prp.ipynb) | Facet comparison of blocking vs PRP: bar charts with bootstrap significance, shared-cbar spatial maps, baroclinic tilt |
 
 ## Testing
 
