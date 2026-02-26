@@ -45,6 +45,14 @@ from pvtend.decomposition import (
     collect_term_fields,
 )
 
+# Isentropic interpolation
+from pvtend.isentropic import (
+    isentropic_interpolation,
+    isentropic_interpolation_pressure,
+    interp_event_fields_to_theta,
+    interp_event_field_to_single_theta,
+)
+
 # RWB and composites
 from pvtend.rwb import RWBConfig, detect_rwb_events
 from pvtend.composites import CompositeState, load_composite_state
@@ -74,6 +82,9 @@ __all__ = [
     "RWBConfig", "detect_rwb_events",
     # Composites
     "CompositeState", "load_composite_state",
+    # Isentropic
+    "isentropic_interpolation", "isentropic_interpolation_pressure",
+    "interp_event_fields_to_theta", "interp_event_field_to_single_theta",
     # Tendency
     "TendencyComputer", "TendencyConfig",
 ]
