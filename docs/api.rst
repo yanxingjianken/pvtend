@@ -88,6 +88,17 @@ Composites
    CompositeState
    load_composite_state
 
+Isentropic Interpolation
+-------------------------
+
+.. autosummary::
+   :toctree: generated/
+
+   isentropic_interpolation
+   isentropic_interpolation_pressure
+   interp_event_fields_to_theta
+   interp_event_field_to_single_theta
+
 Tendency Pipeline
 -----------------
 
