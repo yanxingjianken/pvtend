@@ -1,6 +1,10 @@
 pvtend: PV Tendency Decomposition
 =================================
 
+|version| · `Source on GitHub <https://github.com/yanxingjianken/pvtend>`_ · `README <https://github.com/yanxingjianken/pvtend#readme>`_
+
+.. |version| replace:: **v\ |release|**
+
 **PV tendency decomposition for atmospheric blocking, propagating anticyclones,
 and all synoptic-scale cyclonic event lifecycle analysis.**
 

@@ -31,6 +31,16 @@ templates_path = ["_templates"]
 exclude_patterns = ["_build", "**.ipynb_checkpoints"]
 
 html_theme = "sphinx_rtd_theme"
+html_theme_options = {
+    "display_version": True,
+}
+html_context = {
+    "display_github": True,
+    "github_user": "yanxingjianken",
+    "github_repo": "pvtend",
+    "github_version": "main",
+    "conf_py_path": "/docs/",
+}
 html_static_path = []
 
 intersphinx_mapping = {
