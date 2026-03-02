@@ -14,14 +14,29 @@ pressure-level data onto physically meaningful components using an orthogonal
 basis framework.  This is the Part I work of Yan et al. (in prep.) about
 blocking lifecycle analyses on onset, peak, decay stages.
 
-.. image:: _static/reconstruction_demo.png
-   :alt: Idealized four-basis reconstruction demo
-   :width: 100%
-   :align: center
+Gallery
+-------
 
-*Idealized validation: a Gaussian PV anomaly with prescribed propagation,
-intensification, and deformation is decomposed into four orthogonal bases
-and reconstructed with near-zero residual.*
+.. list-table::
+   :widths: 50 50
+   :header-rows: 0
+
+   * - .. image:: _static/reconstruction_demo.png
+          :alt: Idealized four-basis reconstruction demo
+          :width: 100%
+
+       *Idealized validation: a Gaussian PV anomaly with prescribed
+       propagation, intensification, and deformation is decomposed into
+       four orthogonal bases and reconstructed with near-zero residual.*
+
+     - .. image:: _static/lifecycle_demo.gif
+          :alt: Real blocking lifecycle decomposition
+          :width: 100%
+
+       *Real ERA5 blocking event (track 425) — animated lifecycle showing
+       total PV on a cartopy map (left) and the four projected basis
+       components (right) evolving from 13 h pre-onset to 12 h post-onset. 
+       The analysis is done on a weighted average surface across 300, 250, 200 hPa levels.*
 
 Features
 --------

@@ -8,6 +8,25 @@
 
 `pvtend` diagnoses the growth, propagation, and decay of mid-latitude weather events by decomposing potential vorticity (PV) tendencies from ERA5 pressure-level data onto physically meaningful components using an orthogonal basis framework. This is the Part I work of Yan et al. (in prep.) about blocking lifecycle analyses on onset, peak, decay stages.
 
+## Gallery
+
+<table>
+<tr>
+<td width="50%" align="center">
+<img src="docs/_static/reconstruction_demo.png" alt="Idealized four-basis reconstruction" width="100%"/><br/>
+<em>Idealized validation — a Gaussian PV anomaly with prescribed propagation,
+intensification, and deformation is decomposed into four orthogonal bases
+and reconstructed with near-zero residual.</em>
+</td>
+<td width="50%" align="center">
+<img src="docs/_static/lifecycle_demo.gif" alt="Real blocking lifecycle decomposition" width="100%"/><br/>
+<em>Real ERA5 blocking event (track 425) — animated lifecycle showing
+total PV on a cartopy map (left) and the four projected basis components
+(right) evolving from 13 h pre-onset to 12 h post-onset.</em>
+</td>
+</tr>
+</table>
+
 ### Event catalogues
 
 Blocking and PRP-high events are identified as persistent anticyclonic anomalies in 500 hPa geopotential height.
