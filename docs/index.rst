@@ -38,6 +38,20 @@ Gallery
        components (right) evolving from 13 h pre-onset to 12 h post-onset. 
        The analysis is done on a weighted average surface across 300, 250, 200 hPa levels.*
 
+Event catalogues
+~~~~~~~~~~~~~~~~
+
+Blocking and PRP-high events are identified as persistent anticyclonic anomalies
+in 500 hPa geopotential height using
+`TempestExtremes v2.1 <https://gmd.copernicus.org/articles/14/5023/2021/>`_
+to track contiguous Z500 anomaly features that exceed a fixed threshold for
+≥5 days, producing CSV catalogues with columns for event ID, centre lat/lon,
+onset/peak/decay timestamps, and area.
+
+**Sample catalogue (ERA5, 1990–2020 blocking):**
+:download:`ERA5_TempestExtremes_z500_anticyclone_blocking.csv <_static/ERA5_TempestExtremes_z500_anticyclone_blocking.csv>`
+(`view on GitHub <https://github.com/yanxingjianken/pvtend/blob/main/docs/_static/ERA5_TempestExtremes_z500_anticyclone_blocking.csv>`__)
+
 Features
 --------
 

@@ -31,6 +31,9 @@ total PV on a cartopy map (left) and the four projected basis components
 
 Blocking and PRP-high events are identified as persistent anticyclonic anomalies in 500 hPa geopotential height.
 We are using [**TempestExtremes** v2.1](https://gmd.copernicus.org/articles/14/5023/2021/) to track contiguous Z500 anomaly features that exceed a fixed threshold for ≥5 days, producing CSV catalogues with columns for event ID, centre lat/lon, onset/peak/decay timestamps, and area. Following the threshold as in [Drouard et al. (2021)](https://agupubs.onlinelibrary.wiley.com/doi/abs/10.1029/2020JD034082), we separate the tracked features into blocking and propagating (prp) high pressure systems.
+
+> **Sample catalogue (ERA5, 1990–2020 blocking):** [`ERA5_TempestExtremes_z500_anticyclone_blocking.csv`](https://github.com/yanxingjianken/pvtend/raw/main/docs/_static/ERA5_TempestExtremes_z500_anticyclone_blocking.csv)
+
 The CSVs are the inputs for `pvtend-pipeline compute`, which extracts event-centred patches and runs the full PV-tendency decomposition for each event in the blocking/prp catalogue.
 
 ## Features
