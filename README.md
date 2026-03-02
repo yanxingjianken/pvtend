@@ -22,7 +22,8 @@ and reconstructed with near-zero residual.</em>
 <img src="docs/_static/lifecycle_demo.gif" alt="Real blocking lifecycle decomposition" width="100%"/><br/>
 <em>Real ERA5 blocking event (track 425) — animated lifecycle showing
 total PV on a cartopy map (left) and the four projected basis components
-(right) evolving from 13 h pre-onset to 12 h post-onset.</em>
+(right) evolving from 13 h pre-onset to 12 h post-onset.
+The analysis is done on a weighted average surface across 300, 250, 200 hPa levels.</em>
 </td>
 </tr>
 </table>

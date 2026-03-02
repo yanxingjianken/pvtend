@@ -17,26 +17,60 @@ blocking lifecycle analyses on onset, peak, decay stages.
 Gallery
 -------
 
-.. list-table::
-   :widths: 50 50
-   :header-rows: 0
+.. raw:: html
 
-   * - .. image:: _static/reconstruction_demo.png
-          :alt: Idealized four-basis reconstruction demo
-          :width: 100%
+   <style>
+   .gallery-carousel { position: relative; max-width: 90%; margin: 0 auto 1.5em; }
+   .gallery-slide { display: none; text-align: center; }
+   .gallery-slide.active { display: block; }
+   .gallery-slide img { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; }
+   .gallery-slide .caption { font-style: italic; font-size: 0.92em; margin-top: 0.4em; color: #555; }
+   .gallery-nav { text-align: center; margin-top: 0.6em; }
+   .gallery-nav button { font-size: 1.1em; padding: 0.3em 1.2em; margin: 0 0.4em;
+     cursor: pointer; border: 1px solid #aaa; border-radius: 4px; background: #f7f7f7; }
+   .gallery-nav button:hover { background: #e0e0e0; }
+   .gallery-counter { text-align: center; font-weight: bold; margin-bottom: 0.3em; font-size: 0.95em; }
+   </style>
 
-       *Idealized validation: a Gaussian PV anomaly with prescribed
-       propagation, intensification, and deformation is decomposed into
-       four orthogonal bases and reconstructed with near-zero residual.*
+   <div class="gallery-carousel" id="pvtend-gallery">
+     <div class="gallery-counter" id="gallery-counter">1 / 2</div>
+     <div class="gallery-slide active" data-idx="0">
+       <img src="_static/reconstruction_demo.png"
+            alt="Idealized four-basis reconstruction demo"/>
+       <div class="caption">
+         Idealized validation: a Gaussian PV anomaly with prescribed
+         propagation, intensification, and deformation is decomposed into
+         four orthogonal bases and reconstructed with near-zero residual.
+       </div>
+     </div>
+     <div class="gallery-slide" data-idx="1">
+       <img src="_static/lifecycle_demo.gif"
+            alt="Real blocking lifecycle decomposition"/>
+       <div class="caption">
+         Real ERA5 blocking event (track 425) &mdash; animated lifecycle showing
+         total PV on a cartopy map (left) and the four projected basis
+         components (right) evolving from 13&thinsp;h pre-onset to 12&thinsp;h post-onset.
+         The analysis is done on a weighted average surface across 300, 250, 200&thinsp;hPa levels.
+       </div>
+     </div>
+     <div class="gallery-nav">
+       <button onclick="pvtGallery(-1)">&larr; Prev</button>
+       <button onclick="pvtGallery(1)">Next &rarr;</button>
+     </div>
+   </div>
 
-     - .. image:: _static/lifecycle_demo.gif
-          :alt: Real blocking lifecycle decomposition
-          :width: 100%
-
-       *Real ERA5 blocking event (track 425) — animated lifecycle showing
-       total PV on a cartopy map (left) and the four projected basis
-       components (right) evolving from 13 h pre-onset to 12 h post-onset. 
-       The analysis is done on a weighted average surface across 300, 250, 200 hPa levels.*
+   <script>
+   (function(){
+     var idx = 0, slides = document.querySelectorAll('#pvtend-gallery .gallery-slide'),
+         counter = document.getElementById('gallery-counter');
+     window.pvtGallery = function(d) {
+       slides[idx].classList.remove('active');
+       idx = (idx + d + slides.length) % slides.length;
+       slides[idx].classList.add('active');
+       counter.textContent = (idx+1) + ' / ' + slides.length;
+     };
+   })();
+   </script>
 
 Event catalogues
 ~~~~~~~~~~~~~~~~
