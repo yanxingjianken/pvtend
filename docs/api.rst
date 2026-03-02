@@ -264,18 +264,66 @@ RWB Detection
 -------------
 
 Identifies Rossby Wave Breaking events by detecting overturning (folding)
-of geopotential-height or PV contours on event-centred patches then
-classifying them as **Anticyclonic Wave Breaking (AWB)** or **Cyclonic
-Wave Breaking (CWB)** using a MATLAB-consistent path-order algorithm.
+of geopotential-height or PV contours and classifying them as
+**Anticyclonic Wave Breaking (AWB)** or **Cyclonic Wave Breaking (CWB)**.
 
-Algorithm overview:
+Two classification methods are available, selected via the ``method``
+argument of :func:`detect_rwb_events`:
 
-1. Sample the longest contours across multiple Z / PV levels.
-2. Detect overturning via meridian intersection counting.
-3. Classify AWB / CWB using the path-order of max / min latitude
-   intersections.
+.. list-table:: Classification methods
+   :header-rows: 1
+   :widths: 15 45 40
+
+   * - ``method``
+     - Algorithm
+     - When to use
+   * - ``"bay"`` *(default, recommended)*
+     - MATLAB-consistent **path-order** of max / min latitude
+       intersections across sample meridians.
+     - **Recommended for circumpolar-cropped contours** and standard
+       event-centred patches.  Reproduces Peters & Waugh (1996).
+   * - ``"tilt"``
+     - **Centerline-tilt slope** of the overturning envelope.
+       Slope < −0.15 → AWB; slope > +0.15 → CWB; otherwise UNK.
+     - Alternative metric useful for sensitivity analysis. The ±0.15
+       dead-zone threshold is stored in :data:`TILT_SLOPE_THRESHOLD`.
+
+Circumpolar-first approach (recommended)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When analysing RWB on cropped patches the recommended workflow is:
+
+1. Extract **circumpolar contours** from the full Northern-Hemisphere
+   Z field using :func:`circumpolar_contours`.  This finds contours
+   that span ≥ 355° longitude (i.e. truly circumpolar), mimicking the
+   MATLAB ``blue_circumcontour`` approach with periodic doubling.
+2. **Crop** each circumpolar contour to the event-centred patch with
+   :func:`crop_contour_to_patch`, returning Δlon/Δlat coordinates.
+3. Pass the full-NH field (``field_nh``, ``lat_nh``, ``lon_nh``) and
+   patch centre (``centre_lat``, ``centre_lon``) to
+   :func:`detect_rwb_events`, which performs steps 1–2 automatically.
+
+If no full-NH field is supplied, :func:`detect_rwb_events` falls back to
+:func:`sampled_longest_contours` on the local patch (legacy mode).
+
+Algorithm overview
+^^^^^^^^^^^^^^^^^^
+
+1. Obtain contours (circumpolar-first or legacy local-patch sampling).
+2. Detect overturning via meridian intersection counting
+   (:func:`overturn_x_intervals`).
+3. Classify AWB / CWB using the chosen method
+   (:func:`classify_bay` or :func:`classify_tilt`).
 4. Apply centroid-x gates to filter spurious detections.
 5. Construct envelope polygons for visualisation.
+
+Multi-level reduction
+^^^^^^^^^^^^^^^^^^^^^
+
+For 3-D (nlev × nlat × nlon) inputs, :func:`reduce_to_2d` extracts a
+single pressure level or computes an exponential height-weighted vertical
+average (``level_mode="wavg"``).  The weighting uses
+:func:`weighted_mean_2d` with the atmospheric e-folding height scale.
 
 **References:** Peters D, Waugh D W (1996) *J. Atmos. Sci.* 53,
 3013–3031.  Thorncroft C D, Hoskins B J, McIntyre M E (1993)
@@ -286,6 +334,18 @@ Algorithm overview:
 
    RWBConfig
    detect_rwb_events
+   circumpolar_contours
+   crop_contour_to_patch
+   classify_bay
+   classify_tilt
+   centerline_tilt
+   overturn_x_intervals
+   envelope_polygon
+   sampled_longest_contours
+   reduce_to_2d
+   weighted_mean_2d
+   nearest_level_index
+   TILT_SLOPE_THRESHOLD
 
 
 Composites

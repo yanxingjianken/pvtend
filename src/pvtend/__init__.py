@@ -54,7 +54,15 @@ from pvtend.isentropic import (
 )
 
 # RWB and composites
-from pvtend.rwb import RWBConfig, detect_rwb_events
+from pvtend.rwb import (
+    RWBConfig, detect_rwb_events,
+    circumpolar_contours, crop_contour_to_patch,
+    classify_bay, classify_tilt, centerline_tilt,
+    overturn_x_intervals, envelope_polygon,
+    sampled_longest_contours,
+    reduce_to_2d, weighted_mean_2d, nearest_level_index,
+    TILT_SLOPE_THRESHOLD,
+)
 from pvtend.composites import CompositeState, load_composite_state
 
 # Tendency computation
@@ -83,6 +91,12 @@ __all__ = [
     "project_field", "collect_term_fields",
     # RWB
     "RWBConfig", "detect_rwb_events",
+    "circumpolar_contours", "crop_contour_to_patch",
+    "classify_bay", "classify_tilt", "centerline_tilt",
+    "overturn_x_intervals", "envelope_polygon",
+    "sampled_longest_contours",
+    "reduce_to_2d", "weighted_mean_2d", "nearest_level_index",
+    "TILT_SLOPE_THRESHOLD",
     # Composites
     "CompositeState", "load_composite_state",
     # Isentropic

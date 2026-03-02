@@ -25,6 +25,7 @@
    
       ~RWBConfig.area_min_deg2
       ~RWBConfig.base_contour_color
+      ~RWBConfig.circumpolar_min_lon_span
       ~RWBConfig.color_awb
       ~RWBConfig.color_cwb
       ~RWBConfig.contour_base_lw

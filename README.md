@@ -21,7 +21,7 @@ The CSVs are the inputs for `pvtend-pipeline compute`, which extracts event-cent
 - **Helmholtz decomposition**: 4 backends (direct, FFT, DCT, SOR) for limited-area domains
 - **Moist/dry omega splitting**: Decomposes vertical motion into moist and dry contributions
 - **Orthogonal basis decomposition**: Projects PV tendency onto intensification (β), propagation (αx, αy), and deformation (γ) modes
-- **RWB detection**: Anticyclonic/cyclonic Rossby wave breaking classification
+- **RWB detection**: Two classification methods — **bay** (path-order, recommended with circumpolar-cropped contours) and **tilt** (centerline slope ±0.15 dead zone). Circumpolar-first contour extraction for robust NH analysis.
 - **Composite lifecycle**: Multi-stage ensemble averaging with onset/peak/decay staging
 - **CLI pipeline**: End-to-end processing via `pvtend-pipeline` command
 
@@ -116,7 +116,7 @@ src/pvtend/
 ├── moist_dry.py         # Moist/dry omega split
 ├── isentropic.py        # Isentropic PV-tendency diagnostics
 ├── tendency.py          # Main pipeline class
-├── rwb.py               # Rossby wave breaking
+├── rwb.py               # RWB detection (bay & tilt methods, circumpolar-first)
 ├── composites.py        # Composite lifecycle
 ├── decomposition/       # Orthogonal basis framework
 │   ├── __init__.py
