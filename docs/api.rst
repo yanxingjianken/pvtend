@@ -421,11 +421,99 @@ Orchestrates the full per-event computation:
 :class:`TendencyComputer` is parameterised by event type
 (blocking / PRP), eliminating code duplication between scripts.
 
+Helper functions
+~~~~~~~~~~~~~~~~
+
 .. autosummary::
    :toctree: generated/
 
    TendencyConfig
    TendencyComputer
+
+.. currentmodule:: pvtend.tendency
+
+.. autosummary::
+   :toctree: generated/
+
+   load_climatology
+   month_keys_for_window
+   open_months_ds
+   with_derivs_for_window
+   get_tracked_center
+
+.. currentmodule:: pvtend
+
+
+.. _classify:
+
+RWB Classification (Pass 1)
+----------------------------
+
+Reads the ``dh=0`` NPZ snapshots produced by :class:`TendencyComputer`,
+classifies each event as **AWB** (Anticyclonic Wave Breaking),
+**CWB** (Cyclonic Wave Breaking), or **NEUTRAL** at multiple pressure
+levels, and emits a "variant tracksets" PKL.
+
+The classification uses :func:`sampled_longest_contours` on Z-field
+contours followed by :func:`overturn_x_intervals` and
+:func:`classify_bay`, with a tilt-based fallback.  A multi-level
+threshold is applied: the event must be classified consistently across
+at least ``classify_threshold`` pressure levels to qualify.
+
+The CLI subcommand is ``pvtend-pipeline classify``.
+
+.. autosummary::
+   :toctree: generated/
+
+   ClassifyConfig
+   ClassifyResult
+
+.. currentmodule:: pvtend.classify
+
+.. autosummary::
+   :toctree: generated/
+
+   run_pass1
+
+.. currentmodule:: pvtend
+
+
+.. _composite-builder:
+
+Variant-aware Composite Builder (Pass 2)
+-----------------------------------------
+
+Accumulates per-event NPZ fields into running sums grouped by event
+stage (onset / peak / decay), relative hour offset, and **RWB variant**.
+
+Ten variants are supported:
+
+* ``original`` — all events (no RWB filter).
+* ``AWB_onset``, ``AWB_peak``, ``AWB_decay``
+* ``CWB_onset``, ``CWB_peak``, ``CWB_decay``
+* ``NEUTRAL_onset``, ``NEUTRAL_peak``, ``NEUTRAL_decay``
+
+:class:`CompositeResult` provides :meth:`~CompositeResult.mean_3d` and
+:meth:`~CompositeResult.reduce_2d` methods for rapid access to
+composite-mean fields, including exponential height-weighted vertical
+averages (``level_mode="wavg"``).
+
+The CLI subcommand is ``pvtend-pipeline composite``.
+
+.. autosummary::
+   :toctree: generated/
+
+   CompositeConfig
+   CompositeResult
+
+.. currentmodule:: pvtend.composite_builder
+
+.. autosummary::
+   :toctree: generated/
+
+   build_composites
+
+.. currentmodule:: pvtend
 
 
 I/O

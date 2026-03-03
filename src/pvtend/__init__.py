@@ -68,6 +68,12 @@ from pvtend.composites import CompositeState, load_composite_state
 # Tendency computation
 from pvtend.tendency import TendencyComputer, TendencyConfig
 
+# RWB classification (Pass 1) and composite builder (Pass 2)
+from pvtend.classify import ClassifyConfig, ClassifyResult, run_pass1
+from pvtend.composite_builder import (
+    CompositeConfig, CompositeResult, build_composites,
+)
+
 # Plotting (composite explorer + baroclinic)
 from pvtend.plotting import plot_var, plot_baroclinic_tilt
 
@@ -97,13 +103,16 @@ __all__ = [
     "sampled_longest_contours",
     "reduce_to_2d", "weighted_mean_2d", "nearest_level_index",
     "TILT_SLOPE_THRESHOLD",
-    # Composites
+    # Composites (legacy)
     "CompositeState", "load_composite_state",
     # Isentropic
     "isentropic_interpolation", "isentropic_interpolation_pressure",
     "interp_event_fields_to_theta", "interp_event_field_to_single_theta",
     # Tendency
     "TendencyComputer", "TendencyConfig",
+    # Classify (Pass 1) + Composite Builder (Pass 2)
+    "ClassifyConfig", "ClassifyResult", "run_pass1",
+    "CompositeConfig", "CompositeResult", "build_composites",
     # Plotting
     "plot_var", "plot_baroclinic_tilt",
 ]

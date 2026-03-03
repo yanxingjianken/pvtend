@@ -94,19 +94,32 @@ print(f"β = {result['beta']:.3e}")  # intensification rate
 ### CLI Pipeline
 
 ```bash
-# Step 1: Compute PV tendencies
+# Step 1: Compute PV tendencies → per-event NPZ files
 pvtend-pipeline compute \
     --event-type blocking \
     --events-csv events.csv \
     --era5-dir /data/era5/ \
-    --clim-dir /data/climatology/ \
-    --out-dir /data/output/ \
-    --skip-existing
+    --clim-path /data/climatology/era5_hourly_clim.nc \
+    --out-dir /data/composite_blocking_tempest/ \
+    --dh-range=-49:25 --skip-existing
 
-# Step 2: Build composite
+# Step 2: RWB classification → variant tracksets PKL
+pvtend-pipeline classify \
+    --npz-dir /data/composite_blocking_tempest/ \
+    --output /data/outputs/rwb_variant_tracksets.pkl \
+    --stages onset peak decay \
+    --levels 500 400 300 200 --threshold 3
+
+# Step 3: Variant-aware composite accumulation → composite PKL
 pvtend-pipeline composite \
-    --npz-dir /data/output/ \
-    --pkl-out composite.pkl
+    --npz-dir /data/composite_blocking_tempest/ \
+    --rwb-pkl /data/outputs/rwb_variant_tracksets.pkl \
+    --pkl-out /data/outputs/composite.pkl
+
+# Step 4 (optional): Orthogonal-basis decomposition
+pvtend-pipeline decompose \
+    --pkl-in /data/outputs/composite.pkl \
+    --out-dir /data/outputs/decomp/
 ```
 
 ## Workflow
@@ -123,12 +136,13 @@ graph TD
     G --> I[pvtend.helmholtz — Helmholtz decomp.]
     H & I --> J[pvtend.moist_dry — ω splitting]
     G & J --> K[Per-event NPZ patches]
-    K --> L[pvtend.composites — Ensemble mean]
-    L --> M[pvtend.decomposition — Orthogonal basis]
+    K --> L1[pvtend.classify — RWB Pass 1]
+    L1 --> L1a[rwb_variant_tracksets.pkl]
+    K & L1a --> L2[pvtend.composite_builder — Pass 2]
+    L2 --> L2a[composite.pkl]
+    L2a --> M[pvtend.decomposition — Orthogonal basis]
     M --> N[β, αx, αy, γ coefficients]
     N --> O[pvtend.plotting — Publication figures]
-    K --> P[pvtend.rwb — Wave breaking detect]
-    P --> L
 ```
 
 ## Package Structure
@@ -137,7 +151,7 @@ graph TD
 src/pvtend/
 ├── __init__.py          # Public API
 ├── _version.py          # Version
-├── cli.py               # CLI entry point
+├── cli.py               # CLI entry point (compute, classify, composite, decompose)
 ├── constants.py         # Physical constants
 ├── grid.py              # NH grid & event patches
 ├── preprocessing.py     # ERA5 loading & regridding
@@ -147,9 +161,11 @@ src/pvtend/
 ├── helmholtz.py         # Helmholtz decomposition (direct/FFT/DCT/SOR)
 ├── moist_dry.py         # Moist/dry omega split
 ├── isentropic.py        # Isentropic PV-tendency diagnostics
-├── tendency.py          # Main pipeline class
+├── tendency.py          # Main pipeline: data loading, derivatives, cross-terms, NPZ output
+├── classify.py          # RWB classification Pass 1 (AWB/CWB/NEUTRAL → variant PKL)
+├── composite_builder.py # Variant-aware composite accumulation Pass 2
 ├── rwb.py               # RWB detection (bay & tilt methods, circumpolar-first)
-├── composites.py        # Composite lifecycle
+├── composites.py        # Legacy composite lifecycle
 ├── decomposition/       # Orthogonal basis framework
 │   ├── __init__.py
 │   ├── smoothing.py
