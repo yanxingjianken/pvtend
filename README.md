@@ -26,6 +26,15 @@ total PV on a cartopy map (left) and the four projected basis components
 The analysis is done on a weighted average surface across 300, 250, 200 hPa levels.</em>
 </td>
 </tr>
+<tr>
+<td colspan="2" align="center">
+<img src="docs/_static/z_lifecycle_demo.gif" alt="Geopotential-height lifecycle decomposition" width="100%"/><br/>
+<em>Geopotential-height (Z500) variant of the four-basis decomposition
+(track 425) — animated lifecycle showing Z anomaly from the 1990–2020
+hourly climatology, with adaptive prenorm and blockid contour overlay.
+See notebook <code>03z_four_basis_projection_geopotential</code>.</em>
+</td>
+</tr>
 </table>
 
 ### Event catalogues
@@ -170,10 +179,11 @@ Notebooks using **real ERA5 blocking event data** from the `composite_blocking_t
 | [`01_rwb_and_derivatives`](examples/01_rwb_and_derivatives.ipynb) | Grid setup, `ddx`/`ddy`/`ddp` derivatives, RWB detection on a real event |
 | [`02_helmholtz_and_qg_omega`](examples/02_helmholtz_and_qg_omega.ipynb) | 3-D Helmholtz decomposition, QG omega (FFT vs 3-D direct), moist/dry ω split |
 | [`03_four_basis_projection`](examples/03_four_basis_projection.ipynb) | Orthogonal basis (Φ₁–Φ₄), project dq'/dt → β/αx/αy/γ, lifecycle curves |
+| [`03z_four_basis_projection_geopotential`](examples/03z_four_basis_projection_geopotential.ipynb) | ↳ *Supplement*: same 4-basis projection using **geopotential height Z** instead of PV |
 | [`04_single_var_composite`](examples/04_single_var_composite.ipynb) | Single-variable composite explorer on pressure levels using `pvtend.plotting.plot_var` |
-| [`04_single_var_isentropic_composite`](examples/04_single_var_isentropic_composite.ipynb) | Same as 04 but for isentropic-level composites |
-| [`05_grouped_terms_bootstrap`](examples/05_grouped_terms_bootstrap.ipynb) | Grouped PV-tendency terms, bootstrap resampling & significance |
+| [`04i_single_var_isentropic_composite`](examples/04i_single_var_isentropic_composite.ipynb) | ↳ *Supplement*: same as 04 but on **isentropic (θ) surfaces** |
 | [`05_stacked_bar_beta`](examples/05_stacked_bar_beta.ipynb) | Stacked-bar β decomposition by PV-tendency term across lifecycle hours |
+| [`05b_grouped_terms_bootstrap`](examples/05b_grouped_terms_bootstrap.ipynb) | ↳ *Supplement*: grouped PV-tendency terms with **bootstrap resampling & significance** |
 | [`06_baroclinic_structure`](examples/06_baroclinic_structure.ipynb) | 3-D composite PV anomaly, lon–p cross-sections, 2-PVU tropopause, v′ tilt via `plot_baroclinic_tilt` |
 | [`07_facet_blocking_vs_prp`](examples/07_facet_blocking_vs_prp.ipynb) | Facet comparison of blocking vs PRP: bar charts with bootstrap significance, shared-cbar spatial maps, baroclinic tilt |
 

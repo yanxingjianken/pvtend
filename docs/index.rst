@@ -33,7 +33,7 @@ Gallery
    </style>
 
    <div class="gallery-carousel" id="pvtend-gallery">
-     <div class="gallery-counter" id="gallery-counter">1 / 2</div>
+     <div class="gallery-counter" id="gallery-counter">1 / 3</div>
      <div class="gallery-slide active" data-idx="0">
        <img src="_static/reconstruction_demo.png"
             alt="Idealized four-basis reconstruction demo"/>
@@ -51,6 +51,17 @@ Gallery
          total PV on a cartopy map (left) and the four projected basis
          components (right) evolving from 13&thinsp;h pre-onset to 12&thinsp;h post-onset.
          The analysis is done on a weighted average surface across 300, 250, 200&thinsp;hPa levels.
+       </div>
+     </div>
+     <div class="gallery-slide" data-idx="2">
+       <img src="_static/z_lifecycle_demo.gif"
+            alt="Geopotential-height lifecycle decomposition"/>
+       <div class="caption">
+         Geopotential-height (Z500) variant of the four-basis decomposition
+         (track 425) &mdash; animated lifecycle showing Z anomaly from
+         the 1990&ndash;2020 hourly climatology, with adaptive prenorm and
+         blockid contour overlay. See notebook
+         <code>03z_four_basis_projection_geopotential</code>.
        </div>
      </div>
      <div class="gallery-nav">
