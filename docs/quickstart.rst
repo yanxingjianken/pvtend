@@ -50,14 +50,9 @@ visualise them.
    fig.suptitle("Idealized PV evolution and spatial derivatives", fontsize=14)
    plt.show()
 
-|derivatives_plot|
-
-.. |derivatives_plot| raw:: html
-
-   <a href="https://pvtend.readthedocs.io/en/latest/_images/quickstart_derivatives.png">
-     <img src="https://pvtend.readthedocs.io/en/latest/_images/quickstart_derivatives.png"
-          alt="PV fields and spatial derivatives (2×3 panel)" style="width:100%" />
-   </a>
+.. image:: _static/quickstart_derivatives.png
+   :alt: PV fields and spatial derivatives (2×3 panel)
+   :width: 100%
 
 
 Orthogonal basis decomposition
@@ -117,14 +112,9 @@ the PV tendency, and compare the reconstruction with the original.
    fig.suptitle("Basis decomposition — smoothed + Gram-Schmidt", fontsize=14)
    plt.show()
 
-|decomposition_plot|
-
-.. |decomposition_plot| raw:: html
-
-   <a href="https://pvtend.readthedocs.io/en/latest/_images/quickstart_decomposition.png">
-     <img src="https://pvtend.readthedocs.io/en/latest/_images/quickstart_decomposition.png"
-          alt="Orthogonal basis decomposition and reconstruction (2×3 panel)" style="width:100%" />
-   </a>
+.. image:: _static/quickstart_decomposition.png
+   :alt: Orthogonal basis decomposition and reconstruction (2×3 panel)
+   :width: 100%
 
 
 Command-line pipeline
