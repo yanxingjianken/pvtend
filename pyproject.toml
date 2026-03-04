@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pvtend"
-version = "0.7.1"
+version = "0.7.2"
 authors = [
     { name = "Xingjian Yan" },
 ]
@@ -40,6 +40,7 @@ dev = ["pvtend[test,docs,sip]", "pre-commit", "ruff"]
 [project.urls]
 Documentation = "https://pvtend.readthedocs.io/"
 Repository = "https://github.com/yanxingjianken/pvtend"
+PyPI = "https://pypi.org/project/pvtend/"
 "Bug Tracker" = "https://github.com/yanxingjianken/pvtend/issues"
 
 [project.scripts]

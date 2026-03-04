@@ -1,5 +1,6 @@
 # pvtend
 
+[![PyPI](https://img.shields.io/pypi/v/pvtend.svg)](https://pypi.org/project/pvtend/)
 [![Tests](https://github.com/yanxingjianken/pvtend/actions/workflows/test.yml/badge.svg)](https://github.com/yanxingjianken/pvtend/actions)
 [![Documentation](https://readthedocs.org/projects/pvtend/badge/?version=latest)](https://pvtend.readthedocs.io/en/latest/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -60,7 +61,13 @@ The CSVs are the inputs for `pvtend-pipeline compute`, which extracts event-cent
 ## Installation
 
 ```bash
-# From source
+# From PyPI
+pip install pvtend
+
+# Or with uv (fast, Rust-based installer)
+uv pip install pvtend
+
+# From source (development)
 git clone https://github.com/yanxingjianken/pvtend.git
 cd pvtend
 pip install -e ".[dev]"

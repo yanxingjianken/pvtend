@@ -1,7 +1,26 @@
 Installation
 ============
 
-From source (recommended)
+.. image:: https://img.shields.io/pypi/v/pvtend.svg
+   :target: https://pypi.org/project/pvtend/
+   :alt: PyPI version
+
+From PyPI
+---------
+
+The simplest way to install ``pvtend``:
+
+.. code-block:: bash
+
+   pip install pvtend
+
+Or with `uv <https://docs.astral.sh/uv/>`_ (fast, Rust-based installer):
+
+.. code-block:: bash
+
+   uv pip install pvtend
+
+From source (development)
 -------------------------
 
 .. code-block:: bash
@@ -9,13 +28,6 @@ From source (recommended)
    git clone https://github.com/yanxingjianken/pvtend.git
    cd pvtend
    pip install -e ".[dev]"
-
-From PyPI (coming soon)
------------------------
-
-.. code-block:: bash
-
-   pip install pvtend
 
 With micromamba
 --------------
