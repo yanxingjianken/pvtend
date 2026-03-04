@@ -50,6 +50,10 @@ visualise them.
    fig.suptitle("Idealized PV evolution and spatial derivatives", fontsize=14)
    plt.show()
 
+.. image:: _static/quickstart_derivatives.png
+   :width: 100%
+   :alt: PV fields and spatial derivatives (2×3 panel)
+
 
 Orthogonal basis decomposition
 ------------------------------
@@ -108,6 +112,10 @@ the PV tendency, and compare the reconstruction with the original.
    fig.suptitle("Basis decomposition — smoothed + Gram-Schmidt", fontsize=14)
    plt.show()
 
+.. image:: _static/quickstart_decomposition.png
+   :width: 100%
+   :alt: Orthogonal basis decomposition and reconstruction (2×3 panel)
+
 
 Command-line pipeline
 ---------------------
@@ -131,6 +139,7 @@ The full production pipeline is a **three-pass** workflow:
        --clim-path /path/to/climatology/era5_hourly_clim.nc \
        --out-dir /path/to/output/ \
        --dh-range '-49:25:1' \
+       --center-mode eulerian \
        --skip-existing
 
    # ── Pass 1: RWB classification ───────────────────────────────────
