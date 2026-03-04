@@ -132,16 +132,18 @@ Command-line pipeline
 
 The full production pipeline is a **three-pass** workflow:
 
-1. **Compute** — extract PV tendency terms for each tracked event into
-   per-timestep NPZ files.
+1. **Compute** (Pass 0) — extract PV tendency terms for each tracked event into
+   per-timestep NPZ files.  This is the most expensive step; with
+   ``--n-workers 48`` it takes **~12 hours** for ~500 events.
 2. **Classify** (Pass 1) — detect Rossby Wave Breaking on the NPZ
-   patches and label each event as AWB, CWB, or neutral.
+   patches and label each event as AWB, CWB, or neutral (~minutes).
 3. **Composite** (Pass 2) — accumulate NPZ fields into variant-aware
-   composites, stratified by RWB type.
+   composites, stratified by RWB type (~seconds).
 
 .. code-block:: bash
 
    # ── Pass 0: Compute PV tendencies ────────────────────────────────
+   # Recommended: 48 parallel workers → ~12 h for ~500 blocking events
    pvtend-pipeline compute \
        --event-type blocking \
        --events-csv tracked_events.csv \
@@ -150,6 +152,7 @@ The full production pipeline is a **three-pass** workflow:
        --out-dir /path/to/output/ \
        --dh-range '-49:25:1' \
        --center-mode eulerian \
+       --n-workers 48 \
        --skip-existing
 
    # ── Pass 1: RWB classification ───────────────────────────────────

@@ -31,9 +31,12 @@
       ~TendencyConfig.event_type
       ~TendencyConfig.lat_half
       ~TendencyConfig.lon_half
+      ~TendencyConfig.n_workers
       ~TendencyConfig.output_dir
       ~TendencyConfig.partial_at_pole
-      ~TendencyConfig.use_constant_sigma
+      ~TendencyConfig.qg_omega_method
+      ~TendencyConfig.skip_existing
+      ~TendencyConfig.track_file
       ~TendencyConfig.year_end
       ~TendencyConfig.year_start
       ~TendencyConfig.levels
