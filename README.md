@@ -166,6 +166,9 @@ src/pvtend/
 ├── composite_builder.py # Variant-aware composite accumulation Pass 2
 ├── rwb.py               # RWB detection (bay & tilt methods, circumpolar-first)
 ├── composites.py        # Legacy composite lifecycle
+├── data/                # Bundled sample data
+│   ├── __init__.py      # load_idealized_pv() loader
+│   └── idealized_pv.npz # Synthetic Gaussian PV evolution
 ├── decomposition/       # Orthogonal basis framework
 │   ├── __init__.py
 │   ├── smoothing.py

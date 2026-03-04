@@ -617,3 +617,14 @@ upper-level v′ (bold black contours, significant only) on lower-level v′
    :toctree: generated/
 
    plotting.plot_baroclinic_tilt
+
+
+Sample Data
+-----------
+
+Bundled idealized PV evolution for quickstart examples and unit tests.
+
+.. autosummary::
+   :toctree: generated/
+
+   data.load_idealized_pv

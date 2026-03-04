@@ -77,6 +77,9 @@ from pvtend.composite_builder import (
 # Plotting (composite explorer + baroclinic)
 from pvtend.plotting import plot_var, plot_baroclinic_tilt
 
+# Sample data
+from pvtend.data import load_idealized_pv
+
 __all__ = [
     "__version__",
     # Grid
@@ -115,4 +118,6 @@ __all__ = [
     "CompositeConfig", "CompositeResult", "build_composites",
     # Plotting
     "plot_var", "plot_baroclinic_tilt",
+    # Sample data
+    "load_idealized_pv",
 ]
