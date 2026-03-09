@@ -425,7 +425,7 @@ def helmholtz_decomposition(
         chi = solve_poisson_fft(div, dx, dy, **solver_kw)
         psi = solve_poisson_fft(vort, dx, dy, **solver_kw)
     elif method == "dct":
-        dx_mean = float(np.mean(dx))
+        dx_mean = float(np.nanmean(dx))
         chi = solve_poisson_dct(div, dx_mean, dy, **solver_kw)
         psi = solve_poisson_dct(vort, dx_mean, dy, **solver_kw)
     elif method == "sor":

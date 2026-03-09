@@ -32,12 +32,12 @@ class NHGrid:
     @property
     def dlat(self) -> float:
         """Grid spacing in latitude [deg]."""
-        return float(abs(np.diff(self.lat).mean()))
+        return float(abs(np.nanmean(np.diff(self.lat))))
 
     @property
     def dlon(self) -> float:
         """Grid spacing in longitude [deg]."""
-        return float(abs(np.diff(self.lon).mean()))
+        return float(abs(np.nanmean(np.diff(self.lon))))
 
     @property
     def nlat(self) -> int:

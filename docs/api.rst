@@ -606,6 +606,19 @@ dh − 1 orthogonal basis.
      - ``str``, ``list[str]`` (``'-'``-negation), or ``callable(event)``
    * - ``projection``
      - ``True`` for 6-panel, ``False`` for 2-panel
+   * - ``use_sig_mask``
+     - If ``True`` (default), zero out non-significant grid points before
+       projection; set ``False`` to project the full composite mean.
+   * - ``mask_negative``
+     - If ``True`` (default), mask negative PV lobes in basis construction;
+       set ``False`` to retain them.
+
+.. note::
+
+   All bootstrap and composite-mean routines use ``np.nanmean`` /
+   ``np.nanpercentile`` internally, so events with partial NaN coverage
+   (e.g. high-latitude edge patches) are handled gracefully without
+   corrupting the composite or flipping projection signs.
 
 Helper functions :func:`~pvtend.plotting.load_events`,
 :func:`~pvtend.plotting.get_field`, and

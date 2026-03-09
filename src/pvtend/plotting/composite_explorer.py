@@ -145,8 +145,8 @@ def bootstrap_sig(
     for b in range(n_boot):
         idx = rng.integers(0, N, size=N)
         boot[b] = np.nanmean(stack[idx], axis=0)
-    lo = np.percentile(boot, 100 * alpha / 2, axis=0)
-    hi = np.percentile(boot, 100 * (1 - alpha / 2), axis=0)
+    lo = np.nanpercentile(boot, 100 * alpha / 2, axis=0)
+    hi = np.nanpercentile(boot, 100 * (1 - alpha / 2), axis=0)
     mean = np.nanmean(stack, axis=0)
     sig_mask = ~((lo <= 0) & (hi >= 0))
     return mean, sig_mask
@@ -173,6 +173,8 @@ def plot_var(
     figsize_scale: float = 1.0,
     label: str | None = None,
     vmax: float | None = None,
+    use_sig_mask: bool = True,
+    mask_negative: bool = True,
 ) -> dict:
     """Composite + bootstrap plot for any variable(s).
 
@@ -256,13 +258,16 @@ def plot_var(
 
         basis = compute_orthogonal_basis(
             pv_b, dx_b, dy_b, x_rel, y_rel,
-            mask_negative=True,
+            mask_negative=mask_negative,
             apply_smoothing=True,
             smoothing_deg=smooth_deg,
             grid_spacing=grid_sp,
         )
 
-        field_sig = np.where(sig_mask, mean_fld, 0.0)
+        if use_sig_mask:
+            field_sig = np.where(sig_mask, mean_fld, 0.0)
+        else:
+            field_sig = mean_fld.copy()
         field_sig_s = _smooth(field_sig)
         proj = project_field(field_sig_s, basis)
         print(

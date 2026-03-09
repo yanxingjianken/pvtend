@@ -56,6 +56,7 @@ The CSVs are the inputs for `pvtend-pipeline compute`, which extracts event-cent
 - **Orthogonal basis decomposition**: Projects PV tendency onto intensification (β), propagation (αx, αy), and deformation (γ) modes
 - **RWB detection**: Two classification methods — **bay** (path-order, recommended with circumpolar-cropped contours) and **tilt** (centerline slope ±0.15 dead zone). Circumpolar-first contour extraction for robust NH analysis.
 - **Composite lifecycle**: Multi-stage ensemble averaging with onset/peak/decay staging
+- **NaN-safe throughout**: All grid, derivative, solver, bootstrap, and plotting routines use `nanmean`/`nanpercentile` to handle partial-NaN edge events without corrupting composites or flipping projection signs
 - **CLI pipeline**: End-to-end processing via `pvtend-pipeline` command
 
 ## Installation

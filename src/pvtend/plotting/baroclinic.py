@@ -119,8 +119,8 @@ def plot_baroclinic_tilt(
             boot_lo[b] = np.nanmean(v_lo[idx], axis=0)
 
         def _sig(boot):
-            lo = np.percentile(boot, 100 * alpha / 2, axis=0)
-            hi = np.percentile(boot, 100 * (1 - alpha / 2), axis=0)
+            lo = np.nanpercentile(boot, 100 * alpha / 2, axis=0)
+            hi = np.nanpercentile(boot, 100 * (1 - alpha / 2), axis=0)
             return ~((lo <= 0) & (hi >= 0))
 
         vanom_data[stg] = dict(

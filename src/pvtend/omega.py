@@ -1106,7 +1106,7 @@ def solve_qg_omega_sip(
     # on a local patch the "zonal mean" is NOT the true m=0 wavenumber
     # and removing it would destroy the signal.
     if periodic_lon:
-        zmean = np.mean(omega_dry, axis=-1, keepdims=True)
+        zmean = np.nanmean(omega_dry, axis=-1, keepdims=True)
         omega_dry -= zmean
 
     # --- 8. Clean NaN / inf ---

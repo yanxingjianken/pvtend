@@ -208,7 +208,7 @@ def ddy_da(da: xr.DataArray, lat_name: str = "latitude") -> xr.DataArray:
     Returns:
         ``d(da)/dy`` in ``[field / m]``.
     """
-    dlat = float(np.abs(np.diff(da[lat_name].values).mean()))
+    dlat = float(np.abs(np.nanmean(np.diff(da[lat_name].values))))
     dy_m = np.deg2rad(dlat) * R_EARTH
     return da.differentiate(lat_name) / dy_m
 
