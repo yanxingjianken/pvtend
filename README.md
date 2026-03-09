@@ -52,7 +52,7 @@ The CSVs are the inputs for `pvtend-pipeline compute`, which extracts event-cent
 - **PV tendency computation**: RHS has zonal advection, baroclinic counter propagation, vertical advection, and approximated diabatic heating terms.
 - **QG omega solver**: Hoskins Q-vector formulation with **two methods**: FFT+Thomas (default, fast) and 3-D direct/iterative (BiCGSTAB+ILU, full horizontal Laplacian). Optional `center_lat` for dynamic f₀ (Li & O'Gorman 2020).
 - **Helmholtz decomposition**: 4 backends (direct, FFT, DCT, SOR) for limited-area domains
-- **Moist/dry omega splitting**: Decomposes vertical motion into moist and dry contributions
+- **Moist/dry omega splitting**: Decomposes vertical motion into moist and dry contributions via a single total-field QG solve (|ω'| >> |ω̄| ⇒ ω_moist ≈ ω'_moist), recovering horizontal divergent wind by Poisson inversion
 - **Orthogonal basis decomposition**: Projects PV tendency onto intensification (β), propagation (αx, αy), and deformation (γ) modes
 - **RWB detection**: Two classification methods — **bay** (path-order, recommended with circumpolar-cropped contours) and **tilt** (centerline slope ±0.15 dead zone). Circumpolar-first contour extraction for robust NH analysis.
 - **Composite lifecycle**: Multi-stage ensemble averaging with onset/peak/decay staging

@@ -229,6 +229,24 @@ components, then recovers the moist divergent wind:
 4. Dry divergent wind by subtraction:
    :math:`\mathbf{u}_\text{div,dry} = \mathbf{u}_\text{div} - \mathbf{u}_\text{div,moist}`
 
+**Total-field approximation for horizontal divergence.**
+The QG omega solve and Poisson inversion are performed on **total
+fields** (:math:`\omega`, not :math:`\omega'`), exploiting the
+dominance of the anomaly vertical velocity in midlatitude synoptic
+systems (:math:`|\omega'| \gg |\bar\omega|`).  Because the Poisson
+operator is linear, the same approximation propagates to the
+horizontal divergent wind:
+
+.. math::
+
+   \omega_\text{moist} \approx \omega'_\text{moist}
+   \;\;\Longrightarrow\;\;
+   \mathbf{u}_{\chi,\text{moist}} \approx \mathbf{u}'_{\chi,\text{moist}}
+
+This avoids a costly second anomaly-field QG inversion while capturing
+the dominant moist--dry partition of both vertical velocity and
+horizontal divergent wind.
+
 .. autosummary::
    :toctree: generated/
 

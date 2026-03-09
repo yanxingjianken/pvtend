@@ -83,7 +83,7 @@ def compute_geostrophic_wind(
     phi_3d: np.ndarray,
     lat: np.ndarray,
     lon: np.ndarray,
-    sigma_smooth: float = GEO_SMOOTH_SIGMA,
+    sigma_smooth: float = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute geostrophic wind (u_g, v_g) from geopotential Φ.
 
@@ -97,6 +97,8 @@ def compute_geostrophic_wind(
         lat: Latitude in degrees, ascending, shape ``(nlat,)``.
         lon: Longitude in degrees, shape ``(nlon,)``.
         sigma_smooth: Gaussian smoothing sigma in grid points (0 = none).
+            Following Li & O'Gorman (2020), the geostrophic wind is
+            computed from **unsmoothed** geopotential by default.
 
     Returns:
         ``(u_g, v_g)`` — geostrophic wind [m s⁻¹], each ``(nlev, nlat, nlon)``.
@@ -158,13 +160,16 @@ def _thomas_batch(
     cp = np.zeros_like(b_2d)
     dp = np.zeros_like(d_2d)
 
-    denom = np.where(np.abs(b_2d[0]) < 1e-30, 1e-30, b_2d[0])
+    denom = b_2d[0].copy()
+    denom = np.where(np.abs(denom) < 1e-30,
+                     1e-30 * np.sign(denom.real + 1e-60), denom)
     cp[0] = c_1d[0] / denom
     dp[0] = d_2d[0] / denom
 
     for i in range(1, n):
         denom = b_2d[i] - a_1d[i] * cp[i - 1]
-        denom = np.where(np.abs(denom) < 1e-30, 1e-30, denom)
+        denom = np.where(np.abs(denom) < 1e-30,
+                         1e-30 * np.sign(denom.real + 1e-60), denom)
         if i < n - 1:
             cp[i] = c_1d[i] / denom
         dp[i] = (d_2d[i] - a_1d[i] * dp[i - 1]) / denom
@@ -173,6 +178,9 @@ def _thomas_batch(
     x[-1] = dp[-1]
     for i in range(n - 2, -1, -1):
         x[i] = dp[i] - cp[i] * x[i + 1]
+
+    # Clamp extreme outliers (numerical safety)
+    x = np.where(np.abs(x) > 1e10, 0.0, x)
     return x
 
 
@@ -208,6 +216,7 @@ def solve_qg_omega(
     omega_total: np.ndarray | None = None,
     dry_fraction: float = SP19_DRY_FRACTION,
     t_full: np.ndarray | None = None,
+    omega_b: np.ndarray | None = None,
     sip_maxit: int = 300,
     sip_alpha: float = 0.93,
     sip_resmax: float = 1e-14,
@@ -233,6 +242,10 @@ def solve_qg_omega(
         dry_fraction: Fraction ω_dry/ω_total for SP19 (default 1/3).
         t_full: Full physical temperature [K] for σ₀ computation.
             Required when *t* is an anomaly field (σ needs T ≈ 200–300 K).
+        omega_b: Boundary-condition omega [Pa s⁻¹],
+            shape ``(nlev, nlat, nlon)``.  When provided, the SIP solver
+            pre-fills all Dirichlet faces (top, bottom, lateral N/S) with
+            these values instead of ω = 0.  Only used by ``method="log20"``.
         sip_maxit: Max SIP iterations for LOG20 (default 300).
         sip_alpha: SIP relaxation parameter for LOG20 (default 0.93).
         sip_resmax: SIP convergence threshold for LOG20 (default 1e-14).
@@ -266,6 +279,7 @@ def solve_qg_omega(
             u, v, t, lat, lon, plevs_pa,
             center_lat=center_lat,
             t_full=t_full,
+            omega_b=omega_b,
             maxit=sip_maxit,
             alpha=sip_alpha,
             resmax=sip_resmax,
@@ -913,8 +927,11 @@ def solve_qg_omega_sip(
     but retains **both** ∂²ω/∂x² and ∂²ω/∂y² on the LHS using the
     full 7-point spherical stencil (no FFT in longitude).
 
-    **Static stability**: uses domain-mean σ₀(p) throughout, matching
-    the original Li & O'Gorman MATLAB reference.
+    **Static stability**: uses local 3-D σ(k,j,i) computed from the
+    instantaneous temperature field, matching the dante831/QG-omega
+    MATLAB reference.  The RHS is initially computed with domain-mean
+    σ₀(p) then rescaled to σ(k,j,i); the SIP stencil vertical
+    coefficients use σ(k,j,i) directly.
 
     **Boundary conditions**: Dirichlet ω = 0 on all faces.  When the
     longitude span covers a full ring (≥ 350°), periodic wrapping is
@@ -964,6 +981,44 @@ def solve_qg_omega_sip(
         t_full=t_full,
     )
 
+    # --- 1b. Local 3-D static stability σ(k,j,i) ---
+    # Domain-mean σ₀(p) is too coarse for a full-NH domain; compute σ
+    # from local T at each grid point (matching dante831 reference),
+    # then rescale the σ₀-divided RHS to σ_3d-divided.
+    t_for_sigma = t_full if t_full is not None else t
+    kappa = R_DRY / 1004.0
+    sigma_3d = np.zeros((nlev, nlat, nlon))
+    for k in range(1, nlev - 1):
+        dp_s = plevs_pa[k + 1] - plevs_pa[k - 1]
+        theta_kp1 = t_for_sigma[k + 1] * (1e5 / plevs_pa[k + 1]) ** kappa
+        theta_km1 = t_for_sigma[k - 1] * (1e5 / plevs_pa[k - 1]) ** kappa
+        dlnt = np.log(theta_kp1) - np.log(theta_km1)
+        sigma_3d[k] = -(R_DRY * t_for_sigma[k] / plevs_pa[k]) * (dlnt / dp_s)
+    sigma_3d[0] = sigma_3d[1]
+    sigma_3d[-1] = sigma_3d[-2]
+    sigma_3d = np.maximum(sigma_3d, 1e-7)
+
+    # 1-2-1 horizontal smoothing (matches dante831 reference)
+    for k in range(nlev):
+        tmp = sigma_3d[k].copy()
+        if nlat > 2:
+            tmp[1:-1, :] = (
+                0.25 * sigma_3d[k, :-2, :]
+                + 0.5 * sigma_3d[k, 1:-1, :]
+                + 0.25 * sigma_3d[k, 2:, :]
+            )
+        if nlon > 2:
+            tmp2 = tmp.copy()
+            tmp2[:, 1:-1] = (
+                0.25 * tmp[:, :-2] + 0.5 * tmp[:, 1:-1] + 0.25 * tmp[:, 2:]
+            )
+            tmp = tmp2
+        sigma_3d[k] = tmp
+
+    # Rescale RHS: undo σ₀ division, apply local σ_3d
+    for k in range(nlev):
+        rhs[k] *= sigma0[k] / sigma_3d[k]
+
     # Detect full ring vs local patch — controls BCs in SIP core
     dlon_deg = np.abs(lon[1] - lon[0]) if len(lon) > 1 else 1.5
     lon_span = dlon_deg * len(lon)
@@ -978,14 +1033,13 @@ def solve_qg_omega_sip(
     f2_0 = f0 ** 2
 
     # --- 3. Build 7-point stencil coefficients ---
-    #   σ₀-divided form (domain-mean σ₀ throughout, matching
-    #   Li & O'Gorman 2020 and the original MATLAB code):
+    #   σ-divided form with local σ(k,j,i) (matching dante831):
     #     AW = AE = 1/(r²cos²φ Δλ²)
     #     AS = 1/(r²Δφ²) + tanφ/(2r²Δφ)
     #     AN = 1/(r²Δφ²) - tanφ/(2r²Δφ)
-    #     AB = 2 f₀²/(σ₀ Δp₁ (Δp₁+Δp₂))
-    #     AT = 2 f₀²/(σ₀ Δp₂ (Δp₁+Δp₂))
-    #     AP = -2/(r²cos²φΔλ²) - 2/(r²Δφ²) - 2f₀²/(σ₀ Δp₁ Δp₂)
+    #     AB = 2 f₀²/(σ(k,j,i) Δp₁ (Δp₁+Δp₂))
+    #     AT = 2 f₀²/(σ(k,j,i) Δp₂ (Δp₁+Δp₂))
+    #     AP = -2/(r²cos²φΔλ²) - 2/(r²Δφ²) - 2f₀²/(σ(k,j,i) Δp₁ Δp₂)
     AP = np.zeros((nlev, nlat, nlon))
     AE = np.zeros((nlev, nlat, nlon))
     AW = np.zeros((nlev, nlat, nlon))
@@ -1000,11 +1054,6 @@ def solve_qg_omega_sip(
     for k in range(1, nlev - 1):
         dp1 = plevs_pa[k] - plevs_pa[k - 1]
         dp2 = plevs_pa[k + 1] - plevs_pa[k]
-        s0k = sigma0[k]
-
-        ab_val = 2.0 * f2_0 / (s0k * dp1 * (dp1 + dp2))
-        at_val = 2.0 * f2_0 / (s0k * dp2 * (dp1 + dp2))
-        vert_diag = -2.0 * f2_0 / (s0k * dp1 * dp2)
 
         for j in range(1, nlat - 1):
             c2 = cos2_phi[j]
@@ -1014,18 +1063,19 @@ def solve_qg_omega_sip(
             ns_base = 1.0 / (r ** 2 * dphi ** 2)
             ns_tan  = tp / (2.0 * r ** 2 * dphi)
 
-            # Horizontal coefficients — uniform σ₀ (no local σ_ratio)
+            # Horizontal coefficients — purely geometric
             AW[k, j, :] = ew
             AE[k, j, :] = ew
             AS[k, j, :] = ns_base + ns_tan
             AN[k, j, :] = ns_base - ns_tan
 
-            # Vertical coefficients
-            AB[k, j, :] = ab_val
-            AT[k, j, :] = at_val
+            # Vertical coefficients — local σ(k,j,i)
+            s_kji = sigma_3d[k, j, :]
+            AB[k, j, :] = 2.0 * f2_0 / (s_kji * dp1 * (dp1 + dp2))
+            AT[k, j, :] = 2.0 * f2_0 / (s_kji * dp2 * (dp1 + dp2))
 
             # Diagonal
-            AP[k, j, :] = -2.0 * ew - 2.0 * ns_base + vert_diag
+            AP[k, j, :] = -2.0 * ew - 2.0 * ns_base - 2.0 * f2_0 / (s_kji * dp1 * dp2)
 
     # --- 4. Prepare solution array with BCs ---
     T_sol = np.zeros((nlev, nlat, nlon))

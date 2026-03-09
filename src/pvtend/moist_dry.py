@@ -12,6 +12,25 @@ The moist divergent wind is recovered via:
 
 The dry divergent wind is the residual:
     u_div_dry = u_div − u_div_moist
+
+Total-field approximation
+~~~~~~~~~~~~~~~~~~~~~~~~~
+The QG omega solve and Poisson inversion are performed on **total
+fields** (ω, not ω'), exploiting |ω'| >> |ω̄| in midlatitude synoptic
+systems.  Because the climatological mean vertical velocity is
+negligibly small compared with the anomaly, the total-field moist
+omega closely approximates the anomaly moist omega:
+
+    ω_moist ≈ ω'_moist
+
+The same linear approximation propagates through the Poisson inversion
+to the horizontal divergent wind:
+
+    u_div_moist ≈ u'_div_moist
+
+This avoids a costly second anomaly-field QG inversion while capturing
+the dominant moist–dry partition of both vertical velocity and
+horizontal divergent wind.
 """
 
 from __future__ import annotations

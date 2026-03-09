@@ -230,7 +230,7 @@ def plot_var(
     print(f"  {pct_sig:.1f}% significant at {100*(1-alpha):.0f}%")
 
     # PV anomaly composite for contour
-    pv_anom_mean = np.mean(
+    pv_anom_mean = np.nanmean(
         [get_field(e, "pv_anom", level) for e in evs], axis=0,
     )
 
@@ -250,9 +250,9 @@ def plot_var(
     if projection:
         dh_basis = max(dh - 1, -13)
         evs_b = load_events(data_root, stage, dh_basis) if dh_basis != dh else evs
-        pv_b = np.mean([get_field(e, "pv_anom", level) for e in evs_b], axis=0)
-        dx_b = np.mean([get_field(e, "pv_anom_dx", level) for e in evs_b], axis=0)
-        dy_b = np.mean([get_field(e, "pv_anom_dy", level) for e in evs_b], axis=0)
+        pv_b = np.nanmean([get_field(e, "pv_anom", level) for e in evs_b], axis=0)
+        dx_b = np.nanmean([get_field(e, "pv_anom_dx", level) for e in evs_b], axis=0)
+        dy_b = np.nanmean([get_field(e, "pv_anom_dy", level) for e in evs_b], axis=0)
 
         basis = compute_orthogonal_basis(
             pv_b, dx_b, dy_b, x_rel, y_rel,

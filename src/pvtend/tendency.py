@@ -71,8 +71,8 @@ VARS_3D: list[str] = [
     "theta", "theta_dt", "theta_dot", "Q",
     "u_anom_rot", "u_anom_div", "u_anom_har",
     "v_anom_rot", "v_anom_div", "v_anom_har",
-    "u_anom_div_moist", "v_anom_div_moist",
-    "u_anom_div_dry", "v_anom_div_dry",
+    "u_div_moist", "v_div_moist",
+    "u_div_dry", "v_div_dry",
     "omega_dry", "omega_moist",
 ]
 
@@ -439,9 +439,18 @@ def _qg_moist_dry_on_patch(
 ) -> None:
     """QG omega + moist/dry decomposition on the event patch.
 
+    Performs a single total-field QG omega solve, then recovers the
+    moist divergent wind via Poisson inversion of ω_moist.
+
+    Total-field approximation: since |ω'| >> |ω̄| in midlatitude
+    synoptic systems, the total-field moist omega closely approximates
+    the anomaly moist omega (ω_moist ≈ ω'_moist).  The same linearity
+    propagates through ∇²χ = −∂ω_moist/∂p, so the recovered horizontal
+    divergent wind satisfies u_div_moist ≈ u'_div_moist.  This avoids
+    a separate anomaly-field QG inversion.
+
     Modifies *cube3d* in-place, adding:
-        w_dry, w_moist, w_anom_dry, w_bar_dry, w_bar_moist, w_anom_moist,
-        u_anom_div_moist, v_anom_div_moist, u_anom_div_dry, v_anom_div_dry
+        w_dry, w_moist, u_div_moist, v_div_moist, u_div_dry, v_div_dry
     """
     nlevs, nlat, nlon = cube3d["z"].shape
 
@@ -449,10 +458,9 @@ def _qg_moist_dry_on_patch(
     n_valid = int(valid.sum())
     if n_valid < 3:
         zeros = np.zeros((nlevs, nlat, nlon), dtype=np.float32)
-        for k in ("w_dry", "w_moist", "w_anom_dry",
-                  "w_bar_dry", "w_bar_moist", "w_anom_moist",
-                  "u_anom_div_moist", "v_anom_div_moist",
-                  "u_anom_div_dry", "v_anom_div_dry"):
+        for k in ("w_dry", "w_moist",
+                  "u_div_moist", "v_div_moist",
+                  "u_div_dry", "v_div_dry"):
             cube3d[k] = zeros.copy()
         return
 
@@ -471,9 +479,6 @@ def _qg_moist_dry_on_patch(
 
     z_sv = pick(cube3d["z"])
     t_sv = pick(cube3d["t"])
-    z_bar_sv = pick(cube3d["z_bar"])
-    t_bar_sv = pick(cube3d["t_bar"])
-    w_bar_sv = pick(cube3d["w_bar"])
     w_sv = pick(cube3d["w"])
 
     # Helper: FFT solve on full NH, extract patch
@@ -512,15 +517,59 @@ def _qg_moist_dry_on_patch(
         lon_idx = np.array([_circ_nearest(lo) for lo in lon_vec])
         return od_nh[np.ix_(np.arange(od_nh.shape[0]), lat_idx, lon_idx)]
 
+    # Helper: SIP (LOG20) solve on full NH, extract patch
+    def _sip_on_nh(z_snap, t_snap, t_for_sigma=None, w_snap=None):
+        lat_nh = nh_data["lat"]
+        lon_nh = nh_data["lon"]
+        if lat_nh[0] > lat_nh[-1]:
+            lat_nh_asc = lat_nh[::-1]
+            flip_nh = True
+        else:
+            lat_nh_asc = lat_nh
+            flip_nh = False
+
+        def _prep(arr3d):
+            out = arr3d[psort]
+            if flip_nh:
+                out = out[:, ::-1, :]
+            return np.nan_to_num(out, nan=0.0)
+
+        z_nh = _prep(z_snap)
+        t_nh = _prep(t_snap)
+        tf_nh = _prep(t_for_sigma) if t_for_sigma is not None else None
+
+        ug_nh, vg_nh = _compute_geostrophic_wind(z_nh, lat_nh_asc, lon_nh)
+        wb_nh = _prep(w_snap) if w_snap is not None else None
+        od_nh, _info = solve_qg_omega_sip(
+            ug_nh, vg_nh, t_nh,
+            lat_nh_asc, lon_nh, plevs_pa,
+            center_lat=center_lat,
+            t_full=tf_nh,
+            omega_b=wb_nh)
+
+        lat_idx = np.array([np.argmin(np.abs(lat_nh_asc - la))
+                            for la in lat_v])
+
+        def _circ_nearest(lv):
+            d = np.abs((lon_nh - lv + 180) % 360 - 180)
+            return int(np.argmin(d))
+
+        lon_idx = np.array([_circ_nearest(lo) for lo in lon_vec])
+        return od_nh[np.ix_(np.arange(od_nh.shape[0]), lat_idx, lon_idx)]
+
     # --- Total geostrophic wind → QG omega_dry ---
     ug, vg = _compute_geostrophic_wind(z_sv, lat_v, lon_vec)
 
     if qg_method == "sp19":
         od = SP19_DRY_FRACTION * w_sv
     elif qg_method == "log20":
-        od, _info = solve_qg_omega_sip(
-            ug, vg, t_sv, lat_v, lon_vec, plevs_pa,
-            center_lat=center_lat)
+        if nh_data is not None:
+            od = _sip_on_nh(nh_data["z"], nh_data["t"],
+                            w_snap=nh_data.get("w"))
+        else:  # fallback: SIP on local patch
+            od, _info = solve_qg_omega_sip(
+                ug, vg, t_sv, lat_v, lon_vec, plevs_pa,
+                center_lat=center_lat)
     else:  # "fft"
         if nh_data is not None:
             od = _fft_on_nh(nh_data["z"], nh_data["t"])
@@ -528,51 +577,23 @@ def _qg_moist_dry_on_patch(
             od = solve_qg_omega(ug, vg, t_sv, lat_v, lon_vec, plevs_pa,
                                 center_lat=center_lat)
 
-    # --- Anomaly geostrophic wind → QG omega_anom_dry ---
-    ug_bar, vg_bar = _compute_geostrophic_wind(z_bar_sv, lat_v, lon_vec)
-
-    if qg_method == "sp19":
-        w_anom_sv = w_sv - w_bar_sv
-        od_anom = SP19_DRY_FRACTION * w_anom_sv
-    elif qg_method == "log20":
-        od_anom, _info2 = solve_qg_omega_sip(
-            ug - ug_bar, vg - vg_bar, t_sv - t_bar_sv,
-            lat_v, lon_vec, plevs_pa,
-            center_lat=center_lat, t_full=t_sv)
-    else:  # "fft"
-        if nh_data is not None:
-            z_anom_nh = nh_data["z"] - nh_data["z_bar"]
-            t_anom_nh = nh_data["t"] - nh_data["t_bar"]
-            od_anom = _fft_on_nh(z_anom_nh, t_anom_nh,
-                                 t_for_sigma=nh_data["t"])
-        else:
-            od_anom = solve_qg_omega(
-                ug - ug_bar, vg - vg_bar, t_sv - t_bar_sv,
-                lat_v, lon_vec, plevs_pa,
-                center_lat=center_lat, t_full=t_sv)
-
-    # --- Moist chi → divergent moist wind ---
-    w_anom_sv = w_sv - w_bar_sv
-    w_anom_moist_sv = w_anom_sv - od_anom
+    # --- Moist chi → divergent moist wind (from w_moist) ---
+    # Total-field approx: ω_moist ≈ ω'_moist ⇒ u_div_moist ≈ u'_div_moist
+    w_moist_sv = w_sv - od
     _, udm_sv, vdm_sv = _solve_chi_moist_patch(
-        w_anom_moist_sv, lat_v, lon_vec, plevs_pa)
+        w_moist_sv, lat_v, lon_vec, plevs_pa)
 
     # --- Unpack & store ---
     w_dry = unpack(od)
-    w_anom_dry = unpack(od_anom)
-    u_anom_div_moist = unpack(udm_sv)
-    v_anom_div_moist = unpack(vdm_sv)
+    u_div_moist = unpack(udm_sv)
+    v_div_moist = unpack(vdm_sv)
 
     cube3d["w_dry"] = w_dry
     cube3d["w_moist"] = cube3d["w"] - w_dry
-    cube3d["w_anom_dry"] = w_anom_dry
-    cube3d["w_bar_dry"] = w_dry - w_anom_dry
-    cube3d["w_bar_moist"] = cube3d["w_bar"] - cube3d["w_bar_dry"]
-    cube3d["w_anom_moist"] = cube3d["w_anom"] - w_anom_dry
-    cube3d["u_anom_div_moist"] = u_anom_div_moist
-    cube3d["v_anom_div_moist"] = v_anom_div_moist
-    cube3d["u_anom_div_dry"] = cube3d["u_anom_div"] - u_anom_div_moist
-    cube3d["v_anom_div_dry"] = cube3d["v_anom_div"] - v_anom_div_moist
+    cube3d["u_div_moist"] = u_div_moist
+    cube3d["v_div_moist"] = v_div_moist
+    cube3d["u_div_dry"] = cube3d["u_anom_div"] - u_div_moist
+    cube3d["v_div_dry"] = cube3d["v_anom_div"] - v_div_moist
 
 
 # ============================================================================
@@ -999,13 +1020,12 @@ class TendencyComputer:
 
             # --- Patch-level QG omega + moist/dry ---
             nh_data = None
-            if self.cfg.qg_omega_method == "fft":
+            if self.cfg.qg_omega_method in ("fft", "log20"):
                 snap = ds.sel(valid_time=ts)
                 nh_data = {
                     "z": snap["z"].values,
                     "t": snap["t"].values,
-                    "z_bar": snap["z_bar"].values,
-                    "t_bar": snap["t_bar"].values,
+                    "w": snap["w"].values,
                     "lat": ds.latitude.values,
                     "lon": ds.longitude.values,
                 }
@@ -1064,15 +1084,15 @@ class TendencyComputer:
             vhar_pvanom_dy_3d = cube3d["v_anom_har"] * cube3d["pv_anom_dy"]
 
             # Moist/dry divergent cross terms
-            udm_pvbar_dx_3d = cube3d["u_anom_div_moist"] * cube3d["pv_bar_dx"]
-            udm_pvanom_dx_3d = cube3d["u_anom_div_moist"] * cube3d["pv_anom_dx"]
-            udd_pvbar_dx_3d = cube3d["u_anom_div_dry"] * cube3d["pv_bar_dx"]
-            udd_pvanom_dx_3d = cube3d["u_anom_div_dry"] * cube3d["pv_anom_dx"]
+            udm_pvbar_dx_3d = cube3d["u_div_moist"] * cube3d["pv_bar_dx"]
+            udm_pvanom_dx_3d = cube3d["u_div_moist"] * cube3d["pv_anom_dx"]
+            udd_pvbar_dx_3d = cube3d["u_div_dry"] * cube3d["pv_bar_dx"]
+            udd_pvanom_dx_3d = cube3d["u_div_dry"] * cube3d["pv_anom_dx"]
 
-            vdm_pvbar_dy_3d = cube3d["v_anom_div_moist"] * cube3d["pv_bar_dy"]
-            vdm_pvanom_dy_3d = cube3d["v_anom_div_moist"] * cube3d["pv_anom_dy"]
-            vdd_pvbar_dy_3d = cube3d["v_anom_div_dry"] * cube3d["pv_bar_dy"]
-            vdd_pvanom_dy_3d = cube3d["v_anom_div_dry"] * cube3d["pv_anom_dy"]
+            vdm_pvbar_dy_3d = cube3d["v_div_moist"] * cube3d["pv_bar_dy"]
+            vdm_pvanom_dy_3d = cube3d["v_div_moist"] * cube3d["pv_anom_dy"]
+            vdd_pvbar_dy_3d = cube3d["v_div_dry"] * cube3d["pv_bar_dy"]
+            vdd_pvanom_dy_3d = cube3d["v_div_dry"] * cube3d["pv_anom_dy"]
 
             # Moist/dry omega cross terms
             w_dry_pvbar_dp_3d = cube3d["w_dry"] * cube3d["pv_bar_dp"]
@@ -1142,16 +1162,12 @@ class TendencyComputer:
                     v_anom_rot=vw(cube3d["v_anom_rot"]),
                     v_anom_div=vw(cube3d["v_anom_div"]),
                     v_anom_har=vw(cube3d["v_anom_har"]),
-                    u_anom_div_moist=vw(cube3d["u_anom_div_moist"]),
-                    v_anom_div_moist=vw(cube3d["v_anom_div_moist"]),
-                    u_anom_div_dry=vw(cube3d["u_anom_div_dry"]),
-                    v_anom_div_dry=vw(cube3d["v_anom_div_dry"]),
+                    u_div_moist=vw(cube3d["u_div_moist"]),
+                    v_div_moist=vw(cube3d["v_div_moist"]),
+                    u_div_dry=vw(cube3d["u_div_dry"]),
+                    v_div_dry=vw(cube3d["v_div_dry"]),
                     w_dry=vw(cube3d["w_dry"]),
                     w_moist=vw(cube3d["w_moist"]),
-                    w_anom_dry=vw(cube3d["w_anom_dry"]),
-                    w_bar_dry=vw(cube3d["w_bar_dry"]),
-                    w_bar_moist=vw(cube3d["w_bar_moist"]),
-                    w_anom_moist=vw(cube3d["w_anom_moist"]),
 
                     # ── 2-D cross terms ──
                     u_anom_pv_bar_dx=vw(uanom_pvbar_dx_3d),
@@ -1225,16 +1241,12 @@ class TendencyComputer:
                     v_anom_rot_3d=cube3d["v_anom_rot"],
                     v_anom_div_3d=cube3d["v_anom_div"],
                     v_anom_har_3d=cube3d["v_anom_har"],
-                    u_anom_div_moist_3d=cube3d["u_anom_div_moist"],
-                    v_anom_div_moist_3d=cube3d["v_anom_div_moist"],
-                    u_anom_div_dry_3d=cube3d["u_anom_div_dry"],
-                    v_anom_div_dry_3d=cube3d["v_anom_div_dry"],
+                    u_div_moist_3d=cube3d["u_div_moist"],
+                    v_div_moist_3d=cube3d["v_div_moist"],
+                    u_div_dry_3d=cube3d["u_div_dry"],
+                    v_div_dry_3d=cube3d["v_div_dry"],
                     w_dry_3d=cube3d["w_dry"],
                     w_moist_3d=cube3d["w_moist"],
-                    w_anom_dry_3d=cube3d["w_anom_dry"],
-                    w_bar_dry_3d=cube3d["w_bar_dry"],
-                    w_bar_moist_3d=cube3d["w_bar_moist"],
-                    w_anom_moist_3d=cube3d["w_anom_moist"],
                     u_anom_pv_bar_dx_3d=uanom_pvbar_dx_3d,
                     u_anom_pv_anom_dx_3d=uanom_pvanom_dx_3d,
                     u_bar_pv_anom_dx_3d=ubar_pvanom_dx_3d,
