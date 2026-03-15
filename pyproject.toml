@@ -4,9 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pvtend"
-version = "0.8.2"
+version = "0.9.0"
 authors = [
     { name = "Xingjian Yan" },
+    { name = "Talia Tamarin-Brodsky" },
 ]
 description = "PV tendency decomposition diagnostics for blocking and weather extremes"
 readme = "README.md"

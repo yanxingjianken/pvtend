@@ -8,8 +8,8 @@ sys.path.insert(0, os.path.abspath("../src"))
 from pvtend._version import __version__
 
 project = "pvtend"
-copyright = "2026, Xingjian Yan"
-author = "Xingjian Yan"
+copyright = "2026, Xingjian Yan and Talia Tamarin-Brodsky"
+author = "Xingjian Yan and Talia Tamarin-Brodsky"
 version = __version__          # short X.Y
 release = __version__          # full X.Y.Z
 

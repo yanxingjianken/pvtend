@@ -617,7 +617,7 @@ def with_derivs_for_window(
     """
     month_keys = month_keys_for_window(
         base_ts, hmin=cfg.rel_hours[0], hmax=cfg.rel_hours[-1])
-    ds = open_months_ds(cfg.data_dir, ["u", "v", "w", "pv", "z", "t"],
+    ds = open_months_ds(cfg.data_dir, ["u", "v", "w", "pv", "z", "t", "q"],
                         month_keys, engine=cfg.engine)
 
     # --- lat metrics & Coriolis ---
@@ -679,34 +679,44 @@ def with_derivs_for_window(
     ds["pv_bar_dt"] = _ddt_da(ds.pv_bar)
     ds["pv_dt"] = _ddt_da(ds.pv)
 
-    # --- θ and Q terms ---
+    # --- θ and Q terms (Emanuel 1987 / Tamarin & Kaspi 2016 LHR) ---
     kappa = 0.286
+    L_V = 2.501e6       # latent heat of vapourisation [J/kg]
+    R_V = 461.5         # gas constant for water vapour [J/(kg·K)]
+    gamma_d = G0 / CP_DRY   # dry adiabatic lapse rate [K/m]
+
     ds["theta"] = ds["t"] * (1000.0 / ds[plev]) ** kappa
-    ds["theta_dt"] = _ddt_da(ds["theta"])
-    ds["theta_dx"] = _ddx_periodic_da(ds.theta)
-    ds["theta_dy"] = _ddy_da(ds.theta)
+    ds["theta_dt"] = _ddt_da(ds["theta"])  # local tendency (diagnostic)
     ds["theta_dp"] = _ddp_da(ds.theta)
 
-    ds["u_dy"] = _ddy_da(ds.u)
-    ds["u_dp"] = _ddp_da(ds.u)
-    ds["v_dx"] = _ddx_periodic_da(ds.v)
-    ds["v_dp"] = _ddp_da(ds.v)
-    ds["w_dx"] = _ddx_periodic_da(ds.w)
-    ds["w_dy"] = _ddy_da(ds.w)
+    # saturation vapour pressure (Bolton 1980) and specific humidity
+    p_pa = ds[plev] * 100.0  # hPa → Pa
+    es = 611.2 * np.exp(17.67 * (ds["t"] - 273.15) / (ds["t"] - 29.65))
+    qs = 0.622 * es / (p_pa - 0.378 * es)
 
-    ds["theta_dot"] = (ds["theta_dt"]
-                       + ds["u"] * ds["theta_dx"]
-                       + ds["v"] * ds["theta_dy"]
-                       + ds["w"] * ds["theta_dp"])
-    ds["theta_dot_dx"] = _ddx_periodic_da(ds["theta_dot"])
-    ds["theta_dot_dy"] = _ddy_da(ds["theta_dot"])
+    # equivalent potential temperature (uses actual q from ERA5)
+    ds["theta_e"] = ds["theta"] * np.exp(L_V * ds["q"] / (CP_DRY * ds["t"]))
+    ds["theta_e_dp"] = _ddp_da(ds["theta_e"])
+
+    # moist adiabatic lapse rate
+    gamma_m = gamma_d * ((1.0 + L_V * qs / (R_DRY * ds["t"]))
+                         / (1.0 + L_V**2 * qs / (CP_DRY * R_V * ds["t"]**2)))
+
+    # LHR diabatic heating rate (only where ω < 0, i.e. ascending)
+    theta_dot_raw = ds["w"] * (
+        ds["theta_dp"]
+        - (gamma_m / gamma_d) * (ds["theta"] / ds["theta_e"]) * ds["theta_e_dp"]
+    )
+    ds["theta_dot"] = theta_dot_raw.where(ds["w"] < 0, 0.0)
     ds["theta_dot_dp"] = _ddp_da(ds["theta_dot"])
 
-    ds["Q"] = -G0 * (
-        (ds["w_dy"] - ds["v_dp"]) * ds["theta_dot_dx"]
-        + (ds["u_dp"] - ds["w_dx"]) * ds["theta_dot_dy"]
-        + (ds["v_dx"] - ds["u_dy"] + ds["f"]) * ds["theta_dot_dp"]
-    )
+    # relative vorticity ζ = ∂v/∂x − ∂u/∂y
+    ds["v_dx"] = _ddx_periodic_da(ds.v)
+    ds["u_dy"] = _ddy_da(ds.u)
+    ds["zeta"] = ds["v_dx"] - ds["u_dy"]
+
+    # Q = −g(f + ζ) ∂θ̇_LHR/∂p  (vertical stretching only)
+    ds["Q"] = -G0 * (ds["f"] + ds["zeta"]) * ds["theta_dot_dp"]
 
     ds = ds.assign_coords(
         longitude=((ds.longitude + 180) % 360) - 180,

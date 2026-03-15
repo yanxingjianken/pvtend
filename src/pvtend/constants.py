@@ -9,6 +9,8 @@ G0: float = 9.81                  # Gravitational acceleration [m/s²]
 R_DRY: float = 287.05             # Specific gas constant for dry air [J/(kg·K)]
 CP_DRY: float = 1004.0            # Specific heat at constant pressure [J/(kg·K)]
 KAPPA: float = R_DRY / CP_DRY     # Poisson constant ≈ 0.286
+L_V: float = 2.501e6              # Latent heat of vapourisation [J/kg]
+R_V: float = 461.5                # Gas constant for water vapour [J/(kg·K)]
 H_SCALE: float = 7000.0           # Scale height [m]
 
 # --- QG omega equation defaults ---
@@ -28,7 +30,7 @@ WAVG_LEVELS: list[int] = [300, 250, 200]
 MASK_PV_THRESHOLD: float = 0.0   # [PVU in SI]  (strict < 0)
 
 # --- Climatology ---
-CLIM_VARIABLES: list[str] = ["u", "v", "w", "t", "pv", "z"]
+CLIM_VARIABLES: list[str] = ["u", "v", "w", "t", "pv", "z", "q"]
 MONTH_ABBREVS: list[str] = [
     "jan", "feb", "mar", "apr", "may", "jun",
     "jul", "aug", "sep", "oct", "nov", "dec",

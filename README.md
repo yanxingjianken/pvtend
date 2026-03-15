@@ -236,7 +236,7 @@ If you use this package in your research, please cite:
 
 ```bibtex
 @software{yan2025pvtend,
-  author = {Yan, Xingjian},
+  author = {Yan, Xingjian and Tamarin-Brodsky, Talia},
   title = {pvtend: PV tendency decomposition for atmospheric blocking},
   year = {2025},
   url = {https://github.com/yanxingjianken/pvtend}
