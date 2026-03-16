@@ -142,6 +142,8 @@ The full production pipeline is a **three-pass** workflow:
        --out-dir /path/to/output/ \
        --dh-range '-49:25:1' \
        --center-mode eulerian \
+       --year-range '1990:2011' \
+       --stages onset peak decay \
        --n-workers 48 \
        --skip-existing
 

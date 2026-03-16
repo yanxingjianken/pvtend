@@ -106,6 +106,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Filter events to year range, e.g. '1990:2011' (start:stop_exclusive).",
     )
     compute.add_argument(
+        "--stages", nargs="+", default=["onset", "peak", "decay"],
+        help="Event stages to process (default: onset peak decay).",
+    )
+    compute.add_argument(
         "--skip-existing", action="store_true",
         help="Skip events whose NPZ files already exist.",
     )
@@ -293,6 +297,15 @@ def _cmd_compute(args: argparse.Namespace) -> None:
                 (ts_col.dt.year >= yr_start) & (ts_col.dt.year < yr_end)
             ].reset_index(drop=True)
         print(f"[pvtend] Filtered to years [{yr_start}, {yr_end}): "
+              f"{len(events_df)} events")
+
+    # --- Filter by stages if not all stages ---
+    stage_col = "evt_name" if "evt_name" in events_df.columns else "stage"
+    if stage_col in events_df.columns:
+        events_df = events_df[
+            events_df[stage_col].isin(args.stages)
+        ].reset_index(drop=True)
+        print(f"[pvtend] Filtered to stages {args.stages}: "
               f"{len(events_df)} events")
 
     print(f"[pvtend] Processing {len(events_df)} events, "
