@@ -10,15 +10,19 @@ where
     divergent    (irrotational):   u_div =  ∂χ/∂x,  v_div =  ∂χ/∂y
     harmonic     (residual):       ∇·u_har = 0  AND  ζ(u_har) = 0
 
-Four Poisson solver backends:
-    - ``'direct'``: Sparse LU (Lynch 1989), Dirichlet BCs, exact variable dx
-    - ``'fft'``:    FFT in longitude + Thomas in latitude (periodic + Dirichlet)
-    - ``'dct'``:    DST-I with mean(dx), fast but approximate at high latitudes
-    - ``'sor'``:    SOR iteration, slow reference
+Poisson solver:
+    ``'spherical'``: Full spherical Laplacian (conservative form,
+    xinvert/MiniUFO), periodic in λ, Dirichlet in φ.  All other
+    backends (direct, fft, dct, sor) are deprecated.
+
+All horizontal derivatives use the canonical operators from
+:mod:`pvtend.derivatives` (``ddx`` / ``ddy``) with periodic zonal
+boundary conditions matching the full NH ring.
 
 References:
     Lynch P (1989) MWR 117, 1492-1500.
     Schumann U & Sweet R (1988) J. Comput. Phys. 75, 123-137.
+    MiniUFO/xinvert — conservative-form spherical Laplacian.
 """
 
 from __future__ import annotations
@@ -26,15 +30,18 @@ from __future__ import annotations
 from typing import Optional
 
 import numpy as np
-from scipy import sparse
-from scipy.sparse import linalg as splinalg
-from scipy import fft as scipy_fft
+
+# sparse, splinalg, scipy_fft — no longer needed (deprecated solvers)
+# from scipy import sparse
+# from scipy.sparse import linalg as splinalg
+# from scipy import fft as scipy_fft
 
 from .constants import R_EARTH
+from .derivatives import ddx, ddy
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Basic differential operators (self-contained for this module)
+#  Differential operators — thin wrappers around derivatives.py
 # ═══════════════════════════════════════════════════════════════
 
 
@@ -46,8 +53,9 @@ def compute_vorticity_divergence(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Relative vorticity ζ = ∂v/∂x − ∂u/∂y and divergence δ = ∂u/∂x + ∂v/∂y.
 
-    Uses centred differences in the interior and one-sided differences
-    at the edges.
+    Uses periodic zonal BCs (matching the full-NH ring) and one-sided
+    differences at the meridional boundaries, via :func:`derivatives.ddx`
+    and :func:`derivatives.ddy`.
 
     Args:
         u: Zonal wind, shape ``(nlat, nlon)``.
@@ -58,28 +66,13 @@ def compute_vorticity_divergence(
     Returns:
         ``(vorticity, divergence)`` — each ``(nlat, nlon)``.
     """
-    nlat, nlon = u.shape
+    nlat = u.shape[0]
     dx_arr = np.full(nlat, float(dx)) if np.isscalar(dx) else np.asarray(dx, float).ravel()
 
-    du_dx = np.zeros_like(u)
-    du_dy = np.zeros_like(u)
-    dv_dx = np.zeros_like(v)
-    dv_dy = np.zeros_like(v)
-
-    for j in range(nlat):
-        du_dx[j, 1:-1] = (u[j, 2:] - u[j, :-2]) / (2 * dx_arr[j])
-        dv_dx[j, 1:-1] = (v[j, 2:] - v[j, :-2]) / (2 * dx_arr[j])
-        du_dx[j, 0] = (u[j, 1] - u[j, 0]) / dx_arr[j]
-        du_dx[j, -1] = (u[j, -1] - u[j, -2]) / dx_arr[j]
-        dv_dx[j, 0] = (v[j, 1] - v[j, 0]) / dx_arr[j]
-        dv_dx[j, -1] = (v[j, -1] - v[j, -2]) / dx_arr[j]
-
-    du_dy[1:-1] = (u[2:] - u[:-2]) / (2 * dy)
-    dv_dy[1:-1] = (v[2:] - v[:-2]) / (2 * dy)
-    du_dy[0] = (u[1] - u[0]) / dy
-    du_dy[-1] = (u[-1] - u[-2]) / dy
-    dv_dy[0] = (v[1] - v[0]) / dy
-    dv_dy[-1] = (v[-1] - v[-2]) / dy
+    du_dx = ddx(u, dx_arr, periodic=True)
+    dv_dx = ddx(v, dx_arr, periodic=True)
+    du_dy = ddy(u, dy)
+    dv_dy = ddy(v, dy)
 
     return dv_dx - du_dy, du_dx + dv_dy
 
@@ -89,7 +82,10 @@ def gradient(
     dx: np.ndarray,
     dy: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """(∂φ/∂x, ∂φ/∂y) with centred differences, one-sided at edges.
+    """(∂φ/∂x, ∂φ/∂y) with periodic zonal BCs, one-sided at meridional edges.
+
+    Delegates to :func:`derivatives.ddx` (periodic) and
+    :func:`derivatives.ddy`.
 
     Args:
         phi: Scalar field, shape ``(nlat, nlon)``.
@@ -99,22 +95,10 @@ def gradient(
     Returns:
         ``(dphi_dx, dphi_dy)`` — each ``(nlat, nlon)``.
     """
-    nlat, nlon = phi.shape
+    nlat = phi.shape[0]
     dx_arr = np.full(nlat, float(dx)) if np.isscalar(dx) else np.asarray(dx, float).ravel()
 
-    dphi_dx = np.zeros_like(phi)
-    dphi_dy = np.zeros_like(phi)
-
-    for j in range(nlat):
-        dphi_dx[j, 1:-1] = (phi[j, 2:] - phi[j, :-2]) / (2 * dx_arr[j])
-        dphi_dx[j, 0] = (phi[j, 1] - phi[j, 0]) / dx_arr[j]
-        dphi_dx[j, -1] = (phi[j, -1] - phi[j, -2]) / dx_arr[j]
-
-    dphi_dy[1:-1] = (phi[2:] - phi[:-2]) / (2 * dy)
-    dphi_dy[0] = (phi[1] - phi[0]) / dy
-    dphi_dy[-1] = (phi[-1] - phi[-2]) / dy
-
-    return dphi_dx, dphi_dy
+    return ddx(phi, dx_arr, periodic=True), ddy(phi, dy)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -122,217 +106,174 @@ def gradient(
 # ═══════════════════════════════════════════════════════════════
 
 
-def solve_poisson_direct(
-    rhs: np.ndarray,
-    dx: np.ndarray,
-    dy: float,
-) -> np.ndarray:
-    """Solve ∇²φ = rhs with Dirichlet φ = 0 on all four boundaries.
+# ── DEPRECATED: solve_poisson_direct ────────────────────────────────
+# Flat-earth sparse LU solver. Replaced by solve_poisson_spherical_fft.
+# Kept commented-out for reference.
+#
+# def solve_poisson_direct(
+#     rhs: np.ndarray, dx: np.ndarray, dy: float,
+# ) -> np.ndarray:
+#     """Solve ∇²φ = rhs with Dirichlet φ = 0 (flat-earth, Lynch 1989)."""
+#     nlat, nlon = rhs.shape
+#     dx_arr = np.full(nlat, float(dx)) if np.isscalar(dx) else np.asarray(dx, float).ravel()
+#     dy2 = dy * dy; ni, nj = nlat - 2, nlon - 2; N = ni * nj
+#     if N == 0: return np.zeros_like(rhs)
+#     rows, cols, vals, b = [], [], [], np.zeros(N)
+#     for ii in range(ni):
+#         jg = ii + 1; dx2 = dx_arr[jg] ** 2; cx, cy = 1.0/dx2, 1.0/dy2
+#         diag = -2.0 * (cx + cy)
+#         for jj in range(nj):
+#             k = ii*nj + jj; rows.append(k); cols.append(k); vals.append(diag)
+#             if jj > 0: rows.append(k); cols.append(k-1); vals.append(cx)
+#             if jj < nj-1: rows.append(k); cols.append(k+1); vals.append(cx)
+#             if ii > 0: rows.append(k); cols.append(k-nj); vals.append(cy)
+#             if ii < ni-1: rows.append(k); cols.append(k+nj); vals.append(cy)
+#             b[k] = rhs[jg, jj + 1]
+#     A = sparse.csc_matrix((vals, (rows, cols)), shape=(N, N))
+#     x = splinalg.spsolve(A, b)
+#     phi = np.zeros_like(rhs); phi[1:-1, 1:-1] = x.reshape(ni, nj)
+#     return phi
 
-    Builds the 5-point finite-difference Laplacian as a sparse matrix
-    and solves with ``scipy.sparse.linalg.spsolve`` (direct LU).  Variable
-    ``dx(lat)`` is handled exactly.
+
+# ── DEPRECATED: solve_poisson_fft ───────────────────────────────────
+# Flat-earth FFT solver. Replaced by solve_poisson_spherical_fft.
+# Kept commented-out for reference.
+#
+# def solve_poisson_fft(rhs, dx, dy):
+#     """Flat-earth ∇²φ = rhs — periodic lon, Dirichlet lat (Schumann & Sweet 1988)."""
+#     nlat, nlon = rhs.shape
+#     dx_arr = np.full(nlat, float(dx)) if np.isscalar(dx) else np.asarray(dx, float).ravel()
+#     dy2 = dy * dy; ni = nlat - 2
+#     if ni == 0: return np.zeros_like(rhs)
+#     rhs_hat = np.fft.fft(rhs, axis=1)
+#     phi_hat = np.zeros_like(rhs_hat)
+#     for kk in range(nlon):
+#         lam_k = 2.0 * (np.cos(2.0 * np.pi * kk / nlon) - 1.0)
+#         a = np.full(ni, 1.0/dy2); c = np.full(ni, 1.0/dy2)
+#         b = np.empty(ni); f = np.empty(ni, dtype=complex)
+#         for j in range(ni):
+#             jg = j + 1
+#             b[j] = lam_k / (dx_arr[jg]**2) - 2.0/dy2
+#             f[j] = rhs_hat[jg, kk]
+#         phi_hat[1:-1, kk] = _thomas(a, b, c, f)
+#     return np.fft.ifft(phi_hat, axis=1).real
+
+
+def solve_poisson_spherical_fft(
+    rhs: np.ndarray,
+    lat: np.ndarray,
+    dy: float,
+    dlon_rad: float,
+    R_earth: float = R_EARTH,
+) -> np.ndarray:
+    """Solve the spherical Poisson equation — periodic in λ, Dirichlet in φ.
+
+    Solves the full spherical Laplacian on a lat-lon grid:
+
+        (1/(a²cos²φ)) ∂²χ/∂λ² + (1/a²cosφ) ∂/∂φ(cosφ ∂χ/∂φ) = f
+
+    Uses the **conservative (divergence) form** for the meridional
+    operator — following xinvert (MiniUFO) — which naturally includes
+    the −tan(φ) curvature term without explicit first-derivative
+    discretisation.  Multiply through by a²cosφ:
+
+        (1/cosφ) ∂²χ/∂λ² + ∂/∂φ(cosφ ∂χ/∂φ) = f · a² · cosφ
+
+    The meridional tridiagonal coefficients become:
+
+        a_j = cos(φ_{j−½}) / Δφ²
+        c_j = cos(φ_{j+½}) / Δφ²
+        b_j = λ_k / (cos(φ_j) · Δλ²) − (a_j + c_j) / Δφ²
+
+    (but note a_j, c_j already contain 1/Δφ², stored without it below).
 
     Args:
-        rhs: Right-hand side, shape ``(nlat, nlon)``.
-        dx: Zonal grid spacing [m]. Scalar or array of shape ``(nlat,)``.
-        dy: Meridional grid spacing [m].
+        rhs: Right-hand side of ∇²χ = rhs, shape ``(nlat, nlon)``.
+        lat: Latitude in **degrees**, shape ``(nlat,)``.
+        dy: Meridional grid spacing a·Δφ [m].
+        dlon_rad: Longitudinal grid spacing Δλ in **radians**.
+        R_earth: Earth radius [m].
 
     Returns:
-        Solution φ with Dirichlet BCs, shape ``(nlat, nlon)``.
-
-    References:
-        Lynch P (1989) MWR 117, 1492-1500.
+        Solution χ with Dirichlet BCs at lat boundaries,
+        shape ``(nlat, nlon)``.
     """
     nlat, nlon = rhs.shape
-    dx_arr = (
-        np.full(nlat, float(dx)) if np.isscalar(dx) else np.asarray(dx, float).ravel()
-    )
-    dy2 = dy * dy
-    ni, nj = nlat - 2, nlon - 2
-    N = ni * nj
-    if N == 0:
-        return np.zeros_like(rhs)
-
-    rows: list[int] = []
-    cols: list[int] = []
-    vals: list[float] = []
-    b = np.zeros(N)
-
-    for ii in range(ni):
-        jg = ii + 1
-        dx2 = dx_arr[jg] ** 2
-        cx, cy = 1.0 / dx2, 1.0 / dy2
-        diag = -2.0 * (cx + cy)
-        for jj in range(nj):
-            k = ii * nj + jj
-            rows.append(k)
-            cols.append(k)
-            vals.append(diag)
-            if jj > 0:
-                rows.append(k)
-                cols.append(k - 1)
-                vals.append(cx)
-            if jj < nj - 1:
-                rows.append(k)
-                cols.append(k + 1)
-                vals.append(cx)
-            if ii > 0:
-                rows.append(k)
-                cols.append(k - nj)
-                vals.append(cy)
-            if ii < ni - 1:
-                rows.append(k)
-                cols.append(k + nj)
-                vals.append(cy)
-            b[k] = rhs[jg, jj + 1]
-
-    A = sparse.csc_matrix((vals, (rows, cols)), shape=(N, N))
-    x = splinalg.spsolve(A, b)
-
-    phi = np.zeros_like(rhs)
-    phi[1:-1, 1:-1] = x.reshape(ni, nj)
-    return phi
-
-
-def solve_poisson_fft(
-    rhs: np.ndarray,
-    dx: np.ndarray,
-    dy: float,
-) -> np.ndarray:
-    """Solve ∇²φ = rhs — periodic in longitude, Dirichlet in latitude.
-
-    1. FFT each row → eigenvalues for the x-derivative.
-    2. For each wavenumber *k*, solve a tridiagonal system in latitude
-       with variable ``dx(lat)``.
-    3. Inverse FFT back to physical space.
-
-    Args:
-        rhs: Right-hand side, shape ``(nlat, nlon)``.
-        dx: Zonal grid spacing [m]. Scalar or array of shape ``(nlat,)``.
-        dy: Meridional grid spacing [m].
-
-    Returns:
-        Solution φ, shape ``(nlat, nlon)``.
-
-    References:
-        Schumann U & Sweet R (1988) J. Comput. Phys. 75, 123-137.
-    """
-    nlat, nlon = rhs.shape
-    dx_arr = (
-        np.full(nlat, float(dx)) if np.isscalar(dx) else np.asarray(dx, float).ravel()
-    )
-    dy2 = dy * dy
     ni = nlat - 2
     if ni == 0:
         return np.zeros_like(rhs)
 
-    rhs_hat = np.fft.fft(rhs, axis=1)
+    lat_rad = np.deg2rad(lat)
+    cos_phi = np.cos(lat_rad)                      # (nlat,)
+    dphi = dy / R_earth                             # Δφ in radians
+    dphi2 = dphi * dphi
+    dlam2 = dlon_rad * dlon_rad
+
+    # Half-grid cosines: cos(φ_{j+½})
+    cos_half = np.cos(0.5 * (lat_rad[:-1] + lat_rad[1:]))  # (nlat-1,)
+
+    # ── Scale RHS: f_scaled = f · a² · cosφ  (but our rhs is already
+    #    in physical units of 1/s, so scale by R_earth² · cosφ)
+    rhs_scaled = rhs * (R_earth ** 2) * cos_phi[:, None]
+
+    rhs_hat = np.fft.fft(rhs_scaled, axis=1)
     phi_hat = np.zeros_like(rhs_hat)
 
     for kk in range(nlon):
         lam_k = 2.0 * (np.cos(2.0 * np.pi * kk / nlon) - 1.0)
 
-        # Tridiagonal: a_j φ_{j-1} + b_j φ_j + c_j φ_{j+1} = f_j
-        a = np.full(ni, 1.0 / dy2)
-        c = np.full(ni, 1.0 / dy2)
-        b = np.empty(ni)
-        f = np.empty(ni, dtype=complex)
+        a_vec = np.empty(ni)     # sub-diagonal
+        c_vec = np.empty(ni)     # super-diagonal
+        b_vec = np.empty(ni)     # main diagonal
+        f_vec = np.empty(ni, dtype=complex)
 
         for j in range(ni):
-            jg = j + 1
-            b[j] = lam_k / (dx_arr[jg] ** 2) - 2.0 / dy2
-            f[j] = rhs_hat[jg, kk]
+            jg = j + 1                             # global index
+            a_vec[j] = cos_half[jg - 1] / dphi2       # cos(φ_{j-½})
+            c_vec[j] = cos_half[jg] / dphi2           # cos(φ_{j+½})
+            b_vec[j] = lam_k / (cos_phi[jg] * dlam2) - (a_vec[j] + c_vec[j])
+            f_vec[j] = rhs_hat[jg, kk]
 
-        phi_hat[1:-1, kk] = _thomas(a, b, c, f)
+        phi_hat[1:-1, kk] = _thomas(a_vec, b_vec, c_vec, f_vec)
 
     return np.fft.ifft(phi_hat, axis=1).real
 
 
-def solve_poisson_dct(
-    rhs: np.ndarray,
-    dx_mean: float,
-    dy: float,
-) -> np.ndarray:
-    """DST-I Poisson solver with constant dx.
-
-    Solve ∇²φ = rhs with Dirichlet φ = 0 on all boundaries using a
-    Discrete Sine Transform (type I).  Uses **constant** ``dx_mean``
-    — fast O(N log N) but loses accuracy at high latitudes where dx
-    varies with cos(lat).
-
-    Args:
-        rhs: Right-hand side, shape ``(nlat, nlon)``.
-        dx_mean: Mean zonal grid spacing [m].
-        dy: Meridional grid spacing [m].
-
-    Returns:
-        Solution φ, shape ``(nlat, nlon)``.
-    """
-    nlat, nlon = rhs.shape
-    kx = np.arange(1, nlon + 1)
-    ky = np.arange(1, nlat + 1)
-    KX, KY = np.meshgrid(kx, ky)
-    lam = (
-        2 * (np.cos(np.pi * KX / (nlon + 1)) - 1) / (dx_mean ** 2)
-        + 2 * (np.cos(np.pi * KY / (nlat + 1)) - 1) / (dy ** 2)
-    )
-    rhs_hat = scipy_fft.dstn(rhs, type=1)
-    phi_hat = np.zeros_like(rhs_hat)
-    mask = np.abs(lam) > 1e-14
-    phi_hat[mask] = rhs_hat[mask] / lam[mask]
-    return scipy_fft.idstn(phi_hat, type=1)
+# ── DEPRECATED: solve_poisson_dct ───────────────────────────────────
+# DST-I with constant dx. Replaced by solve_poisson_spherical_fft.
+#
+# def solve_poisson_dct(rhs, dx_mean, dy, **kw):
+#     nlat, nlon = rhs.shape
+#     kx = np.arange(1, nlon + 1); ky = np.arange(1, nlat + 1)
+#     KX, KY = np.meshgrid(kx, ky)
+#     lam = (2*(np.cos(np.pi*KX/(nlon+1))-1)/dx_mean**2
+#            + 2*(np.cos(np.pi*KY/(nlat+1))-1)/dy**2)
+#     rhs_hat = scipy_fft.dstn(rhs, type=1)
+#     phi_hat = np.zeros_like(rhs_hat)
+#     mask = np.abs(lam) > 1e-14
+#     phi_hat[mask] = rhs_hat[mask] / lam[mask]
+#     return scipy_fft.idstn(phi_hat, type=1)
 
 
-def solve_poisson_sor(
-    rhs: np.ndarray,
-    dx: np.ndarray,
-    dy: float,
-    omega: float = 1.8,
-    tol: float = 1e-6,
-    max_iter: int = 10000,
-) -> np.ndarray:
-    """SOR iterative Poisson solver.
-
-    Solve ∇²φ = rhs with Dirichlet φ = 0 using Successive
-    Over-Relaxation.  Same discrete 5-point Laplacian as
-    :func:`solve_poisson_direct`, but solved iteratively.
-    ~1000× slower; kept only for verification.
-
-    Args:
-        rhs: Right-hand side, shape ``(nlat, nlon)``.
-        dx: Zonal grid spacing [m]. Scalar or array of shape ``(nlat,)``.
-        dy: Meridional grid spacing [m].
-        omega: SOR relaxation parameter.
-        tol: Convergence tolerance on max absolute update.
-        max_iter: Maximum number of SOR iterations.
-
-    Returns:
-        Solution φ, shape ``(nlat, nlon)``.
-    """
-    nlat, nlon = rhs.shape
-    dx_arr = (
-        np.full(nlat, float(dx)) if np.isscalar(dx) else np.asarray(dx, float).ravel()
-    )
-    dy2 = dy * dy
-    phi = np.zeros_like(rhs)
-    for _ in range(max_iter):
-        max_diff = 0.0
-        for j in range(1, nlat - 1):
-            dx2 = dx_arr[j] ** 2
-            coef = 2.0 * (1.0 / dx2 + 1.0 / dy2)
-            for i in range(1, nlon - 1):
-                old = phi[j, i]
-                phi_new = (
-                    (phi[j, i + 1] + phi[j, i - 1]) / dx2
-                    + (phi[j + 1, i] + phi[j - 1, i]) / dy2
-                    - rhs[j, i]
-                ) / coef
-                phi[j, i] = old + omega * (phi_new - old)
-                max_diff = max(max_diff, abs(phi[j, i] - old))
-        if max_diff < tol:
-            break
-    return phi
+# ── DEPRECATED: solve_poisson_sor ───────────────────────────────────
+# SOR iterative solver. Replaced by solve_poisson_spherical_fft.
+#
+# def solve_poisson_sor(rhs, dx, dy, omega=1.8, tol=1e-6, max_iter=10000):
+#     nlat, nlon = rhs.shape
+#     dx_arr = np.full(nlat, float(dx)) if np.isscalar(dx) else np.asarray(dx, float).ravel()
+#     dy2 = dy * dy; phi = np.zeros_like(rhs)
+#     for _ in range(max_iter):
+#         max_diff = 0.0
+#         for j in range(1, nlat - 1):
+#             dx2 = dx_arr[j] ** 2; coef = 2.0 * (1.0/dx2 + 1.0/dy2)
+#             for i in range(1, nlon - 1):
+#                 old = phi[j, i]
+#                 phi_new = ((phi[j,i+1]+phi[j,i-1])/dx2
+#                            + (phi[j+1,i]+phi[j-1,i])/dy2 - rhs[j,i]) / coef
+#                 phi[j, i] = old + omega * (phi_new - old)
+#                 max_diff = max(max_diff, abs(phi[j, i] - old))
+#         if max_diff < tol: break
+#     return phi
 
 
 def _thomas(
@@ -382,10 +323,15 @@ def helmholtz_decomposition(
     lat: np.ndarray,
     lon: np.ndarray,
     R_earth: float = R_EARTH,
-    method: str = "direct",
+    method: str = "spherical",
     solver_kw: Optional[dict] = None,
 ) -> dict[str, np.ndarray]:
-    """Helmholtz decomposition on a lat-lon grid.
+    """Helmholtz decomposition on a lat-lon grid (spherical Laplacian).
+
+    Computes vorticity ζ and divergence δ from (u, v), removes the
+    area-weighted (cosφ) mean from each before solving the Poisson
+    equations ∇²ψ = ζ and ∇²χ = δ using the full spherical Laplacian
+    (conservative form, following xinvert/MiniUFO).
 
     Args:
         u: Zonal wind [m s⁻¹], shape ``(nlat, nlon)``.
@@ -393,19 +339,17 @@ def helmholtz_decomposition(
         lat: Latitude in degrees (ascending), shape ``(nlat,)``.
         lon: Longitude in degrees, shape ``(nlon,)``.
         R_earth: Earth radius [m].
-        method: Poisson solver backend — ``'direct'``, ``'fft'``,
-            ``'dct'``, or ``'sor'``.
-        solver_kw: Extra keyword arguments forwarded to the solver
-            (e.g. ``{'max_iter': 3000, 'tol': 1e-5}`` for SOR).
+        method: Ignored (kept for API compat). Always uses spherical.
+        solver_kw: Ignored (kept for API compat).
 
     Returns:
         Dictionary with keys ``u_rot``, ``v_rot``, ``u_div``, ``v_div``,
         ``u_har``, ``v_har``, ``chi``, ``psi``, ``vorticity``,
         ``divergence`` — each ``(nlat, nlon)``.
-    """
-    if solver_kw is None:
-        solver_kw = {}
 
+    References:
+        MiniUFO/xinvert — conservative-form spherical Laplacian.
+    """
     nan_mask = np.isnan(u) | np.isnan(v)
     u_work = np.where(nan_mask, 0.0, u) if nan_mask.any() else u.copy()
     v_work = np.where(nan_mask, 0.0, v) if nan_mask.any() else v.copy()
@@ -418,22 +362,21 @@ def helmholtz_decomposition(
     dy = np.deg2rad(dlat) * R_earth
     dx = np.deg2rad(dlon) * R_earth * np.cos(lat_rad)
     dx = np.maximum(dx, dy * 0.1)
+    dlon_rad = np.deg2rad(dlon)
 
     vort, div = compute_vorticity_divergence(u_work, v_work, dx, dy)
 
-    if method == "fft":
-        chi = solve_poisson_fft(div, dx, dy, **solver_kw)
-        psi = solve_poisson_fft(vort, dx, dy, **solver_kw)
-    elif method == "dct":
-        dx_mean = float(np.nanmean(dx))
-        chi = solve_poisson_dct(div, dx_mean, dy, **solver_kw)
-        psi = solve_poisson_dct(vort, dx_mean, dy, **solver_kw)
-    elif method == "sor":
-        chi = solve_poisson_sor(div, dx, dy, **solver_kw)
-        psi = solve_poisson_sor(vort, dx, dy, **solver_kw)
-    else:  # 'direct'
-        chi = solve_poisson_direct(div, dx, dy, **solver_kw)
-        psi = solve_poisson_direct(vort, dx, dy, **solver_kw)
+    # ── Area-weighted mean removal (Fredholm solvability) ──
+    cos_phi = np.cos(lat_rad)
+    area_weights = cos_phi / cos_phi.sum()        # (nlat,)
+    div_mean = np.sum(area_weights[:, None] * div) / nlon
+    vort_mean = np.sum(area_weights[:, None] * vort) / nlon
+    div = div - div_mean
+    vort = vort - vort_mean
+
+    # ── Spherical Poisson solve ──
+    chi = solve_poisson_spherical_fft(div, lat, dy, dlon_rad, R_earth=R_earth)
+    psi = solve_poisson_spherical_fft(vort, lat, dy, dlon_rad, R_earth=R_earth)
 
     dchi_dx, dchi_dy = gradient(chi, dx, dy)
     dpsi_dx, dpsi_dy = gradient(psi, dx, dy)
@@ -467,12 +410,12 @@ def helmholtz_decomposition_3d(
     lat: np.ndarray,
     lon: np.ndarray,
     R_earth: float = R_EARTH,
-    method: str = "direct",
+    method: str = "spherical",
 ) -> dict[str, np.ndarray]:
     """Helmholtz decomposition for each vertical level.
 
     Applies :func:`helmholtz_decomposition` independently to every
-    level along axis 0.
+    level along axis 0, using the spherical Laplacian solver.
 
     Args:
         u_3d: Zonal wind [m s⁻¹], shape ``(nlevels, nlat, nlon)``.
@@ -480,7 +423,7 @@ def helmholtz_decomposition_3d(
         lat: Latitude in degrees (ascending), shape ``(nlat,)``.
         lon: Longitude in degrees, shape ``(nlon,)``.
         R_earth: Earth radius [m].
-        method: Poisson solver backend (see :func:`helmholtz_decomposition`).
+        method: Ignored (always spherical).
 
     Returns:
         Dictionary with the same keys as :func:`helmholtz_decomposition`,
@@ -507,7 +450,6 @@ def helmholtz_decomposition_3d(
             lat,
             lon,
             R_earth=R_earth,
-            method=method,
         )
         for k in keys:
             out[k][lev] = res[k]

@@ -4,7 +4,7 @@ Supports ERA5 and other reanalysis products with standard CF-conventions.
 Input can be any resolution >= NH coverage; output is always a regular
 1.5° Northern-Hemisphere grid at hourly resolution.
 
-Required variables: u, v, w, t, pv, z on pressure levels.
+Required variables: u, v, w, t, pv, z, q on pressure levels.
 """
 
 from __future__ import annotations

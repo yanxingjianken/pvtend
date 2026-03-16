@@ -39,7 +39,7 @@ import numpy as np
 
 from .constants import R_EARTH
 from .derivatives import ddp
-from .helmholtz import gradient, solve_poisson_fft
+from .helmholtz import gradient, solve_poisson_spherical_fft
 
 
 def solve_chi_moist(
@@ -48,11 +48,16 @@ def solve_chi_moist(
     lon: np.ndarray,
     plevs_pa: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Solve ∇²χ_moist = -∂ω_moist/∂p at each level.
+    """Solve ∇²χ_moist = -∂ω_moist/∂p at each level (spherical Laplacian).
 
     Computes the velocity potential of the moist divergent wind by
-    solving a Poisson equation on each pressure level.  The RHS is
-    the negative vertical derivative of the moist omega field.
+    solving a Poisson equation on each pressure level using the full
+    spherical Laplacian (conservative form).  The RHS is the negative
+    vertical derivative of the moist omega field.
+
+    The area-weighted mean of the RHS is removed on each level before
+    solving to ensure compatibility with the Dirichlet boundary
+    conditions (Fredholm solvability).
 
     Args:
         omega_moist: Moist omega [Pa/s], shape ``(nlev, nlat, nlon)``.
@@ -79,6 +84,7 @@ def solve_chi_moist(
     dy = np.deg2rad(dlat) * R_EARTH
     dx_arr = np.deg2rad(dlon) * R_EARTH * np.cos(lat_rad)
     dx_arr = np.maximum(dx_arr, dy * 0.1)  # guard near poles
+    dlon_rad = np.deg2rad(dlon)
 
     chi_m = np.zeros_like(omega_moist)
     u_div_m = np.zeros_like(omega_moist)
@@ -90,9 +96,20 @@ def solve_chi_moist(
     # RHS of Poisson equation: -∂ω_moist/∂p
     rhs_poisson = -domega_dp
 
-    # ── Solve level-by-level ──
+    # ── Area-weighted mean removal for RHS compatibility ──
+    cos_phi = np.cos(lat_rad)  # (nlat,)
+    area_weights = cos_phi / cos_phi.sum()  # normalised weights
     for k in range(nlev):
-        chi_k = solve_poisson_fft(rhs_poisson[k], dx_arr, dy)
+        weighted_mean = np.sum(
+            area_weights[:, None] * rhs_poisson[k]
+        ) / nlon
+        rhs_poisson[k] -= weighted_mean
+
+    # ── Solve level-by-level with spherical Laplacian ──
+    for k in range(nlev):
+        chi_k = solve_poisson_spherical_fft(
+            rhs_poisson[k], lat, dy, dlon_rad, R_earth=R_EARTH
+        )
         chi_m[k] = chi_k
         dchi_dx, dchi_dy = gradient(chi_k, dx_arr, dy)
         u_div_m[k] = dchi_dx

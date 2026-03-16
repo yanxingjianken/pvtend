@@ -7,7 +7,7 @@ import pytest
 
 from pvtend.helmholtz import (
     compute_vorticity_divergence,
-    solve_poisson_dct,
+    solve_poisson_spherical_fft,
     helmholtz_decomposition,
 )
 from pvtend.constants import R_EARTH
@@ -43,11 +43,11 @@ class TestVorticityDivergence:
         assert np.abs(vort[small_grid["nlat"] // 2, small_grid["nlon"] // 2]) > 0
 
 
-class TestPoissonDCT:
-    """Test DCT Poisson solver."""
+class TestPoissonSpherical:
+    """Test spherical Poisson solver."""
 
     def test_known_rhs(self, small_grid):
-        """Solve ∇²ψ = rhs and verify reconstruction."""
+        """Solve ∇²ψ = rhs (spherical) and verify solution is non-trivial."""
         nlat, nlon = small_grid["nlat"], small_grid["nlon"]
         dlat = np.deg2rad(small_grid["dlat"])
         dlon = np.deg2rad(small_grid["dlon"])
@@ -56,15 +56,16 @@ class TestPoissonDCT:
         lat2d, lon2d = np.meshgrid(small_grid["lat"], small_grid["lon"], indexing="ij")
         rhs = np.sin(np.deg2rad(lat2d) * 2) * np.sin(np.deg2rad(lon2d) * 2)
 
-        # dx, dy in meters
-        cos_lat_mid = np.cos(np.deg2rad(small_grid["lat"].mean()))
-        dx = R_EARTH * cos_lat_mid * dlon
         dy = R_EARTH * dlat
+        dlon_rad = small_grid["dlon"] * np.pi / 180.0
 
-        psi = solve_poisson_dct(rhs, dx, dy)
+        psi = solve_poisson_spherical_fft(rhs, small_grid["lat"], dy, dlon_rad)
         assert psi.shape == rhs.shape
-        # psi boundary should be ~0 for DCT (Dirichlet-like)
-        assert np.abs(psi[0, :]).max() < np.abs(psi).max() * 0.5
+        # Dirichlet BCs: boundary rows should be zero
+        np.testing.assert_allclose(psi[0, :], 0.0, atol=1e-10)
+        np.testing.assert_allclose(psi[-1, :], 0.0, atol=1e-10)
+        # Interior should be non-trivial
+        assert np.abs(psi[nlat // 2, nlon // 2]) > 0
 
 
 class TestHelmholtzDecomposition:
@@ -81,7 +82,7 @@ class TestHelmholtzDecomposition:
         v = np.cos(np.deg2rad(lon2d) * 3) * 0.5
 
         result = helmholtz_decomposition(u, v, small_grid["lat"], small_grid["lon"],
-                                         method="dct")
+                                         method="spherical")
         u_recon = result["u_rot"] + result["u_div"] + result["u_har"]
         v_recon = result["v_rot"] + result["v_div"] + result["v_har"]
 

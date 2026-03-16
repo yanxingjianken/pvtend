@@ -92,7 +92,7 @@ __all__ = [
     # Climatology
     "compute_climatology", "load_climatology",
     # Solvers
-    "solve_qg_omega", "solve_qg_omega_sip",
+    "solve_qg_omega_sip",
     "helmholtz_decomposition", "helmholtz_decomposition_3d",
     "decompose_omega",
     # Decomposition

@@ -7,21 +7,12 @@ Solves the quasi-geostrophic omega equation:
 Q-vector:
     Q = -(R_d/σp) * [(∂Vg/∂x · ∇T), (∂Vg/∂y · ∇T)]
 
-Three solver methods are available:
+Solver: Strongly Implicit Procedure (SIP, Stone 1968), full 3-D
+spherical stencil with tan(φ) metric term, following Li & O'Gorman
+(2020).  Numba-accelerated.
 
-- **sp19** (default): Empirical scaling ω_dry = 1/3 ω_total following
-  Steinfeld & Pfahl (2019).  Zero cost, structural consistency with
-  ω_total.  Requires *omega_total* as input.
-
-- **fft**: FFT in longitude (periodic) + Thomas tridiagonal in
-  pressure.  Drops ∂²ω/∂y² but retains ∂²ω/∂x² via spectral
-  representation.  Fast (~2 s) and captures >90 % of spatial variance.
-
-- **log20**: Strongly Implicit Procedure (SIP, Stone 1968), full 3-D
-  spherical stencil with tan(φ) metric term.  Closest analogue to
-  Li & O'Gorman (2020).  Numba-accelerated, ~3–6 s per event pair.
-
-BCs: ω = 0 at top and bottom pressure levels.
+BCs: Real ERA5 ω at top and bottom pressure levels (Dirichlet),
+lateral N/S faces may also use observed ω.
 Latitude taper: QG invalid below ~15°N.
 
 References:
@@ -31,8 +22,6 @@ References:
     extratropical precipitation extremes to climate change. J. Climate.
     Bluestein H B (1992). Synoptic-Dynamic Meteorology in Midlatitudes,
     Vol. II, eq. 5.7.54.
-    Steinfeld D, Pfahl S (2019). The role of latent heating in
-    atmospheric blocking dynamics. Climate Dyn., 53, 6159-6180.
     Stone H L (1968). Iterative solution of implicit approximations of
     multidimensional partial differential equations. SIAM J. Numer.
     Anal., 5, 530-558.
@@ -43,7 +32,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
-from .constants import R_EARTH, OMEGA_E, R_DRY, SP19_DRY_FRACTION
+from .constants import R_EARTH, OMEGA_E, R_DRY
 
 # Constants for geostrophic wind
 GEO_SMOOTH_SIGMA: float = 1.5   # Gaussian sigma in grid points
@@ -103,7 +92,7 @@ def compute_geostrophic_wind(
     Returns:
         ``(u_g, v_g)`` — geostrophic wind [m s⁻¹], each ``(nlev, nlat, nlon)``.
     """
-    from .derivatives import gradient_periodic
+    from .derivatives import ddx, ddy
 
     nlev, nlat, nlon = phi_3d.shape
     lat_rad = np.deg2rad(lat)
@@ -121,6 +110,10 @@ def compute_geostrophic_wind(
     dx_arr = np.deg2rad(dlon) * R_EARTH * np.cos(lat_rad)
     dx_arr = np.maximum(dx_arr, dy * 0.01)
 
+    # Detect full ring vs local patch
+    lon_span = dlon * nlon
+    periodic = lon_span > 350.0
+
     u_g = np.zeros_like(phi_3d)
     v_g = np.zeros_like(phi_3d)
 
@@ -128,60 +121,13 @@ def compute_geostrophic_wind(
         phi_k = phi_3d[k]
         if sigma_smooth > 0:
             phi_k = gaussian_smooth_2d(phi_k, sigma=sigma_smooth)
-        dphi_dx, dphi_dy = gradient_periodic(phi_k, dx_arr, dy)
+        dphi_dx = ddx(phi_k, dx_arr, periodic=periodic)
+        dphi_dy = ddy(phi_k, dy)
         for j in range(nlat):
             u_g[k, j, :] = -dphi_dy[j, :] / f_arr[j]
             v_g[k, j, :] = dphi_dx[j, :] / f_arr[j]
 
     return u_g, v_g
-
-
-def _thomas_batch(
-    a_1d: np.ndarray,
-    b_2d: np.ndarray,
-    c_1d: np.ndarray,
-    d_2d: np.ndarray,
-) -> np.ndarray:
-    """Batched Thomas tridiagonal solver over wavenumber dimension.
-
-    Solves the tridiagonal system ``A x = d`` for each wavenumber
-    simultaneously.
-
-    Args:
-        a_1d: Sub-diagonal, shape ``(n,)``.
-        b_2d: Main diagonal, shape ``(n, M)`` — varies with wavenumber.
-        c_1d: Super-diagonal, shape ``(n,)``.
-        d_2d: RHS, shape ``(n, M)``.
-
-    Returns:
-        Solution ``x``, shape ``(n, M)``.
-    """
-    n = b_2d.shape[0]
-    cp = np.zeros_like(b_2d)
-    dp = np.zeros_like(d_2d)
-
-    denom = b_2d[0].copy()
-    denom = np.where(np.abs(denom) < 1e-30,
-                     1e-30 * np.sign(denom.real + 1e-60), denom)
-    cp[0] = c_1d[0] / denom
-    dp[0] = d_2d[0] / denom
-
-    for i in range(1, n):
-        denom = b_2d[i] - a_1d[i] * cp[i - 1]
-        denom = np.where(np.abs(denom) < 1e-30,
-                         1e-30 * np.sign(denom.real + 1e-60), denom)
-        if i < n - 1:
-            cp[i] = c_1d[i] / denom
-        dp[i] = (d_2d[i] - a_1d[i] * dp[i - 1]) / denom
-
-    x = np.zeros_like(d_2d)
-    x[-1] = dp[-1]
-    for i in range(n - 2, -1, -1):
-        x[i] = dp[i] - cp[i] * x[i + 1]
-
-    # Clamp extreme outliers (numerical safety)
-    x = np.where(np.abs(x) > 1e10, 0.0, x)
-    return x
 
 
 def lat_taper(lat: np.ndarray) -> np.ndarray:
@@ -201,236 +147,6 @@ def lat_taper(lat: np.ndarray) -> np.ndarray:
     )
     taper_hi = np.clip((LAT_QG_POLAR - lat) / 5.0, 0.0, 1.0)
     return taper_lo * taper_hi
-
-
-def solve_qg_omega(
-    u: np.ndarray,
-    v: np.ndarray,
-    t: np.ndarray,
-    lat: np.ndarray,
-    lon: np.ndarray,
-    plevs_pa: np.ndarray,
-    *,
-    method: str = "sp19",
-    center_lat: float | None = None,
-    omega_total: np.ndarray | None = None,
-    dry_fraction: float = SP19_DRY_FRACTION,
-    t_full: np.ndarray | None = None,
-    omega_b: np.ndarray | None = None,
-    sip_maxit: int = 300,
-    sip_alpha: float = 0.93,
-    sip_resmax: float = 1e-14,
-) -> np.ndarray:
-    """Solve the QG omega equation for omega_dry.
-
-    .. deprecated::
-        The ``"fft"`` method is retained for backward compatibility but
-        is no longer used in the pipeline.  Use :func:`solve_qg_omega_sip`
-        directly or pass ``method="log20"`` (default) or ``method="sp19"``.
-
-    Args:
-        u: Geostrophic zonal wind [m s⁻¹], shape ``(nlev, nlat, nlon)``.
-        v: Geostrophic meridional wind [m s⁻¹], shape ``(nlev, nlat, nlon)``.
-        t: Temperature [K], shape ``(nlev, nlat, nlon)``.  For anomaly
-            solves pass anomaly here and full physical T via *t_full*.
-        lat: Ascending latitude [degrees], shape ``(nlat,)``.
-        lon: Longitude [degrees], shape ``(nlon,)``.
-        plevs_pa: Pressure [Pa], ascending, shape ``(nlev,)``.
-        method: Solver method — ``"log20"`` (SIP, Li & O'Gorman 2020,
-            default), ``"sp19"`` (Steinfeld & Pfahl 2019 empirical
-            scaling), or ``"fft"`` (legacy, FFT + Thomas tridiagonal).
-        center_lat: If given, use constant f₀ = 2Ω sin(center_lat) and
-            β₀ = 2Ω cos(center_lat)/a instead of latitude-varying values.
-            Recommended for event-centred patches (Li & O'Gorman 2020).
-        omega_total: Total vertical velocity [Pa s⁻¹], required for
-            ``method="sp19"``.  Shape ``(nlev, nlat, nlon)``.
-        dry_fraction: Fraction ω_dry/ω_total for SP19 (default 1/3).
-        t_full: Full physical temperature [K] for σ₀ computation.
-            Required when *t* is an anomaly field (σ needs T ≈ 200–300 K).
-        omega_b: Boundary-condition omega [Pa s⁻¹],
-            shape ``(nlev, nlat, nlon)``.  When provided, the SIP solver
-            pre-fills all Dirichlet faces (top, bottom, lateral N/S) with
-            these values instead of ω = 0.  Only used by ``method="log20"``.
-        sip_maxit: Max SIP iterations for LOG20 (default 300).
-        sip_alpha: SIP relaxation parameter for LOG20 (default 0.93).
-        sip_resmax: SIP convergence threshold for LOG20 (default 1e-14).
-
-    Returns:
-        ``omega_dry`` — QG vertical velocity [Pa s⁻¹],
-        shape ``(nlev, nlat, nlon)``.
-
-    Raises:
-        ValueError: If *method* is not ``"sp19"``, ``"fft"``, or ``"log20"``.
-        ValueError: If *method* is ``"sp19"`` and *omega_total* is None.
-    """
-    _valid_methods = ("sp19", "fft", "log20")
-    if method not in _valid_methods:
-        raise ValueError(
-            f"method must be one of {_valid_methods}, got {method!r}"
-        )
-
-    # ---- SP19: empirical scaling (no elliptic solve) ----
-    if method == "sp19":
-        if omega_total is None:
-            raise ValueError(
-                "omega_total is required for method='sp19' "
-                "(Steinfeld & Pfahl 2019 scaling)"
-            )
-        return dry_fraction * omega_total
-
-    # ---- LOG20: SIP iterative solver ----
-    if method == "log20":
-        omega_dry, _info = solve_qg_omega_sip(
-            u, v, t, lat, lon, plevs_pa,
-            center_lat=center_lat,
-            t_full=t_full,
-            omega_b=omega_b,
-            maxit=sip_maxit,
-            alpha=sip_alpha,
-            resmax=sip_resmax,
-        )
-        return omega_dry
-
-    # ---- FFT: compute Q-vector RHS and solve ----
-    from .derivatives import gradient_periodic
-
-    nlev, nlat, nlon = u.shape
-    lat_rad = np.deg2rad(lat)
-    dlat = np.abs(lat[1] - lat[0]) if nlat > 1 else 1.5
-    dlon = np.abs(lon[1] - lon[0]) if nlon > 1 else 1.5
-    dy = np.deg2rad(dlat) * R_EARTH
-    dx_arr = np.deg2rad(dlon) * R_EARTH * np.cos(lat_rad)
-    dx_arr = np.maximum(dx_arr, dy * 0.1)
-
-    # Coriolis and beta — constant or latitude-varying
-    f_min = 2 * OMEGA_E * np.sin(np.deg2rad(F_MIN_LAT))
-    if center_lat is not None:
-        f0_val = 2 * OMEGA_E * np.sin(np.deg2rad(center_lat))
-        beta0_val = 2 * OMEGA_E * np.cos(np.deg2rad(center_lat)) / R_EARTH
-        f_arr = np.full(nlat, f0_val)
-        beta_arr = np.full(nlat, beta0_val)
-    else:
-        f_arr = 2 * OMEGA_E * np.sin(lat_rad)
-        f_arr = np.sign(f_arr) * np.maximum(np.abs(f_arr), f_min)
-        beta_arr = 2 * OMEGA_E * np.cos(lat_rad) / R_EARTH
-
-    # Static stability profile σ₀(p) — domain-mean T (Bluestein eq 4.3.6)
-    # Use t_full (physical temperature) when available; otherwise t itself.
-    t_for_sigma = t_full if t_full is not None else t
-    kappa = R_DRY / 1004.0
-    T_mean = np.nanmean(t_for_sigma, axis=(1, 2))
-    theta_m = T_mean * (1e5 / plevs_pa) ** kappa
-    sigma0 = np.zeros(nlev)
-    for k in range(1, nlev - 1):
-        dp_s = plevs_pa[k + 1] - plevs_pa[k - 1]
-        dlnt = np.log(theta_m[k + 1]) - np.log(theta_m[k - 1])
-        sigma0[k] = -(R_DRY * T_mean[k] / plevs_pa[k]) * (dlnt / dp_s)
-    sigma0[0] = sigma0[1]
-    sigma0[-1] = sigma0[-2]
-    sigma0 = np.maximum(sigma0, 1e-7)
-
-    # Latitude taper for QG validity
-    lat_taper_full = lat_taper(lat)
-    u_tapered = u * lat_taper_full[None, :, None]
-    v_tapered = v * lat_taper_full[None, :, None]
-
-    # Smooth T before computing gradients (Li & O'Gorman 2020 approach)
-    dT_dx = np.zeros_like(t)
-    dT_dy = np.zeros_like(t)
-    for k in range(nlev):
-        t_k = gaussian_smooth_2d(t[k], sigma=GEO_SMOOTH_SIGMA)
-        dT_dx[k], dT_dy[k] = gradient_periodic(t_k, dx_arr, dy)
-
-    # Wind gradients
-    dug_dx = np.zeros_like(u)
-    dug_dy = np.zeros_like(u)
-    dvg_dx = np.zeros_like(v)
-    dvg_dy = np.zeros_like(v)
-    for k in range(nlev):
-        dug_dx[k], dug_dy[k] = gradient_periodic(u_tapered[k], dx_arr, dy)
-        dvg_dx[k], dvg_dy[k] = gradient_periodic(v_tapered[k], dx_arr, dy)
-
-    # Q-vector divergence and beta term → RHS
-    rhs_qv = np.zeros_like(u)
-    for k in range(nlev):
-        coef = -R_DRY / (sigma0[k] * plevs_pa[k])
-        Q1 = coef * (dug_dx[k] * dT_dx[k] + dvg_dx[k] * dT_dy[k])
-        Q2 = coef * (dug_dy[k] * dT_dx[k] + dvg_dy[k] * dT_dy[k])
-        Q1 *= lat_taper_full[:, None]
-        Q2 *= lat_taper_full[:, None]
-        dQ1_dx, _ = gradient_periodic(Q1, dx_arr, dy)
-        _, dQ2_dy = gradient_periodic(Q2, dx_arr, dy)
-        div_Q = dQ1_dx + dQ2_dy
-        beta_term = (
-            beta_arr[:, None]
-            * (R_DRY / (sigma0[k] * plevs_pa[k]))
-            * dT_dx[k]
-        )
-        beta_term *= lat_taper_full[:, None]
-        rhs_qv[k] = -2.0 * div_Q - beta_term
-
-    # ---- FFT + Thomas tridiagonal solver ----
-    omega_dry = _solve_fft_thomas(
-        rhs_qv, lat, lat_rad, plevs_pa, sigma0, f_arr,
-        nlev, nlat, nlon,
-    )
-
-    omega_dry *= lat_taper_full[None, :, None]
-    return omega_dry
-
-
-# =========================================================================
-#  Internal solver: FFT in longitude + Thomas in pressure
-# =========================================================================
-
-def _solve_fft_thomas(
-    rhs: np.ndarray,
-    lat: np.ndarray,
-    lat_rad: np.ndarray,
-    plevs_pa: np.ndarray,
-    sigma0: np.ndarray,
-    f_arr: np.ndarray,
-    nlev: int,
-    nlat: int,
-    nlon: int,
-) -> np.ndarray:
-    """FFT + Thomas tridiagonal solver (drops ∂²ω/∂y²)."""
-    rhs_hat = np.fft.rfft(rhs, axis=-1)
-    omega_hat = np.zeros_like(rhs_hat)
-    n_int = nlev - 2
-    if n_int < 1:
-        return np.zeros((nlev, nlat, nlon))
-
-    dp_diff = np.diff(plevs_pa)
-    f2 = f_arr ** 2
-    nfreq = rhs_hat.shape[-1]
-    m_arr = np.arange(nfreq, dtype=float)
-    cos2 = np.maximum(np.cos(lat_rad) ** 2, 1e-6)
-    kx2 = m_arr[None, :] ** 2 / (R_EARTH ** 2 * cos2[:, None])
-
-    hm_k = dp_diff[:n_int]
-    hp_k = dp_diff[1 : n_int + 1]
-    coef_k = 2.0 / (hm_k + hp_k)
-    sigma0_int = sigma0[1 : nlev - 1]
-
-    for j in range(nlat):
-        if lat[j] < LAT_QG_LO:
-            continue
-        f2j = f2[j]
-        f2_over_sigma = f2j / sigma0_int
-
-        a_1d = f2_over_sigma * coef_k / hm_k
-        c_1d = f2_over_sigma * coef_k / hp_k
-        b_base = -f2_over_sigma * coef_k * (1.0 / hm_k + 1.0 / hp_k)
-        b_2d = b_base[:, None] - kx2[j][None, :]
-
-        d_2d = rhs_hat[1 : nlev - 1, j, :]
-        omega_hat[1 : nlev - 1, j, :] = _thomas_batch(
-            a_1d, b_2d, c_1d, d_2d
-        )
-
-    omega_hat[:, :, 0] = 0.0
-    return np.fft.irfft(omega_hat, n=nlon, axis=-1)
 
 
 # =========================================================================
@@ -766,7 +482,7 @@ def _sip_core_python(
 
 
 if _HAS_NUMBA:
-    @_njit(cache=True)
+    @_njit(cache=True, nogil=True)
     def _sip_core(
         AP: np.ndarray,
         AE: np.ndarray,
@@ -919,6 +635,7 @@ def solve_qg_omega_sip(
     center_lat: float | None = None,
     omega_b: np.ndarray | None = None,
     t_full: np.ndarray | None = None,
+    dT_dt: np.ndarray | None = None,
     maxit: int = 300,
     alpha: float = 0.93,
     resmax: float = 1e-14,
@@ -938,9 +655,15 @@ def solve_qg_omega_sip(
     σ₀(p) then rescaled to σ(k,j,i); the SIP stencil vertical
     coefficients use σ(k,j,i) directly.
 
-    **Boundary conditions**: Dirichlet ω = 0 on all faces.  When the
-    longitude span covers a full ring (≥ 350°), periodic wrapping is
-    used in longitude instead.
+    **Boundary conditions**: When *omega_b* is provided, the real ERA5
+    vertical velocity is prescribed on all Dirichlet faces (top/bottom
+    pressure levels, N/S meridional boundaries).  Otherwise ω = 0.
+    Longitude is periodic when the domain spans ≥ 350°.
+
+    **Diabatic heating (term C)**: When *dT_dt* is provided, the
+    diabatic heating term ``(R_d / (σ₀ p)) ∇²_H(∂T/∂t)`` is added to
+    the Q-vector RHS before solving.  This gives the **total QG omega**
+    (terms A+B+C).  Without *dT_dt*, only the dry terms (A+B) are used.
 
     Args:
         u: Geostrophic zonal wind [m s⁻¹], ``(nlev, nlat, nlon)``.
@@ -953,18 +676,26 @@ def solve_qg_omega_sip(
         plevs_pa: Pressure [Pa], ascending, ``(nlev,)``.
         center_lat: Latitude for constant f₀ and β₀.
         omega_b: Boundary omega ``(nlev, nlat, nlon)`` (None → 0).
+            When provided, real ERA5 ω values are used at the top
+            (100 hPa) and bottom (1000 hPa) pressure levels and at
+            the meridional boundaries.
         t_full: Full physical temperature [K] for σ₀ and σ_3d
             computation.  When ``None`` (default), *t* itself is used.
             **Must be supplied when *t* is an anomaly field**,
             otherwise σ ≈ 0 → NaN.
+        dT_dt: Eulerian temperature tendency ∂T/∂t [K s⁻¹],
+            ``(nlev, nlat, nlon)``.  When provided, used as a proxy for
+            diabatic heating J/Cp to add term C to the QG omega RHS.
         maxit: Max SIP iterations (default 300).
         alpha: SIP relaxation parameter (default 0.93).
         resmax: Convergence threshold (default 1e-14).
 
     Returns:
-        ``(omega_dry, info)`` where *omega_dry* is ``(nlev, nlat, nlon)``
-        QG vertical velocity [Pa s⁻¹] and *info* is a dict with keys
-        ``'iters'``, ``'final_residual'``, ``'numba'``, ``'solve_time'``.
+        ``(omega, info)`` where *omega* is ``(nlev, nlat, nlon)``
+        QG vertical velocity [Pa s⁻¹] (dry A+B only when *dT_dt* is
+        None; total A+B+C when *dT_dt* is provided) and *info* is a
+        dict with ``'iters'``, ``'final_residual'``, ``'numba'``,
+        ``'solve_time'``, ``'terms'``.
 
     References:
         Stone H L (1968). Iterative solution of implicit approximations
@@ -985,6 +716,45 @@ def solve_qg_omega_sip(
         center_lat=center_lat,
         t_full=t_full,
     )
+    terms_used = "AB"
+
+    # --- 1a. Add diabatic term C when dT_dt is provided ---
+    # Term C (Sutcliffe form in σ₀-divided equation):
+    #   C_σ₀ = (R_d / (σ₀ p)) ∇²_H(∂T/∂t)
+    # where ∂T/∂t is the Eulerian temperature tendency (proxy for J/Cp).
+    # This has the same coefficient as the thermal-advection part of the
+    # Q-vector RHS, but replaces -Vg·∇T with dT/dt.
+    if dT_dt is not None:
+        from .derivatives import ddx, ddy
+
+        lat_rad = np.deg2rad(lat)
+        dlat = np.abs(lat[1] - lat[0]) if nlat > 1 else 1.5
+        dlon = np.abs(lon[1] - lon[0]) if nlon > 1 else 1.5
+        dy_m = np.deg2rad(dlat) * R_EARTH
+        dx_m = np.deg2rad(dlon) * R_EARTH * np.cos(lat_rad)
+        dx_m = np.maximum(dx_m, dy_m * 0.1)
+        lon_span = dlon * nlon
+        periodic_c = lon_span > 350.0
+
+        # NaN-safe dT_dt
+        dT_dt_safe = np.nan_to_num(dT_dt, nan=0.0, posinf=0.0, neginf=0.0)
+
+        for k in range(nlev):
+            # Smooth dT/dt before computing Laplacian (same as T)
+            dTdt_k = gaussian_smooth_2d(dT_dt_safe[k], sigma=GEO_SMOOTH_SIGMA)
+            # Horizontal gradient
+            d1_dx = ddx(dTdt_k, dx_m, periodic=periodic_c)
+            d1_dy = ddy(dTdt_k, dy_m)
+            # Horizontal Laplacian: ∇²(dT/dt) = ∂²/∂x² + ∂²/∂y²
+            d2_dx2 = ddx(d1_dx, dx_m, periodic=periodic_c)
+            d2_dy2 = ddy(d1_dy, dy_m)
+            lap_dTdt = d2_dx2 + d2_dy2
+
+            # Coefficient: R_d / (σ₀(k) * p(k))  — same form as Q-vector
+            coef_c = R_DRY / (sigma0[k] * plevs_pa[k])
+            rhs[k] += coef_c * lap_dTdt * lat_taper_full[:, None]
+
+        terms_used = "ABC"
 
     # --- 1b. Local 3-D static stability σ(k,j,i) ---
     # Domain-mean σ₀(p) is too coarse for a full-NH domain; compute σ
@@ -1101,21 +871,21 @@ def solve_qg_omega_sip(
         periodic_lon,
     )
 
-    omega_dry = T_sol
+    omega_out = T_sol
 
     # --- 6. Apply latitude taper ---
-    omega_dry *= lat_taper_full[None, :, None]
+    omega_out *= lat_taper_full[None, :, None]
 
     # --- 7. Remove zonal mean (match FFT where m=0 is excluded) ---
     # Only remove zonal mean when longitude covers a full ring (~360°);
     # on a local patch the "zonal mean" is NOT the true m=0 wavenumber
     # and removing it would destroy the signal.
     if periodic_lon:
-        zmean = np.nanmean(omega_dry, axis=-1, keepdims=True)
-        omega_dry -= zmean
+        zmean = np.nanmean(omega_out, axis=-1, keepdims=True)
+        omega_out -= zmean
 
     # --- 8. Clean NaN / inf ---
-    omega_dry = np.nan_to_num(omega_dry, nan=0.0, posinf=0.0, neginf=0.0)
+    omega_out = np.nan_to_num(omega_out, nan=0.0, posinf=0.0, neginf=0.0)
 
     elapsed = _time.perf_counter() - t0_wall
     info = {
@@ -1123,5 +893,6 @@ def solve_qg_omega_sip(
         "final_residual": float(final_res),
         "numba": _HAS_NUMBA,
         "solve_time": elapsed,
+        "terms": terms_used,
     }
-    return omega_dry, info
+    return omega_out, info

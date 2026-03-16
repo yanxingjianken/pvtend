@@ -87,21 +87,62 @@ Two solver methods
 1. **log20** *(default)* — Strongly Implicit Procedure (SIP, Stone 1968)
    with a full 3-D spherical finite-difference stencil including the
    :math:`\tan\varphi` metric term.  Closest analogue to
-   Li & O'Gorman (2020).  Numba-accelerated when available (~3–6 s
-   per event pair); falls back to pure-Python if ``numba`` is not
-   installed.  This is the recommended default for production runs.
+   Li & O'Gorman (2020).  Numba-accelerated (``nogil=True``) when
+   available (~3–6 s per event); falls back to pure-Python if ``numba``
+   is not installed.  Always solved on the **full Northern Hemisphere**
+   grid (periodic in longitude, Dirichlet at equatorial and polar faces)
+   and the event patch is extracted afterward.
 
 2. **sp19** — Steinfeld & Pfahl (2019) empirical scaling.
    Sets :math:`\omega_\text{dry} = \frac{1}{3}\,\omega_\text{total}`.
-   Zero-cost, preserves spatial structure, requires ``omega_total``
-   as input.
+   Zero-cost, preserves spatial structure.  QG-moist ω equals the moist
+   residual (no separate term-C solve).
 
 Both methods apply a **latitude taper** (linearly 0 → 1 between 15°N and
 25°N, tapering back to 0 above 80°N) to enforce QG validity.
 
-Boundary conditions: :math:`\omega = 0` at top/bottom pressure levels
-and at lateral boundaries (Dirichlet for local patches; periodic for
-full rings).
+Boundary conditions (LOG20)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Inhomogeneous Dirichlet: **real ERA5** :math:`\omega` is prescribed on
+all six faces (top, bottom, and four lateral boundaries) via the
+``omega_b`` parameter.  This anchors the QG inversion to the reanalysis
+vertical velocity field at the domain edges, eliminating the bias of
+homogeneous (:math:`\omega = 0`) boundaries.
+
+Diabatic heating — term C
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When the Eulerian temperature tendency :math:`\partial T/\partial t` is
+available (``dT_dt`` parameter), the RHS gains an additional forcing:
+
+.. math::
+
+   \text{Term C} = \frac{R_d}{\sigma_0\,p}\,\nabla^2_p
+   \!\left(\frac{\partial T}{\partial t}\right)
+
+This term captures the diabatic contribution (predominantly latent
+heating) without requiring an explicit LHR parameterisation.  The solver
+is called **twice**:
+
+* **Without** ``dT_dt`` → :math:`\omega_\text{dry}` (terms A + B only)
+* **With** ``dT_dt`` → :math:`\omega_\text{dry+moist(QG)}` (A + B + C)
+
+The difference is the **QG-moist omega**:
+
+.. math::
+
+   \omega_\text{qg\_moist} = \omega_{A+B+C} - \omega_{A+B}
+
+and the full moist residual remains
+:math:`\omega_\text{moist} = \omega_\text{total} - \omega_\text{dry}`.
+This yields a **3-way vertical-velocity decomposition**:
+
+.. math::
+
+   \omega = \underbrace{\omega_\text{dry}}_{\text{A+B}}
+          + \underbrace{\omega_\text{qg\_moist}}_{\text{term C response}}
+          + \underbrace{(\omega_\text{moist} - \omega_\text{qg\_moist})}_{\text{non-QG residual}}
 
 **References:** Hoskins B J, Draghici I, Davies H C (1978) *Q.J.R.M.S.*
 104, 31–38.  Li L, O'Gorman P A (2020) *J. Climate*.
@@ -140,51 +181,31 @@ and the harmonic residual satisfies :math:`\nabla\cdot\mathbf{u}_\text{har}=0`
 The decomposition proceeds by:
 
 1. Computing vorticity :math:`\zeta` and divergence :math:`\delta` from
-   the input wind.
-2. Solving Poisson equations :math:`\nabla^2\psi=\zeta` and
-   :math:`\nabla^2\chi=\delta` with one of four backend solvers.
-3. Recovering :math:`(u_\text{rot},v_\text{rot})` and
+   the input wind via :func:`~pvtend.helmholtz.compute_vorticity_divergence`.
+2. Removing the area-weighted (:math:`\cos\varphi`) mean from each
+   (Fredholm solvability condition).
+3. Solving Poisson equations :math:`\nabla^2\psi=\zeta` and
+   :math:`\nabla^2\chi=\delta` using the **spherical FFT Poisson solver**
+   :func:`~pvtend.helmholtz.solve_poisson_spherical_fft`.
+4. Recovering :math:`(u_\text{rot},v_\text{rot})` and
    :math:`(u_\text{div},v_\text{div})` via gradient operators.
-4. Computing the harmonic residual by subtraction.
+5. Computing the harmonic residual by subtraction.
 
-Four Poisson solver backends
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Spherical Poisson solver
+~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. list-table::
-   :widths: 15 40 25 20
-   :header-rows: 1
+The Poisson equations are solved using a **conservative spherical
+Laplacian** (following MiniUFO/xinvert) that combines:
 
-   * - ``method``
-     - Description
-     - BCs
-     - Speed
-   * - ``'direct'``
-     - Sparse LU (Lynch 1989). Builds the 5-point Laplacian as a sparse
-       CSC matrix with **exact variable** :math:`\Delta x(\varphi)` and
-       solves via ``scipy.sparse.linalg.spsolve``.
-     - Dirichlet :math:`\phi=0`
-     - Moderate
-   * - ``'fft'``
-     - FFT in longitude + Thomas tridiagonal in latitude
-       (Schumann & Sweet 1988).  Exact variable
-       :math:`\Delta x(\varphi)` via per-wavenumber tridiagonal.
-     - Periodic in lon, Dirichlet in lat
-     - Fast
-   * - ``'dct'``
-     - DST-I with constant ``mean(dx)``.  Fully spectral
-       :math:`O(N\log N)` — fastest backend, but loses accuracy at high
-       latitudes where :math:`\Delta x` varies with
-       :math:`\cos\varphi`.
-     - Dirichlet all sides
-     - Fastest
-   * - ``'sor'``
-     - Successive Over-Relaxation iteration (5-point stencil).
-       ~1000× slower than direct; kept only for verification.
-     - Dirichlet :math:`\phi=0`
-     - Very slow
+* FFT in longitude (exploiting 360° periodicity), and
+* a tridiagonal solve in latitude with the full
+  :math:`\cos\varphi` metric factors.
+
+This is the sole Poisson backend in v1.0.  The ``method`` keyword on
+:func:`helmholtz_decomposition` is accepted for API compatibility but
+ignored — all solves use the spherical FFT method.
 
 **References:** Lynch P (1989) *MWR* 117, 1492–1500.
-Schumann U & Sweet R (1988) *J. Comput. Phys.* 75, 123–137.
 
 .. autosummary::
    :toctree: generated/
@@ -192,18 +213,14 @@ Schumann U & Sweet R (1988) *J. Comput. Phys.* 75, 123–137.
    helmholtz_decomposition
    helmholtz_decomposition_3d
 
-**Low-level Poisson solvers** (used internally; importable from
-``pvtend.helmholtz``):
+**Low-level Poisson helpers** (importable from ``pvtend.helmholtz``):
 
 .. currentmodule:: pvtend.helmholtz
 
 .. autosummary::
    :toctree: generated/
 
-   solve_poisson_direct
-   solve_poisson_fft
-   solve_poisson_dct
-   solve_poisson_sor
+   solve_poisson_spherical_fft
    compute_vorticity_divergence
 
 .. currentmodule:: pvtend
@@ -212,15 +229,36 @@ Schumann U & Sweet R (1988) *J. Comput. Phys.* 75, 123–137.
 Moist/Dry Omega
 ---------------
 
-Partitions total vertical velocity into dry (QG) and moist (residual)
-components, then recovers the moist divergent wind:
+Partitions total vertical velocity into **three** components and
+recovers the corresponding divergent winds:
+
+.. math::
+
+   \omega = \underbrace{\omega_\text{dry}}_{\text{QG (A+B)}}
+          + \underbrace{\omega_\text{qg\_moist}}_{\text{QG (A+B+C) − (A+B)}}
+          + \underbrace{\omega_\text{residual}}_{\text{non-QG}}
+
+with :math:`\omega_\text{moist} = \omega_\text{total} - \omega_\text{dry}`
+encompassing both QG-moist and non-QG contributions.
+
+The divergent-wind recovery proceeds as follows:
 
 1. :math:`\omega_\text{moist} = \omega_\text{total} - \omega_\text{dry}`
 2. Solve :math:`\nabla^2\chi_\text{moist} = -\partial\omega_\text{moist}/\partial p`
-   on each pressure level (FFT Poisson solver).
+   on each pressure level (spherical Poisson solver).
 3. :math:`(u_\text{div,moist}, v_\text{div,moist}) = \nabla\chi_\text{moist}`
 4. Dry divergent wind by subtraction:
    :math:`\mathbf{u}_\text{div,dry} = \mathbf{u}_\text{div} - \mathbf{u}_\text{div,moist}`
+5. QG-moist divergent wind via the same Poisson inversion applied to
+   :math:`\omega_\text{qg\_moist}`:
+   :math:`(u_\text{div,qg\_moist}, v_\text{div,qg\_moist}) = \nabla\chi_\text{qg\_moist}`
+
+Note: the **horizontal wind** decomposition remains **2-way**
+(dry + moist).  The QG-moist divergent wind is a physically
+interpretable *approximation* of the full moist divergent wind
+— it can substitute for :math:`\mathbf{u}_{\chi,\text{moist}}` in
+PV cross-term analyses but is **not** an additional additive component
+of the Helmholtz decomposition.
 
 **Total-field approximation for horizontal divergence.**
 The QG omega solve and Poisson inversion are performed on **total
@@ -418,16 +456,19 @@ Tendency Pipeline
 
 Orchestrates the full per-event computation:
 
-1. Load ERA5 data for the time window.
-2. Subtract hourly climatology → anomalies.
+1. Load ERA5 data for the time window (including specific humidity *q*).
+2. Subtract hourly climatology → anomalies; compute :math:`\partial T/\partial t`.
 3. Compute all spatial / temporal derivatives.
-4. Helmholtz decomposition on the full NH hemisphere.
-5. QG omega (SIP / LOG20) → :math:`\omega_\text{dry}`.
-6. Moist / dry decomposition → :math:`\omega_\text{moist}`,
-   :math:`\chi_\text{moist}`.
-7. Extract event-centred patches.
-8. Compute PV cross-terms and vertical weighted averages.
-9. Write per-timestep NPZ files.
+4. Helmholtz decomposition on the full NH hemisphere (spherical Poisson).
+5. QG omega (SIP, terms A+B) → :math:`\omega_\text{dry}`.
+6. QG omega (SIP, terms A+B+C with :math:`\partial T/\partial t`) →
+   :math:`\omega_\text{qg\_moist} = \omega_{A+B+C} - \omega_{A+B}`.
+7. Moist / dry decomposition →
+   :math:`\omega_\text{moist}`, :math:`\omega_\text{qg\_moist}`,
+   and their divergent winds via spherical Poisson inversion.
+8. Extract event-centred patches.
+9. Compute PV cross-terms (dry, moist, QG-moist) and vertical weighted averages.
+10. Write per-timestep NPZ files.
 
 :class:`TendencyComputer` is parameterised by event type
 (blocking / PRP), eliminating code duplication between scripts.

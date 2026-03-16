@@ -55,8 +55,8 @@ from .constants import (
     CLIM_VARIABLES,
     MONTH_ABBREVS,
 )
-from .derivatives import ddp
-from .helmholtz import helmholtz_decomposition, solve_poisson_fft, gradient
+from .derivatives import ddx, ddy, ddp, ddt
+from .helmholtz import helmholtz_decomposition, solve_poisson_spherical_fft, gradient
 from .omega import solve_qg_omega_sip
 
 # Alias for brevity
@@ -64,7 +64,7 @@ LEVELS = DEFAULT_LEVELS
 
 # ── Full list of variables stored in each NPZ ──────────────────────────
 VARS_3D: list[str] = [
-    "z", "pv", "u", "v", "w", "t",
+    "z", "pv", "u", "v", "w", "t", "q", "t_dt",
     "pv_dt", "pv_total_dx", "pv_total_dy", "pv_total_dp",
     "u_bar", "v_bar", "w_bar", "pv_bar",
     "u_anom", "v_anom", "w_anom", "pv_anom",
@@ -75,12 +75,13 @@ VARS_3D: list[str] = [
     "v_anom_rot", "v_anom_div", "v_anom_har",
     "u_div_moist", "v_div_moist",
     "u_div_dry", "v_div_dry",
-    "omega_dry", "omega_moist",
+    "u_div_qg_moist", "v_div_qg_moist",
+    "w_dry", "w_moist", "w_qg_moist",
 ]
 
 # Variables extracted from the DS for each patch
 _EXTRACT_VARS = [
-    "z", "pv", "u", "v", "w", "t",
+    "z", "pv", "u", "v", "w", "t", "q", "t_dt",
     "pv_dt", "pv_total_dx", "pv_total_dy", "pv_total_dp",
     "u_bar", "v_bar", "w_bar", "pv_bar",
     "u_anom", "v_anom", "w_anom", "pv_anom",
@@ -386,37 +387,8 @@ def _compute_geostrophic_wind(
 
 
 # ============================================================================
-#  Moist velocity potential solver (on patch)
+#  Moist velocity potential solver (full NH, spherical Laplacian)
 # ============================================================================
-def _solve_chi_moist_patch(
-    omega_moist: np.ndarray, lat: np.ndarray, lon: np.ndarray,
-    plevs_pa: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """∇²χ_moist = -∂ω_moist/∂p  → chi, u_div_moist, v_div_moist."""
-    nlev, nlat, nlon = omega_moist.shape
-    lat_rad = np.deg2rad(lat)
-    dlat = np.abs(lat[1] - lat[0]) if nlat > 1 else 1.5
-    dlon = np.abs(lon[1] - lon[0]) if nlon > 1 else 1.5
-    dy = np.deg2rad(dlat) * R_EARTH
-    dx_arr = np.deg2rad(dlon) * R_EARTH * np.cos(lat_rad)
-    dx_arr = np.maximum(dx_arr, dy * 0.1)
-
-    chi_m = np.zeros_like(omega_moist)
-    u_div_m = np.zeros_like(omega_moist)
-    v_div_m = np.zeros_like(omega_moist)
-
-    rhs_poisson = -ddp(omega_moist, plevs_pa)
-
-    for k in range(nlev):
-        chi_k = solve_poisson_fft(rhs_poisson[k], dx_arr, dy)
-        chi_m[k] = chi_k
-        dchi_dx, dchi_dy = gradient(chi_k, dx_arr, dy)
-        u_div_m[k] = dchi_dx
-        v_div_m[k] = dchi_dy
-
-    return chi_m, u_div_m, v_div_m
-
-
 def _solve_chi_moist_nh(
     omega_moist_nh: np.ndarray,
     lat_nh: np.ndarray,
@@ -425,9 +397,9 @@ def _solve_chi_moist_nh(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Solve ∇²χ_moist = -∂ω_moist/∂p on full NH, return u/v_div_moist.
 
-    Using the full NH domain with periodic zonal BCs gives a much
-    better-conditioned Poisson inversion than the local patch with
-    Dirichlet BCs (which can introduce spurious boundary artefacts).
+    Uses the spherical Laplacian (conservative form) with area-weighted
+    RHS mean removal.  The full NH domain with periodic zonal BCs gives
+    a much better-conditioned inversion than the local patch.
     """
     nlev, nlat, nlon = omega_moist_nh.shape
     lat_rad = np.deg2rad(lat_nh)
@@ -436,14 +408,24 @@ def _solve_chi_moist_nh(
     dy = np.deg2rad(dlat) * R_EARTH
     dx_arr = np.deg2rad(dlon) * R_EARTH * np.cos(lat_rad)
     dx_arr = np.maximum(dx_arr, dy * 0.1)
+    dlon_rad = np.deg2rad(dlon)
 
     rhs = -ddp(omega_moist_nh, plevs_pa)
+
+    # Area-weighted mean removal
+    cos_phi = np.cos(lat_rad)
+    area_weights = cos_phi / cos_phi.sum()
+    for k in range(nlev):
+        weighted_mean = np.sum(area_weights[:, None] * rhs[k]) / nlon
+        rhs[k] -= weighted_mean
 
     u_div_m_nh = np.zeros_like(omega_moist_nh)
     v_div_m_nh = np.zeros_like(omega_moist_nh)
 
     for k in range(nlev):
-        chi_k = solve_poisson_fft(rhs[k], dx_arr, dy)
+        chi_k = solve_poisson_spherical_fft(
+            rhs[k], lat_nh, dy, dlon_rad, R_earth=R_EARTH
+        )
         dchi_dx, dchi_dy = gradient(chi_k, dx_arr, dy)
         u_div_m_nh[k] = dchi_dx
         v_div_m_nh[k] = dchi_dy
@@ -463,20 +445,29 @@ def _qg_moist_dry_on_patch(
     qg_method: str = "log20",
     nh_data: dict | None = None,
 ) -> None:
-    """QG omega + moist/dry decomposition on the event patch.
+    """QG omega + 3-way moist/dry decomposition on the event patch.
 
-    Performs a single total-field QG omega solve, then recovers the
-    moist divergent wind via Poisson inversion of ω_moist.
+    When *qg_method* is ``"log20"`` (default), performs two full SIP
+    solves on the NH domain to separate vertical velocity into three
+    components:
 
-    Total-field approximation: since |ω'| >> |ω̄| in midlatitude
-    synoptic systems, the total-field moist omega closely approximates
-    the anomaly moist omega (ω_moist ≈ ω'_moist).  The same linearity
-    propagates through ∇²χ = −∂ω_moist/∂p, so the recovered horizontal
-    divergent wind satisfies u_div_moist ≈ u'_div_moist.  This avoids
-    a separate anomaly-field QG inversion.
+        ω_dry      = QG omega (terms A+B only, no diabatic heating)
+        ω_qg_moist = QG omega (A+B+C) − QG omega (A+B)   [term C response]
+        ω_moist    = ω_total − ω_dry                      [total moist residual]
+
+    When *qg_method* is ``"sp19"`` (Steinfeld & Pfahl 2019), uses the
+    empirical 1/3–2/3 scaling (no elliptic solve):
+
+        ω_dry  = (1/3) ω_total
+        ω_moist = ω_qg_moist = (2/3) ω_total
+
+    For each moist omega component the divergent wind is recovered via
+    Poisson inversion:  ∇²χ = −∂ω/∂p  →  (u_div, v_div) = ∇χ
 
     Modifies *cube3d* in-place, adding:
-        w_dry, w_moist, u_div_moist, v_div_moist, u_div_dry, v_div_dry
+        w_dry, w_moist, w_qg_moist,
+        u_div_moist, v_div_moist, u_div_dry, v_div_dry,
+        u_div_qg_moist, v_div_qg_moist
     """
     nlevs, nlat, nlon = cube3d["z"].shape
 
@@ -484,9 +475,10 @@ def _qg_moist_dry_on_patch(
     n_valid = int(valid.sum())
     if n_valid < 3:
         zeros = np.zeros((nlevs, nlat, nlon), dtype=np.float32)
-        for k in ("w_dry", "w_moist",
+        for k in ("w_dry", "w_moist", "w_qg_moist",
                   "u_div_moist", "v_div_moist",
-                  "u_div_dry", "v_div_dry"):
+                  "u_div_dry", "v_div_dry",
+                  "u_div_qg_moist", "v_div_qg_moist"):
             cube3d[k] = zeros.copy()
         return
 
@@ -507,8 +499,20 @@ def _qg_moist_dry_on_patch(
     t_sv = pick(cube3d["t"])
     w_sv = pick(cube3d["w"])
 
-    # Helper: SIP (LOG20) solve on full NH, extract patch
-    def _sip_on_nh(z_snap, t_snap, t_for_sigma=None, w_snap=None):
+    ug, vg = _compute_geostrophic_wind(z_sv, lat_v, lon_vec)
+
+    # ---- SP19: empirical 1/3 dry, 2/3 moist (no elliptic solve) ----
+    if qg_method == "sp19":
+        from .constants import SP19_DRY_FRACTION
+        cube3d["w_dry"]  = SP19_DRY_FRACTION * cube3d["w"]
+        cube3d["w_moist"] = cube3d["w"] - cube3d["w_dry"]
+        cube3d["w_qg_moist"] = cube3d["w_moist"].copy()
+
+        # Poisson inversions on full NH for divergent wind recovery
+        if nh_data is None:
+            raise ValueError(
+                "nh_data is required for divergent-wind Poisson inversion"
+            )
         lat_nh = nh_data["lat"]
         lon_nh = nh_data["lon"]
         if lat_nh[0] > lat_nh[-1]:
@@ -518,116 +522,125 @@ def _qg_moist_dry_on_patch(
             lat_nh_asc = lat_nh
             flip_nh = False
 
-        def _prep(arr3d):
+        def _prep_sp19(arr3d):
             out = arr3d[psort]
             if flip_nh:
                 out = out[:, ::-1, :]
             return np.nan_to_num(out, nan=0.0)
 
-        z_nh = _prep(z_snap)
-        t_nh = _prep(t_snap)
-        tf_nh = _prep(t_for_sigma) if t_for_sigma is not None else None
+        w_nh = _prep_sp19(nh_data["w"])
+        w_dry_nh = SP19_DRY_FRACTION * w_nh
+        w_moist_nh = w_nh - w_dry_nh
 
-        ug_nh, vg_nh = _compute_geostrophic_wind(z_nh, lat_nh_asc, lon_nh)
-        wb_nh = _prep(w_snap) if w_snap is not None else None
-        od_nh, _info = solve_qg_omega_sip(
-            ug_nh, vg_nh, t_nh,
-            lat_nh_asc, lon_nh, plevs_pa,
-            center_lat=center_lat,
-            t_full=tf_nh,
-            omega_b=wb_nh)
-
-        lat_idx = np.array([np.argmin(np.abs(lat_nh_asc - la))
-                            for la in lat_v])
-
-        def _circ_nearest(lv):
-            d = np.abs((lon_nh - lv + 180) % 360 - 180)
-            return int(np.argmin(d))
-
-        lon_idx = np.array([_circ_nearest(lo) for lo in lon_vec])
-        return od_nh[np.ix_(np.arange(od_nh.shape[0]), lat_idx, lon_idx)]
-
-    # --- Total geostrophic wind → QG omega_dry ---
-    ug, vg = _compute_geostrophic_wind(z_sv, lat_v, lon_vec)
-
-    if qg_method == "sp19":
-        od = SP19_DRY_FRACTION * w_sv
-    else:  # "log20" (default)
-        if nh_data is not None:
-            od = _sip_on_nh(nh_data["z"], nh_data["t"],
-                            w_snap=nh_data.get("w"))
-        else:  # fallback: SIP on local patch
-            od, _info = solve_qg_omega_sip(
-                ug, vg, t_sv, lat_v, lon_vec, plevs_pa,
-                center_lat=center_lat)
-
-    # --- Moist chi → divergent moist wind (from w_moist) ---
-    # Total-field approx: ω_moist ≈ ω'_moist ⇒ u_div_moist ≈ u'_div_moist
-    w_moist_sv = w_sv - od
-
-    # Solve Poisson on full NH when available (better boundary conditions)
-    if nh_data is not None and qg_method != "sp19":
-        lat_nh = nh_data["lat"]
-        lon_nh = nh_data["lon"]
-        if lat_nh[0] > lat_nh[-1]:
-            lat_nh_asc = lat_nh[::-1]
-            flip_nh = True
-        else:
-            lat_nh_asc = lat_nh
-            flip_nh = False
-
-        # Reconstruct w_moist on full NH: w_total_nh - w_dry_nh
-        w_nh = nh_data["w"][psort]
-        if flip_nh:
-            w_nh = w_nh[:, ::-1, :]
-        w_nh = np.nan_to_num(w_nh, nan=0.0)
-        # od_nh: solve QG omega on full NH
-        z_nh = nh_data["z"][psort]
-        t_nh = nh_data["t"][psort]
-        if flip_nh:
-            z_nh = z_nh[:, ::-1, :]
-            t_nh = t_nh[:, ::-1, :]
-        z_nh = np.nan_to_num(z_nh, nan=0.0)
-        t_nh = np.nan_to_num(t_nh, nan=0.0)
-        ug_nh, vg_nh = _compute_geostrophic_wind(z_nh, lat_nh_asc, lon_nh)
-        wb_nh = w_nh
-        od_nh, _ = solve_qg_omega_sip(
-            ug_nh, vg_nh, t_nh,
-            lat_nh_asc, lon_nh, plevs_pa,
-            center_lat=center_lat,
-            omega_b=wb_nh)
-
-        w_moist_nh = w_nh - od_nh
         udm_nh, vdm_nh = _solve_chi_moist_nh(
             w_moist_nh, lat_nh_asc, lon_nh, plevs_pa)
 
-        # Extract patch from full NH solution
         lat_idx = np.array([np.argmin(np.abs(lat_nh_asc - la))
                             for la in lat_v])
 
-        def _circ_nearest_nh(lv):
+        def _circ_nearest_sp19(lv):
             d = np.abs((lon_nh - lv + 180) % 360 - 180)
             return int(np.argmin(d))
 
-        lon_idx = np.array([_circ_nearest_nh(lo) for lo in lon_vec])
-        udm_sv = udm_nh[np.ix_(np.arange(udm_nh.shape[0]), lat_idx, lon_idx)]
-        vdm_sv = vdm_nh[np.ix_(np.arange(vdm_nh.shape[0]), lat_idx, lon_idx)]
+        lon_idx = np.array([_circ_nearest_sp19(lo) for lo in lon_vec])
+        ix = np.ix_(np.arange(w_dry_nh.shape[0]), lat_idx, lon_idx)
+
+        cube3d["u_div_moist"]    = unpack(udm_nh[ix])
+        cube3d["v_div_moist"]    = unpack(vdm_nh[ix])
+        cube3d["u_div_qg_moist"] = cube3d["u_div_moist"].copy()
+        cube3d["v_div_qg_moist"] = cube3d["v_div_moist"].copy()
+        cube3d["u_div_dry"]  = cube3d["u_anom_div"] - cube3d["u_div_moist"]
+        cube3d["v_div_dry"]  = cube3d["v_anom_div"] - cube3d["v_div_moist"]
+        return
+
+    # ---- LOG20 (default): Full SIP solve on NH domain ----
+    # nh_data is required — all solves run on the full NH domain
+    if nh_data is None:
+        raise ValueError(
+            "nh_data is required for _qg_moist_dry_on_patch; "
+            "local-patch fallback has been removed"
+        )
+
+    # --- Full NH solves (spherical Poisson, periodic zonal BCs) ---
+    lat_nh = nh_data["lat"]
+    lon_nh = nh_data["lon"]
+    if lat_nh[0] > lat_nh[-1]:
+        lat_nh_asc = lat_nh[::-1]
+        flip_nh = True
     else:
-        # Fallback: solve on local patch (for sp19 or when no nh_data)
-        _, udm_sv, vdm_sv = _solve_chi_moist_patch(
-            w_moist_sv, lat_v, lon_vec, plevs_pa)
+        lat_nh_asc = lat_nh
+        flip_nh = False
+
+    def _prep(arr3d):
+        out = arr3d[psort]
+        if flip_nh:
+            out = out[:, ::-1, :]
+        return np.nan_to_num(out, nan=0.0)
+
+    z_nh = _prep(nh_data["z"])
+    t_nh = _prep(nh_data["t"])
+    w_nh = _prep(nh_data["w"])
+
+    ug_nh, vg_nh = _compute_geostrophic_wind(z_nh, lat_nh_asc, lon_nh)
+
+    # Solve 1: QG omega terms A+B → ω_dry
+    od_nh, _ = solve_qg_omega_sip(
+        ug_nh, vg_nh, t_nh,
+        lat_nh_asc, lon_nh, plevs_pa,
+        center_lat=center_lat,
+        omega_b=w_nh)
+
+    # Solve 2: QG omega terms A+B+C → ω_qg_total (with diabatic)
+    dTdt_raw = nh_data.get("t_dt")
+    if dTdt_raw is not None:
+        dTdt_nh = _prep(dTdt_raw)
+        oqg_nh, _ = solve_qg_omega_sip(
+            ug_nh, vg_nh, t_nh,
+            lat_nh_asc, lon_nh, plevs_pa,
+            center_lat=center_lat,
+            omega_b=w_nh,
+            dT_dt=dTdt_nh)
+    else:
+        oqg_nh = od_nh
+
+    # Moist omega components on full NH
+    w_moist_nh = w_nh - od_nh
+    w_qg_moist_nh = oqg_nh - od_nh
+
+    # Poisson inversions on full NH (spherical Laplacian)
+    udm_nh, vdm_nh = _solve_chi_moist_nh(
+        w_moist_nh, lat_nh_asc, lon_nh, plevs_pa)
+    udqm_nh, vdqm_nh = _solve_chi_moist_nh(
+        w_qg_moist_nh, lat_nh_asc, lon_nh, plevs_pa)
+
+    # Extract patch from full NH solutions
+    lat_idx = np.array([np.argmin(np.abs(lat_nh_asc - la))
+                        for la in lat_v])
+
+    def _circ_nearest(lv):
+        d = np.abs((lon_nh - lv + 180) % 360 - 180)
+        return int(np.argmin(d))
+
+    lon_idx = np.array([_circ_nearest(lo) for lo in lon_vec])
+    ix = np.ix_(np.arange(od_nh.shape[0]), lat_idx, lon_idx)
+
+    od       = od_nh[ix]
+    wqm_sv   = (oqg_nh - od_nh)[ix]
+    udm_sv   = udm_nh[ix]
+    vdm_sv   = vdm_nh[ix]
+    udqm_sv  = udqm_nh[ix]
+    vdqm_sv  = vdqm_nh[ix]
 
     # --- Unpack & store ---
-    w_dry = unpack(od)
-    u_div_moist = unpack(udm_sv)
-    v_div_moist = unpack(vdm_sv)
-
-    cube3d["w_dry"] = w_dry
-    cube3d["w_moist"] = cube3d["w"] - w_dry
-    cube3d["u_div_moist"] = u_div_moist
-    cube3d["v_div_moist"] = v_div_moist
-    cube3d["u_div_dry"] = cube3d["u_anom_div"] - u_div_moist
-    cube3d["v_div_dry"] = cube3d["v_anom_div"] - v_div_moist
+    cube3d["w_dry"]           = unpack(od)
+    cube3d["w_moist"]         = cube3d["w"] - cube3d["w_dry"]
+    cube3d["w_qg_moist"]      = unpack(wqm_sv)
+    cube3d["u_div_moist"]     = unpack(udm_sv)
+    cube3d["v_div_moist"]     = unpack(vdm_sv)
+    cube3d["u_div_qg_moist"]  = unpack(udqm_sv)
+    cube3d["v_div_qg_moist"]  = unpack(vdqm_sv)
+    cube3d["u_div_dry"]       = cube3d["u_anom_div"] - cube3d["u_div_moist"]
+    cube3d["v_div_dry"]       = cube3d["v_anom_div"] - cube3d["v_div_moist"]
 
 
 # ============================================================================
@@ -723,6 +736,9 @@ def with_derivs_for_window(
     ds["theta_dt"] = _ddt_da(ds["theta"])  # local tendency (diagnostic)
     ds["theta_dp"] = _ddp_da(ds.theta)
 
+    # Eulerian temperature tendency (proxy for diabatic heating J/Cp)
+    ds["t_dt"] = _ddt_da(ds["t"])
+
     # saturation vapour pressure (Bolton 1980) and specific humidity
     p_pa = ds[plev] * 100.0  # hPa → Pa
     es = 611.2 * np.exp(17.67 * (ds["t"] - 273.15) / (ds["t"] - 29.65))
@@ -793,7 +809,7 @@ def with_derivs_for_window(
                 v2d = v2d[::-1]
             helm = helmholtz_decomposition(
                 u2d, v2d, lat_asc, lon_nh,
-                R_earth=R_EARTH, method="fft")
+                R_earth=R_EARTH, method="spherical")
             if flip_lat:
                 for key in ("u_rot", "u_div", "u_har",
                             "v_rot", "v_div", "v_har"):
@@ -1070,6 +1086,7 @@ class TendencyComputer:
                     "z": snap["z"].values,
                     "t": snap["t"].values,
                     "w": snap["w"].values,
+                    "t_dt": snap["t_dt"].values,
                     "lat": ds.latitude.values,
                     "lon": ds.longitude.values,
                 }
@@ -1078,6 +1095,16 @@ class TendencyComputer:
                 plevs_hpa, center_lat=current_lat,
                 qg_method=self.cfg.qg_omega_method,
                 nh_data=nh_data)
+
+            # NaN safety on moist/dry decomposition outputs
+            for _key in ("w_dry", "w_moist", "w_qg_moist",
+                         "u_div_moist", "v_div_moist",
+                         "u_div_dry", "v_div_dry",
+                         "u_div_qg_moist", "v_div_qg_moist",
+                         "q", "t_dt"):
+                if _key in cube3d:
+                    cube3d[_key] = np.nan_to_num(
+                        cube3d[_key], nan=0.0, posinf=0.0, neginf=0.0)
 
             z_m_3d = cube3d["z"] / G0
 
@@ -1143,6 +1170,16 @@ class TendencyComputer:
             w_dry_pvanom_dp_3d = cube3d["w_dry"] * cube3d["pv_anom_dp"]
             w_moist_pvbar_dp_3d = cube3d["w_moist"] * cube3d["pv_bar_dp"]
             w_moist_pvanom_dp_3d = cube3d["w_moist"] * cube3d["pv_anom_dp"]
+
+            # QG-moist divergent cross terms
+            udqm_pvbar_dx_3d = cube3d["u_div_qg_moist"] * cube3d["pv_bar_dx"]
+            udqm_pvanom_dx_3d = cube3d["u_div_qg_moist"] * cube3d["pv_anom_dx"]
+            vdqm_pvbar_dy_3d = cube3d["v_div_qg_moist"] * cube3d["pv_bar_dy"]
+            vdqm_pvanom_dy_3d = cube3d["v_div_qg_moist"] * cube3d["pv_anom_dy"]
+
+            # QG-moist omega cross terms
+            w_qgm_pvbar_dp_3d = cube3d["w_qg_moist"] * cube3d["pv_bar_dp"]
+            w_qgm_pvanom_dp_3d = cube3d["w_qg_moist"] * cube3d["pv_anom_dp"]
 
             # ────────────────────────────────────────────
             #  Write NPZ (atomic via tempfile)
@@ -1212,6 +1249,11 @@ class TendencyComputer:
                     v_div_dry=vw(cube3d["v_div_dry"]),
                     w_dry=vw(cube3d["w_dry"]),
                     w_moist=vw(cube3d["w_moist"]),
+                    w_qg_moist=vw(cube3d["w_qg_moist"]),
+                    u_div_qg_moist=vw(cube3d["u_div_qg_moist"]),
+                    v_div_qg_moist=vw(cube3d["v_div_qg_moist"]),
+                    q=vw(cube3d["q"]),
+                    t_dt=vw(cube3d["t_dt"]),
 
                     # ── 2-D cross terms ──
                     u_anom_pv_bar_dx=vw(uanom_pvbar_dx_3d),
@@ -1250,6 +1292,12 @@ class TendencyComputer:
                     w_dry_pv_anom_dp=vw(w_dry_pvanom_dp_3d),
                     w_moist_pv_bar_dp=vw(w_moist_pvbar_dp_3d),
                     w_moist_pv_anom_dp=vw(w_moist_pvanom_dp_3d),
+                    u_div_qg_moist_pv_bar_dx=vw(udqm_pvbar_dx_3d),
+                    u_div_qg_moist_pv_anom_dx=vw(udqm_pvanom_dx_3d),
+                    v_div_qg_moist_pv_bar_dy=vw(vdqm_pvbar_dy_3d),
+                    v_div_qg_moist_pv_anom_dy=vw(vdqm_pvanom_dy_3d),
+                    w_qg_moist_pv_bar_dp=vw(w_qgm_pvbar_dp_3d),
+                    w_qg_moist_pv_anom_dp=vw(w_qgm_pvanom_dp_3d),
 
                     # ── 3-D per-level cubes ──
                     z_3d=z_m_3d, pv_3d=cube3d["pv"],
@@ -1291,6 +1339,11 @@ class TendencyComputer:
                     v_div_dry_3d=cube3d["v_div_dry"],
                     w_dry_3d=cube3d["w_dry"],
                     w_moist_3d=cube3d["w_moist"],
+                    w_qg_moist_3d=cube3d["w_qg_moist"],
+                    u_div_qg_moist_3d=cube3d["u_div_qg_moist"],
+                    v_div_qg_moist_3d=cube3d["v_div_qg_moist"],
+                    q_3d=cube3d["q"],
+                    t_dt_3d=cube3d["t_dt"],
                     u_anom_pv_bar_dx_3d=uanom_pvbar_dx_3d,
                     u_anom_pv_anom_dx_3d=uanom_pvanom_dx_3d,
                     u_bar_pv_anom_dx_3d=ubar_pvanom_dx_3d,
@@ -1327,6 +1380,12 @@ class TendencyComputer:
                     w_dry_pv_anom_dp_3d=w_dry_pvanom_dp_3d,
                     w_moist_pv_bar_dp_3d=w_moist_pvbar_dp_3d,
                     w_moist_pv_anom_dp_3d=w_moist_pvanom_dp_3d,
+                    u_div_qg_moist_pv_bar_dx_3d=udqm_pvbar_dx_3d,
+                    u_div_qg_moist_pv_anom_dx_3d=udqm_pvanom_dx_3d,
+                    v_div_qg_moist_pv_bar_dy_3d=vdqm_pvbar_dy_3d,
+                    v_div_qg_moist_pv_anom_dy_3d=vdqm_pvanom_dy_3d,
+                    w_qg_moist_pv_bar_dp_3d=w_qgm_pvbar_dp_3d,
+                    w_qg_moist_pv_anom_dp_3d=w_qgm_pvanom_dp_3d,
                 )
             os.replace(tmp_name, str(out_fp))
             written += 1
