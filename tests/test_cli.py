@@ -96,7 +96,7 @@ class TestBuildParser:
             "--clim-path", "/c",
             "--out-dir", "/o",
         ])
-        assert args.qg_method is None  # auto-selected in _cmd_compute
+        assert args.qg_method == "log20"  # default solver
 
     def test_compute_options(self):
         parser = _build_parser()
@@ -108,13 +108,13 @@ class TestBuildParser:
             "--clim-path", "/c",
             "--out-dir", "/o",
             "--dh-range=-25:25:1",
-            "--qg-method", "fft",
+            "--qg-method", "sp19",
             "--center-mode", "lagrangian",
             "--n-workers", "4",
             "--skip-existing",
         ])
         assert args.dh_range == "-25:25:1"
-        assert args.qg_method == "fft"
+        assert args.qg_method == "sp19"
         assert args.center_mode == "lagrangian"
         assert args.n_workers == 4
         assert args.skip_existing is True
