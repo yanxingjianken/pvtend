@@ -81,28 +81,22 @@ Solves the Hoskins (1978) quasi-geostrophic omega equation:
 
 where :math:`\mathbf{Q}` is the Q-vector (Hoskins et al. 1978).
 
-Three solver methods
-~~~~~~~~~~~~~~~~~~~~
+Two solver methods
+~~~~~~~~~~~~~~~~~~
 
-1. **sp19** *(default)* — Steinfeld & Pfahl (2019) empirical scaling.
+1. **log20** *(default)* — Strongly Implicit Procedure (SIP, Stone 1968)
+   with a full 3-D spherical finite-difference stencil including the
+   :math:`\tan\varphi` metric term.  Closest analogue to
+   Li & O'Gorman (2020).  Numba-accelerated when available (~3–6 s
+   per event pair); falls back to pure-Python if ``numba`` is not
+   installed.  This is the recommended default for production runs.
+
+2. **sp19** — Steinfeld & Pfahl (2019) empirical scaling.
    Sets :math:`\omega_\text{dry} = \frac{1}{3}\,\omega_\text{total}`.
    Zero-cost, preserves spatial structure, requires ``omega_total``
    as input.
 
-2. **fft** — FFT in longitude (periodic) + Thomas tridiagonal in
-   pressure.  Drops :math:`\partial^2\omega/\partial y^2` from the LHS
-   but retains :math:`\partial^2\omega/\partial x^2` via the spectral
-   representation.  Fast (~2 s per event) and captures >90 % of the
-   spatial variance.  Reference: Schumann & Sweet (1988).
-
-3. **log20** — Strongly Implicit Procedure (SIP, Stone 1968) with a
-   full 3-D spherical finite-difference stencil including the
-   :math:`\tan\varphi` metric term.  Closest analogue to
-   Li & O'Gorman (2020).  Numba-accelerated when available (~3–6 s
-   per event pair); falls back to pure-Python if ``numba`` is not
-   installed.
-
-All methods apply a **latitude taper** (linearly 0 → 1 between 15°N and
+Both methods apply a **latitude taper** (linearly 0 → 1 between 15°N and
 25°N, tapering back to 0 above 80°N) to enforce QG validity.
 
 Boundary conditions: :math:`\omega = 0` at top/bottom pressure levels
@@ -110,14 +104,13 @@ and at lateral boundaries (Dirichlet for local patches; periodic for
 full rings).
 
 **References:** Hoskins B J, Draghici I, Davies H C (1978) *Q.J.R.M.S.*
-104, 31–38.  Steinfeld D, Pfahl S (2019) *Clim. Dyn.* 53, 6159–6180.
-Li L, O'Gorman P A (2020) *J. Climate*.  Stone H L (1968) *SIAM J.
-Numer. Anal.* 5, 530–558.
+104, 31–38.  Li L, O'Gorman P A (2020) *J. Climate*.
+Stone H L (1968) *SIAM J. Numer. Anal.* 5, 530–558.
+Steinfeld D, Pfahl S (2019) *Clim. Dyn.* 53, 6159–6180.
 
 .. autosummary::
    :toctree: generated/
 
-   solve_qg_omega
    solve_qg_omega_sip
 
 
@@ -428,8 +421,8 @@ Orchestrates the full per-event computation:
 1. Load ERA5 data for the time window.
 2. Subtract hourly climatology → anomalies.
 3. Compute all spatial / temporal derivatives.
-4. FFT Helmholtz decomposition on the full NH hemisphere.
-5. QG omega → :math:`\omega_\text{dry}`.
+4. Helmholtz decomposition on the full NH hemisphere.
+5. QG omega (SIP / LOG20) → :math:`\omega_\text{dry}`.
 6. Moist / dry decomposition → :math:`\omega_\text{moist}`,
    :math:`\chi_\text{moist}`.
 7. Extract event-centred patches.

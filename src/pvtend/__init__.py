@@ -33,7 +33,7 @@ from pvtend.derivatives import ddx, ddy, ddp, ddt
 from pvtend.climatology import compute_climatology, load_climatology
 
 # Solvers
-from pvtend.omega import solve_qg_omega, solve_qg_omega_sip
+from pvtend.omega import solve_qg_omega_sip
 from pvtend.helmholtz import helmholtz_decomposition, helmholtz_decomposition_3d
 from pvtend.moist_dry import decompose_omega
 

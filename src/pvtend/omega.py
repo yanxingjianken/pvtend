@@ -223,6 +223,11 @@ def solve_qg_omega(
 ) -> np.ndarray:
     """Solve the QG omega equation for omega_dry.
 
+    .. deprecated::
+        The ``"fft"`` method is retained for backward compatibility but
+        is no longer used in the pipeline.  Use :func:`solve_qg_omega_sip`
+        directly or pass ``method="log20"`` (default) or ``method="sp19"``.
+
     Args:
         u: Geostrophic zonal wind [m s⁻¹], shape ``(nlev, nlat, nlon)``.
         v: Geostrophic meridional wind [m s⁻¹], shape ``(nlev, nlat, nlon)``.
@@ -231,9 +236,9 @@ def solve_qg_omega(
         lat: Ascending latitude [degrees], shape ``(nlat,)``.
         lon: Longitude [degrees], shape ``(nlon,)``.
         plevs_pa: Pressure [Pa], ascending, shape ``(nlev,)``.
-        method: Solver method — ``"sp19"`` (Steinfeld & Pfahl 2019
-            empirical scaling, default), ``"fft"`` (FFT + Thomas
-            tridiagonal), or ``"log20"`` (SIP, Li & O'Gorman 2020).
+        method: Solver method — ``"log20"`` (SIP, Li & O'Gorman 2020,
+            default), ``"sp19"`` (Steinfeld & Pfahl 2019 empirical
+            scaling), or ``"fft"`` (legacy, FFT + Thomas tridiagonal).
         center_lat: If given, use constant f₀ = 2Ω sin(center_lat) and
             β₀ = 2Ω cos(center_lat)/a instead of latitude-varying values.
             Recommended for event-centred patches (Li & O'Gorman 2020).

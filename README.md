@@ -50,7 +50,7 @@ The CSVs are the inputs for `pvtend-pipeline compute`, which extracts event-cent
 ## Features
 
 - **PV tendency computation**: RHS has zonal advection, baroclinic counter propagation, vertical advection, and approximated diabatic heating terms.
-- **QG omega solver**: Hoskins Q-vector formulation with **two methods**: FFT+Thomas (default, fast) and 3-D direct/iterative (BiCGSTAB+ILU, full horizontal Laplacian). Optional `center_lat` for dynamic f₀ (Li & O'Gorman 2020).
+- **QG omega solver**: Hoskins Q-vector formulation with **two methods**: LOG20/SIP (default, Numba-accelerated 3-D elliptic, Li & O'Gorman 2020) and SP19 (Steinfeld & Pfahl 2019 empirical 1/3 scaling). Optional `center_lat` for dynamic f₀.
 - **Helmholtz decomposition**: 4 backends (direct, FFT, DCT, SOR) for limited-area domains
 - **Moist/dry omega splitting**: Decomposes vertical motion into moist and dry contributions via a single total-field QG solve (|ω'| >> |ω̄| ⇒ ω_moist ≈ ω'_moist), recovering horizontal divergent wind by Poisson inversion
 - **Orthogonal basis decomposition**: Projects PV tendency onto intensification (β), propagation (αx, αy), and deformation (γ) modes
@@ -165,7 +165,7 @@ src/pvtend/
 ├── preprocessing.py     # ERA5 loading & regridding
 ├── derivatives.py       # Finite difference operators
 ├── climatology.py       # Fourier-filtered climatology
-├── omega.py             # QG omega solver (FFT+Thomas or 3-D direct)
+├── omega.py             # QG omega solver (LOG20/SIP or SP19)
 ├── helmholtz.py         # Helmholtz decomposition (direct/FFT/DCT/SOR)
 ├── moist_dry.py         # Moist/dry omega split
 ├── isentropic.py        # Isentropic PV-tendency diagnostics
@@ -204,7 +204,7 @@ Notebooks using **real ERA5 blocking event data** from the `composite_blocking_t
 |----------|-------------|
 | [`00_idealized_pvtend_decomp`](examples/00_idealized_pvtend_decomp.ipynb) | Idealized Gaussian PV anomaly: prescribed β/αx/αy/γ at two timesteps, basis visualisation, Gram-Schmidt, projection & reconstruction |
 | [`01_rwb_and_derivatives`](examples/01_rwb_and_derivatives.ipynb) | Grid setup, `ddx`/`ddy`/`ddp` derivatives, RWB detection on a real event |
-| [`02_helmholtz_and_qg_omega`](examples/02_helmholtz_and_qg_omega.ipynb) | 3-D Helmholtz decomposition, QG omega (FFT vs 3-D direct), moist/dry ω split |
+| [`02_helmholtz_and_qg_omega`](examples/02_helmholtz_and_qg_omega.ipynb) | 3-D Helmholtz decomposition, QG omega (LOG20 vs SP19), moist/dry ω split |
 | [`03_four_basis_projection`](examples/03_four_basis_projection.ipynb) | Orthogonal basis (Φ₁–Φ₄), project dq'/dt → β/αx/αy/γ, lifecycle curves |
 | [`03z_four_basis_projection_geopotential`](examples/03z_four_basis_projection_geopotential.ipynb) | ↳ *Supplement*: same 4-basis projection using **geopotential height Z** instead of PV |
 | [`04_single_var_composite`](examples/04_single_var_composite.ipynb) | Single-variable composite explorer on pressure levels using `pvtend.plotting.plot_var` |

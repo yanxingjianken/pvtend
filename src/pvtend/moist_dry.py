@@ -38,6 +38,7 @@ from __future__ import annotations
 import numpy as np
 
 from .constants import R_EARTH
+from .derivatives import ddp
 from .helmholtz import gradient, solve_poisson_fft
 
 
@@ -84,19 +85,7 @@ def solve_chi_moist(
     v_div_m = np.zeros_like(omega_moist)
 
     # ── Compute ∂ω_moist/∂p using centred finite differences ──
-    domega_dp = np.zeros_like(omega_moist)
-    dp = np.diff(plevs_pa)
-
-    # Interior levels: centred difference
-    for k in range(1, nlev - 1):
-        domega_dp[k] = (omega_moist[k + 1] - omega_moist[k - 1]) / (
-            plevs_pa[k + 1] - plevs_pa[k - 1]
-        )
-
-    # Boundary levels: one-sided difference
-    if nlev > 1:
-        domega_dp[0] = (omega_moist[1] - omega_moist[0]) / dp[0]
-        domega_dp[-1] = (omega_moist[-1] - omega_moist[-2]) / dp[-1]
+    domega_dp = ddp(omega_moist, plevs_pa)
 
     # RHS of Poisson equation: -∂ω_moist/∂p
     rhs_poisson = -domega_dp

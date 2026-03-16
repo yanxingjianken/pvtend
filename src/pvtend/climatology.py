@@ -178,18 +178,21 @@ def compute_climatology(
 def load_climatology(
     clim_path: str | Path,
     engine: str = "netcdf4",
+    prefer_smooth: bool = False,
 ) -> xr.Dataset:
     """Load climatology, auto-detecting file layout.
 
     Supports three layouts (most → least granular):
 
-    1. **Per-var-per-month** files: ``{stem}_{month}_{var}_smooth.nc``
+    1. **Per-var-per-month** files: raw ``{stem}_{month}_{var}.nc``
+       (or smoothed ``*_smooth.nc`` if *prefer_smooth* is True)
     2. **Per-variable** files: ``{stem}_{var}.nc``
     3. **Single merged** file
 
     Args:
         clim_path: Path to climatology file or directory stem.
         engine: NetCDF engine.
+        prefer_smooth: If True, prefer smoothed files; if False, prefer raw.
 
     Returns:
         ``xr.Dataset`` with climatology fields.
@@ -208,25 +211,43 @@ def load_climatology(
     stem = clim_path.stem.replace("_allvars", "") if clim_path.suffix else ""
 
     if parent.is_dir():
-        # Try smoothed per-variable-per-month files
-        pvm_files = sorted(parent.glob(f"{stem}*_smooth.nc"))
-        if pvm_files:
+        if prefer_smooth:
+            # Try smoothed per-variable-per-month files first
+            pvm_files = sorted(parent.glob(f"{stem}*_smooth.nc"))
+            if pvm_files:
+                return xr.open_mfdataset(
+                    [str(f) for f in pvm_files],
+                    chunks=None,
+                    engine=engine,
+                    combine="by_coords",
+                    join="outer",
+                )
+
+        # Try raw per-variable-per-month files (exclude _smooth)
+        raw_files = sorted(
+            f for f in parent.glob(f"{stem}_*.nc")
+            if "_smooth" not in f.stem and "_allvars" not in f.stem
+        )
+        if raw_files:
             return xr.open_mfdataset(
-                [str(f) for f in pvm_files],
+                [str(f) for f in raw_files],
                 chunks=None,
                 engine=engine,
                 combine="by_coords",
                 join="outer",
             )
 
-        # Try per-variable files
-        per_var = sorted(parent.glob(f"{stem}_*.nc"))
-        if per_var:
-            return xr.open_mfdataset(
-                per_var,
-                chunks=None,
-                engine=engine,
-            )
+        # If prefer_smooth was False and no raw files, try smooth as fallback
+        if not prefer_smooth:
+            pvm_files = sorted(parent.glob(f"{stem}*_smooth.nc"))
+            if pvm_files:
+                return xr.open_mfdataset(
+                    [str(f) for f in pvm_files],
+                    chunks=None,
+                    engine=engine,
+                    combine="by_coords",
+                    join="outer",
+                )
 
     raise FileNotFoundError(f"Climatology not found at {clim_path}")
 

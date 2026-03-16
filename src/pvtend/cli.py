@@ -89,8 +89,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Hour offsets as start:stop[:step]  (default: -49:25:1).",
     )
     compute.add_argument(
-        "--qg-method", choices=["log20", "fft", "sp19"], default=None,
-        help="QG omega solver (default: log20 for blocking, sp19 for prp).",
+        "--qg-method", choices=["log20", "sp19"], default="log20",
+        help="QG omega solver (default: log20).  sp19 = empirical scaling.",
     )
     compute.add_argument(
         "--center-mode", choices=["eulerian", "lagrangian"],
@@ -100,6 +100,10 @@ def _build_parser() -> argparse.ArgumentParser:
     compute.add_argument(
         "--n-workers", type=int, default=1,
         help="Number of parallel workers.",
+    )
+    compute.add_argument(
+        "--year-range", type=str, default=None,
+        help="Filter events to year range, e.g. '1990:2011' (start:stop_exclusive).",
     )
     compute.add_argument(
         "--skip-existing", action="store_true",
@@ -201,6 +205,34 @@ def _parse_dh_range(s: str) -> list[int]:
 
 
 # =====================================================================
+# Parallel worker (module-level for pickling)
+# =====================================================================
+
+_WORKER_CFG = None  # set before pool.map
+
+
+def _init_worker(cfg):
+    """Pool initializer — store config in global so workers can access it."""
+    global _WORKER_CFG
+    _WORKER_CFG = cfg
+
+
+def _process_one_event(arg_tuple):
+    """Process a single event in a worker process."""
+    from pvtend.tendency import TendencyComputer
+    evt_name, track_id, lat0, lon0, base_ts = arg_tuple
+    computer = TendencyComputer(_WORKER_CFG)
+    try:
+        n = computer.process_event(
+            evt_name=evt_name, track_id=track_id,
+            lat0=lat0, lon0=lon0, base_ts=base_ts)
+        return n
+    except Exception as exc:
+        print(f"    ERROR [{track_id} {evt_name}]: {exc}", flush=True)
+        return 0
+
+
+# =====================================================================
 # Subcommand implementations
 # =====================================================================
 
@@ -211,10 +243,7 @@ def _cmd_compute(args: argparse.Namespace) -> None:
 
     dh_values = _parse_dh_range(args.dh_range)
 
-    # Sensible QG method defaults per event type
     qg = args.qg_method
-    if qg is None:
-        qg = "log20" if args.event_type == "blocking" else "sp19"
 
     config = TendencyConfig(
         event_type=args.event_type,
@@ -232,10 +261,45 @@ def _cmd_compute(args: argparse.Namespace) -> None:
     computer = TendencyComputer(config)
 
     events_df = pd.read_csv(args.events_csv)
+
+    # --- Auto-detect old CSV format and rename columns ---
+    col_map = {}
+    if "lat" in events_df.columns and "lat0" not in events_df.columns:
+        col_map["lat"] = "lat0"
+    if "lon180" in events_df.columns and "lon0" not in events_df.columns:
+        col_map["lon180"] = "lon0"
+    if "type" in events_df.columns and "evt_name" not in events_df.columns:
+        col_map["type"] = "evt_name"
+    if col_map:
+        events_df = events_df.rename(columns=col_map)
+        print(f"[pvtend] Auto-mapped CSV columns: {col_map}")
+
+    # --- Filter by year range if provided ---
+    if args.year_range is not None:
+        yr_parts = args.year_range.split(":")
+        yr_start, yr_end = int(yr_parts[0]), int(yr_parts[1])
+        if "year" in events_df.columns:
+            events_df = events_df[
+                (events_df["year"] >= yr_start) & (events_df["year"] < yr_end)
+            ].reset_index(drop=True)
+        elif "timestamp" in events_df.columns:
+            ts_col = pd.to_datetime(events_df["timestamp"])
+            events_df = events_df[
+                (ts_col.dt.year >= yr_start) & (ts_col.dt.year < yr_end)
+            ].reset_index(drop=True)
+        elif "base_ts" in events_df.columns:
+            ts_col = pd.to_datetime(events_df["base_ts"])
+            events_df = events_df[
+                (ts_col.dt.year >= yr_start) & (ts_col.dt.year < yr_end)
+            ].reset_index(drop=True)
+        print(f"[pvtend] Filtered to years [{yr_start}, {yr_end}): "
+              f"{len(events_df)} events")
+
     print(f"[pvtend] Processing {len(events_df)} events, "
           f"dh={dh_values[0]}..{dh_values[-1]}, qg_method={qg}")
 
-    n_total = 0
+    # Build list of event tuples for iteration / parallelism
+    event_args = []
     for idx, row in events_df.iterrows():
         evt_name = str(row.get("evt_name", row.get("stage", "onset")))
         track_id = int(row.get("track_id", idx))
@@ -243,20 +307,37 @@ def _cmd_compute(args: argparse.Namespace) -> None:
         lon0 = float(row["lon0"])
         base_ts = pd.Timestamp(str(row.get("base_ts",
                                             row.get("timestamp"))))
-        print(f"  Event {idx + 1}/{len(events_df)}: "
-              f"track_id={track_id}  {evt_name}  {base_ts}")
-        try:
-            n = computer.process_event(
-                evt_name=evt_name,
-                track_id=track_id,
-                lat0=lat0,
-                lon0=lon0,
-                base_ts=base_ts,
-            )
-            n_total += n
-        except Exception as exc:
-            print(f"    ERROR: {exc}")
-            continue
+        event_args.append((evt_name, track_id, lat0, lon0, base_ts))
+
+    if config.n_workers > 1:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        print(f"[pvtend] Using {config.n_workers} parallel workers")
+
+        n_total = 0
+        with ProcessPoolExecutor(max_workers=config.n_workers,
+                                 initializer=_init_worker,
+                                 initargs=(config,)) as ex:
+            futs = {ex.submit(_process_one_event, a): a for a in event_args}
+            for i, f in enumerate(as_completed(futs), 1):
+                n = f.result()
+                n_total += n
+                if i % 50 == 0 or i == len(futs):
+                    print(f"[pvtend] {i}/{len(futs)} events done, "
+                          f"{n_total} NPZ written so far", flush=True)
+    else:
+        n_total = 0
+        for i, (evt_name, track_id, lat0, lon0, base_ts) in enumerate(
+                event_args):
+            print(f"  Event {i + 1}/{len(event_args)}: "
+                  f"track_id={track_id}  {evt_name}  {base_ts}")
+            try:
+                n = computer.process_event(
+                    evt_name=evt_name, track_id=track_id,
+                    lat0=lat0, lon0=lon0, base_ts=base_ts)
+                n_total += n
+            except Exception as exc:
+                print(f"    ERROR: {exc}")
+                continue
 
     print(f"[pvtend] Done — wrote {n_total} NPZ files.")
 
@@ -334,6 +415,12 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         Exit code (0 for success).
     """
+    import multiprocessing as _mp
+    try:
+        _mp.set_start_method("spawn")
+    except RuntimeError:
+        pass
+
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -358,4 +445,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    import multiprocessing as _mp
+    try:
+        _mp.set_start_method("spawn")
+    except RuntimeError:
+        pass
     sys.exit(main())

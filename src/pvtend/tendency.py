@@ -35,6 +35,7 @@ import xarray as xr
 from scipy.ndimage import gaussian_filter
 
 from .constants import (
+    CP_DRY,
     DEFAULT_LEVELS,
     G0,
     H_SCALE,
@@ -54,8 +55,9 @@ from .constants import (
     CLIM_VARIABLES,
     MONTH_ABBREVS,
 )
+from .derivatives import ddp
 from .helmholtz import helmholtz_decomposition, solve_poisson_fft, gradient
-from .omega import solve_qg_omega, solve_qg_omega_sip
+from .omega import solve_qg_omega_sip
 
 # Alias for brevity
 LEVELS = DEFAULT_LEVELS
@@ -118,7 +120,7 @@ class TendencyConfig:
         lat_half: Half-width of the extraction patch in degrees latitude.
         lon_half: Half-width of the extraction patch in degrees longitude.
         partial_at_pole: Allow truncated patches near the poles.
-        qg_omega_method: ``'log20'`` (SIP), ``'fft'``, or ``'sp19'`` (scaling).
+        qg_omega_method: ``'log20'`` (SIP) or ``'sp19'`` (empirical scaling).
         center_mode: ``'eulerian'`` or ``'lagrangian'``.
         skip_existing: Skip events with existing NPZ output.
         engine: NetCDF engine passed to xarray.
@@ -403,17 +405,7 @@ def _solve_chi_moist_patch(
     u_div_m = np.zeros_like(omega_moist)
     v_div_m = np.zeros_like(omega_moist)
 
-    domega_dp = np.zeros_like(omega_moist)
-    dp = np.diff(plevs_pa)
-    for k in range(1, nlev - 1):
-        domega_dp[k] = (omega_moist[k + 1] - omega_moist[k - 1]) / (
-            plevs_pa[k + 1] - plevs_pa[k - 1]
-        )
-    if nlev > 1:
-        domega_dp[0] = (omega_moist[1] - omega_moist[0]) / dp[0]
-        domega_dp[-1] = (omega_moist[-1] - omega_moist[-2]) / dp[-1]
-
-    rhs_poisson = -domega_dp
+    rhs_poisson = -ddp(omega_moist, plevs_pa)
 
     for k in range(nlev):
         chi_k = solve_poisson_fft(rhs_poisson[k], dx_arr, dy)
@@ -423,6 +415,40 @@ def _solve_chi_moist_patch(
         v_div_m[k] = dchi_dy
 
     return chi_m, u_div_m, v_div_m
+
+
+def _solve_chi_moist_nh(
+    omega_moist_nh: np.ndarray,
+    lat_nh: np.ndarray,
+    lon_nh: np.ndarray,
+    plevs_pa: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Solve ∇²χ_moist = -∂ω_moist/∂p on full NH, return u/v_div_moist.
+
+    Using the full NH domain with periodic zonal BCs gives a much
+    better-conditioned Poisson inversion than the local patch with
+    Dirichlet BCs (which can introduce spurious boundary artefacts).
+    """
+    nlev, nlat, nlon = omega_moist_nh.shape
+    lat_rad = np.deg2rad(lat_nh)
+    dlat = float(np.abs(np.diff(lat_nh).mean()))
+    dlon = float(np.abs(np.diff(lon_nh).mean()))
+    dy = np.deg2rad(dlat) * R_EARTH
+    dx_arr = np.deg2rad(dlon) * R_EARTH * np.cos(lat_rad)
+    dx_arr = np.maximum(dx_arr, dy * 0.1)
+
+    rhs = -ddp(omega_moist_nh, plevs_pa)
+
+    u_div_m_nh = np.zeros_like(omega_moist_nh)
+    v_div_m_nh = np.zeros_like(omega_moist_nh)
+
+    for k in range(nlev):
+        chi_k = solve_poisson_fft(rhs[k], dx_arr, dy)
+        dchi_dx, dchi_dy = gradient(chi_k, dx_arr, dy)
+        u_div_m_nh[k] = dchi_dx
+        v_div_m_nh[k] = dchi_dy
+
+    return u_div_m_nh, v_div_m_nh
 
 
 # ============================================================================
@@ -481,42 +507,6 @@ def _qg_moist_dry_on_patch(
     t_sv = pick(cube3d["t"])
     w_sv = pick(cube3d["w"])
 
-    # Helper: FFT solve on full NH, extract patch
-    def _fft_on_nh(z_snap, t_snap, t_for_sigma=None):
-        lat_nh = nh_data["lat"]
-        lon_nh = nh_data["lon"]
-        if lat_nh[0] > lat_nh[-1]:
-            lat_nh_asc = lat_nh[::-1]
-            flip_nh = True
-        else:
-            lat_nh_asc = lat_nh
-            flip_nh = False
-
-        def _prep(arr3d):
-            out = arr3d[psort]
-            if flip_nh:
-                out = out[:, ::-1, :]
-            return np.nan_to_num(out, nan=0.0)
-
-        z_nh = _prep(z_snap)
-        t_nh = _prep(t_snap)
-        tf_nh = _prep(t_for_sigma) if t_for_sigma is not None else None
-
-        ug_nh, vg_nh = _compute_geostrophic_wind(z_nh, lat_nh_asc, lon_nh)
-        od_nh = solve_qg_omega(ug_nh, vg_nh, t_nh,
-                               lat_nh_asc, lon_nh, plevs_pa,
-                               center_lat=center_lat, t_full=tf_nh)
-
-        lat_idx = np.array([np.argmin(np.abs(lat_nh_asc - la))
-                            for la in lat_v])
-
-        def _circ_nearest(lv):
-            d = np.abs((lon_nh - lv + 180) % 360 - 180)
-            return int(np.argmin(d))
-
-        lon_idx = np.array([_circ_nearest(lo) for lo in lon_vec])
-        return od_nh[np.ix_(np.arange(od_nh.shape[0]), lat_idx, lon_idx)]
-
     # Helper: SIP (LOG20) solve on full NH, extract patch
     def _sip_on_nh(z_snap, t_snap, t_for_sigma=None, w_snap=None):
         lat_nh = nh_data["lat"]
@@ -562,7 +552,7 @@ def _qg_moist_dry_on_patch(
 
     if qg_method == "sp19":
         od = SP19_DRY_FRACTION * w_sv
-    elif qg_method == "log20":
+    else:  # "log20" (default)
         if nh_data is not None:
             od = _sip_on_nh(nh_data["z"], nh_data["t"],
                             w_snap=nh_data.get("w"))
@@ -570,18 +560,62 @@ def _qg_moist_dry_on_patch(
             od, _info = solve_qg_omega_sip(
                 ug, vg, t_sv, lat_v, lon_vec, plevs_pa,
                 center_lat=center_lat)
-    else:  # "fft"
-        if nh_data is not None:
-            od = _fft_on_nh(nh_data["z"], nh_data["t"])
-        else:
-            od = solve_qg_omega(ug, vg, t_sv, lat_v, lon_vec, plevs_pa,
-                                center_lat=center_lat)
 
     # --- Moist chi → divergent moist wind (from w_moist) ---
     # Total-field approx: ω_moist ≈ ω'_moist ⇒ u_div_moist ≈ u'_div_moist
     w_moist_sv = w_sv - od
-    _, udm_sv, vdm_sv = _solve_chi_moist_patch(
-        w_moist_sv, lat_v, lon_vec, plevs_pa)
+
+    # Solve Poisson on full NH when available (better boundary conditions)
+    if nh_data is not None and qg_method != "sp19":
+        lat_nh = nh_data["lat"]
+        lon_nh = nh_data["lon"]
+        if lat_nh[0] > lat_nh[-1]:
+            lat_nh_asc = lat_nh[::-1]
+            flip_nh = True
+        else:
+            lat_nh_asc = lat_nh
+            flip_nh = False
+
+        # Reconstruct w_moist on full NH: w_total_nh - w_dry_nh
+        w_nh = nh_data["w"][psort]
+        if flip_nh:
+            w_nh = w_nh[:, ::-1, :]
+        w_nh = np.nan_to_num(w_nh, nan=0.0)
+        # od_nh: solve QG omega on full NH
+        z_nh = nh_data["z"][psort]
+        t_nh = nh_data["t"][psort]
+        if flip_nh:
+            z_nh = z_nh[:, ::-1, :]
+            t_nh = t_nh[:, ::-1, :]
+        z_nh = np.nan_to_num(z_nh, nan=0.0)
+        t_nh = np.nan_to_num(t_nh, nan=0.0)
+        ug_nh, vg_nh = _compute_geostrophic_wind(z_nh, lat_nh_asc, lon_nh)
+        wb_nh = w_nh
+        od_nh, _ = solve_qg_omega_sip(
+            ug_nh, vg_nh, t_nh,
+            lat_nh_asc, lon_nh, plevs_pa,
+            center_lat=center_lat,
+            omega_b=wb_nh)
+
+        w_moist_nh = w_nh - od_nh
+        udm_nh, vdm_nh = _solve_chi_moist_nh(
+            w_moist_nh, lat_nh_asc, lon_nh, plevs_pa)
+
+        # Extract patch from full NH solution
+        lat_idx = np.array([np.argmin(np.abs(lat_nh_asc - la))
+                            for la in lat_v])
+
+        def _circ_nearest_nh(lv):
+            d = np.abs((lon_nh - lv + 180) % 360 - 180)
+            return int(np.argmin(d))
+
+        lon_idx = np.array([_circ_nearest_nh(lo) for lo in lon_vec])
+        udm_sv = udm_nh[np.ix_(np.arange(udm_nh.shape[0]), lat_idx, lon_idx)]
+        vdm_sv = vdm_nh[np.ix_(np.arange(vdm_nh.shape[0]), lat_idx, lon_idx)]
+    else:
+        # Fallback: solve on local patch (for sp19 or when no nh_data)
+        _, udm_sv, vdm_sv = _solve_chi_moist_patch(
+            w_moist_sv, lat_v, lon_vec, plevs_pa)
 
     # --- Unpack & store ---
     w_dry = unpack(od)
@@ -1030,7 +1064,7 @@ class TendencyComputer:
 
             # --- Patch-level QG omega + moist/dry ---
             nh_data = None
-            if self.cfg.qg_omega_method in ("fft", "log20"):
+            if self.cfg.qg_omega_method == "log20":
                 snap = ds.sel(valid_time=ts)
                 nh_data = {
                     "z": snap["z"].values,
