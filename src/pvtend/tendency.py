@@ -387,21 +387,21 @@ def _compute_geostrophic_wind(
 
 
 # ============================================================================
-#  Moist velocity potential solver (full NH, spherical Laplacian)
+#  Velocity potential solver (full NH, spherical Laplacian)
 # ============================================================================
-def _solve_chi_moist_nh(
-    omega_moist_nh: np.ndarray,
+def _solve_chi_nh(
+    omega_nh: np.ndarray,
     lat_nh: np.ndarray,
     lon_nh: np.ndarray,
     plevs_pa: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Solve ∇²χ_moist = -∂ω_moist/∂p on full NH, return u/v_div_moist.
+    """Solve ∇²χ = -∂ω/∂p on full NH, return u/v divergent wind.
 
     Uses the spherical Laplacian (conservative form) with area-weighted
     RHS mean removal.  The full NH domain with periodic zonal BCs gives
     a much better-conditioned inversion than the local patch.
     """
-    nlev, nlat, nlon = omega_moist_nh.shape
+    nlev, nlat, nlon = omega_nh.shape
     lat_rad = np.deg2rad(lat_nh)
     dlat = float(np.abs(np.diff(lat_nh).mean()))
     dlon = float(np.abs(np.diff(lon_nh).mean()))
@@ -410,7 +410,7 @@ def _solve_chi_moist_nh(
     dx_arr = np.maximum(dx_arr, dy * 0.1)
     dlon_rad = np.deg2rad(dlon)
 
-    rhs = -ddp(omega_moist_nh, plevs_pa)
+    rhs = -ddp(omega_nh, plevs_pa)
 
     # Area-weighted mean removal
     cos_phi = np.cos(lat_rad)
@@ -419,18 +419,22 @@ def _solve_chi_moist_nh(
         weighted_mean = np.sum(area_weights[:, None] * rhs[k]) / nlon
         rhs[k] -= weighted_mean
 
-    u_div_m_nh = np.zeros_like(omega_moist_nh)
-    v_div_m_nh = np.zeros_like(omega_moist_nh)
+    u_div_nh = np.zeros_like(omega_nh)
+    v_div_nh = np.zeros_like(omega_nh)
 
     for k in range(nlev):
         chi_k = solve_poisson_spherical_fft(
             rhs[k], lat_nh, dy, dlon_rad, R_earth=R_EARTH
         )
         dchi_dx, dchi_dy = gradient(chi_k, dx_arr, dy)
-        u_div_m_nh[k] = dchi_dx
-        v_div_m_nh[k] = dchi_dy
+        u_div_nh[k] = dchi_dx
+        v_div_nh[k] = dchi_dy
 
-    return u_div_m_nh, v_div_m_nh
+    return u_div_nh, v_div_nh
+
+
+# Backward-compatible alias
+_solve_chi_moist_nh = _solve_chi_nh
 
 
 # ============================================================================
@@ -532,8 +536,10 @@ def _qg_moist_dry_on_patch(
         w_dry_nh = SP19_DRY_FRACTION * w_nh
         w_moist_nh = w_nh - w_dry_nh
 
-        udm_nh, vdm_nh = _solve_chi_moist_nh(
+        udm_nh, vdm_nh = _solve_chi_nh(
             w_moist_nh, lat_nh_asc, lon_nh, plevs_pa)
+        udd_nh, vdd_nh = _solve_chi_nh(
+            w_dry_nh, lat_nh_asc, lon_nh, plevs_pa)
 
         lat_idx = np.array([np.argmin(np.abs(lat_nh_asc - la))
                             for la in lat_v])
@@ -549,8 +555,8 @@ def _qg_moist_dry_on_patch(
         cube3d["v_div_moist"]    = unpack(vdm_nh[ix])
         cube3d["u_div_qg_moist"] = cube3d["u_div_moist"].copy()
         cube3d["v_div_qg_moist"] = cube3d["v_div_moist"].copy()
-        cube3d["u_div_dry"]  = cube3d["u_anom_div"] - cube3d["u_div_moist"]
-        cube3d["v_div_dry"]  = cube3d["v_anom_div"] - cube3d["v_div_moist"]
+        cube3d["u_div_dry"]  = unpack(udd_nh[ix])
+        cube3d["v_div_dry"]  = unpack(vdd_nh[ix])
         return
 
     # ---- LOG20 (default): Full SIP solve on NH domain ----
@@ -607,10 +613,12 @@ def _qg_moist_dry_on_patch(
     w_moist_nh = w_nh - od_nh
     w_qg_moist_nh = oqg_nh - od_nh
 
-    # Poisson inversions on full NH (spherical Laplacian)
-    udm_nh, vdm_nh = _solve_chi_moist_nh(
+    # Independent Poisson inversions on full NH (spherical Laplacian)
+    udm_nh, vdm_nh = _solve_chi_nh(
         w_moist_nh, lat_nh_asc, lon_nh, plevs_pa)
-    udqm_nh, vdqm_nh = _solve_chi_moist_nh(
+    udd_nh, vdd_nh = _solve_chi_nh(
+        od_nh, lat_nh_asc, lon_nh, plevs_pa)
+    udqm_nh, vdqm_nh = _solve_chi_nh(
         w_qg_moist_nh, lat_nh_asc, lon_nh, plevs_pa)
 
     # Extract patch from full NH solutions
@@ -628,6 +636,8 @@ def _qg_moist_dry_on_patch(
     wqm_sv   = (oqg_nh - od_nh)[ix]
     udm_sv   = udm_nh[ix]
     vdm_sv   = vdm_nh[ix]
+    udd_sv   = udd_nh[ix]
+    vdd_sv   = vdd_nh[ix]
     udqm_sv  = udqm_nh[ix]
     vdqm_sv  = vdqm_nh[ix]
 
@@ -639,8 +649,8 @@ def _qg_moist_dry_on_patch(
     cube3d["v_div_moist"]     = unpack(vdm_sv)
     cube3d["u_div_qg_moist"]  = unpack(udqm_sv)
     cube3d["v_div_qg_moist"]  = unpack(vdqm_sv)
-    cube3d["u_div_dry"]       = cube3d["u_anom_div"] - cube3d["u_div_moist"]
-    cube3d["v_div_dry"]       = cube3d["v_anom_div"] - cube3d["v_div_moist"]
+    cube3d["u_div_dry"]       = unpack(udd_sv)
+    cube3d["v_div_dry"]       = unpack(vdd_sv)
 
 
 # ============================================================================

@@ -34,8 +34,12 @@ from pvtend.climatology import compute_climatology, load_climatology
 
 # Solvers
 from pvtend.omega import solve_qg_omega_sip
-from pvtend.helmholtz import helmholtz_decomposition, helmholtz_decomposition_3d
-from pvtend.moist_dry import decompose_omega
+from pvtend.helmholtz import (
+    helmholtz_decomposition,
+    helmholtz_decomposition_3d,
+    laplacian_spherical_fft,
+)
+from pvtend.moist_dry import decompose_omega, solve_chi_from_omega
 
 # Decomposition
 from pvtend.decomposition import (
@@ -94,7 +98,8 @@ __all__ = [
     # Solvers
     "solve_qg_omega_sip",
     "helmholtz_decomposition", "helmholtz_decomposition_3d",
-    "decompose_omega",
+    "laplacian_spherical_fft",
+    "decompose_omega", "solve_chi_from_omega",
     # Decomposition
     "OrthogonalBasisFields", "compute_orthogonal_basis",
     "project_field", "collect_term_fields",

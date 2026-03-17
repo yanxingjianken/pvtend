@@ -166,8 +166,8 @@ src/pvtend/
 ├── derivatives.py       # Finite difference operators
 ├── climatology.py       # Fourier-filtered climatology
 ├── omega.py             # QG omega solver (LOG20/SIP or SP19)
-├── helmholtz.py         # Helmholtz decomposition (spherical Poisson + spectral gradient)
-├── moist_dry.py         # Moist/dry omega split
+├── helmholtz.py         # Helmholtz decomposition (spherical Poisson + spectral gradient + laplacian_spherical_fft)
+├── moist_dry.py         # Moist/dry omega split & independent Poisson wind recovery (solve_chi_from_omega)
 ├── isentropic.py        # Isentropic PV-tendency diagnostics
 ├── tendency.py          # Main pipeline: data loading, derivatives, cross-terms, NPZ output
 ├── classify.py          # RWB classification Pass 1 (AWB/CWB/NEUTRAL → variant PKL)

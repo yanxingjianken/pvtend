@@ -6,12 +6,13 @@ Decomposes total vertical velocity (omega) into dry and moist components:
     ω_dry    = QG omega (from solve_qg_omega)
     ω_moist  = ω_total − ω_dry
 
-The moist divergent wind is recovered via:
-    ∇²χ_moist = −∂ω_moist/∂p
-    (u_div_moist, v_div_moist) = ∇χ_moist
+Each divergent wind component (moist, dry, qg-moist) is recovered
+**independently** via its own Poisson inversion:
 
-The dry divergent wind is the residual:
-    u_div_dry = u_div − u_div_moist
+    ∇²χ_X = −∂ω_X/∂p
+    (u_div_X, v_div_X) = ∇χ_X
+
+where X ∈ {moist, dry, qg_moist}.
 
 Total-field approximation
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -27,10 +28,6 @@ The same linear approximation propagates through the Poisson inversion
 to the horizontal divergent wind:
 
     u_div_moist ≈ u'_div_moist
-
-This avoids a costly second anomaly-field QG inversion while capturing
-the dominant moist–dry partition of both vertical velocity and
-horizontal divergent wind.
 """
 
 from __future__ import annotations
@@ -42,42 +39,42 @@ from .derivatives import ddp
 from .helmholtz import gradient, solve_poisson_spherical_fft
 
 
-def solve_chi_moist(
-    omega_moist: np.ndarray,
+def solve_chi_from_omega(
+    omega: np.ndarray,
     lat: np.ndarray,
     lon: np.ndarray,
     plevs_pa: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Solve ∇²χ_moist = -∂ω_moist/∂p at each level (spherical Laplacian).
+    """Solve ∇²χ = -∂ω/∂p at each level (spherical Laplacian).
 
-    Computes the velocity potential of the moist divergent wind by
-    solving a Poisson equation on each pressure level using the full
-    spherical Laplacian (conservative form).  The RHS is the negative
-    vertical derivative of the moist omega field.
+    Computes the velocity potential of the divergent wind associated
+    with *omega* by solving a Poisson equation on each pressure level
+    using the full spherical Laplacian (conservative form).
 
     The area-weighted mean of the RHS is removed on each level before
     solving to ensure compatibility with the Dirichlet boundary
     conditions (Fredholm solvability).
 
     Args:
-        omega_moist: Moist omega [Pa/s], shape ``(nlev, nlat, nlon)``.
+        omega: Vertical velocity component [Pa/s],
+            shape ``(nlev, nlat, nlon)``.
         lat: Latitude [degrees], ascending, shape ``(nlat,)``.
         lon: Longitude [degrees], shape ``(nlon,)``.
         plevs_pa: Pressure levels [Pa], ascending, shape ``(nlev,)``.
 
     Returns:
-        Tuple of ``(chi_moist, u_div_moist, v_div_moist)``, each with
+        Tuple of ``(chi, u_div, v_div)``, each with
         shape ``(nlev, nlat, nlon)``.
 
     Raises:
-        ValueError: If ``omega_moist`` is not 3-D.
+        ValueError: If ``omega`` is not 3-D.
     """
-    if omega_moist.ndim != 3:
+    if omega.ndim != 3:
         raise ValueError(
-            f"omega_moist must be 3-D (nlev, nlat, nlon), got {omega_moist.ndim}-D"
+            f"omega must be 3-D (nlev, nlat, nlon), got {omega.ndim}-D"
         )
 
-    nlev, nlat, nlon = omega_moist.shape
+    nlev, nlat, nlon = omega.shape
     lat_rad = np.deg2rad(lat)
     dlat = np.abs(lat[1] - lat[0]) if nlat > 1 else 1.5
     dlon = np.abs(lon[1] - lon[0]) if nlon > 1 else 1.5
@@ -86,14 +83,14 @@ def solve_chi_moist(
     dx_arr = np.maximum(dx_arr, dy * 0.1)  # guard near poles
     dlon_rad = np.deg2rad(dlon)
 
-    chi_m = np.zeros_like(omega_moist)
-    u_div_m = np.zeros_like(omega_moist)
-    v_div_m = np.zeros_like(omega_moist)
+    chi_out = np.zeros_like(omega)
+    u_div_out = np.zeros_like(omega)
+    v_div_out = np.zeros_like(omega)
 
-    # ── Compute ∂ω_moist/∂p using centred finite differences ──
-    domega_dp = ddp(omega_moist, plevs_pa)
+    # ── Compute ∂ω/∂p using centred finite differences ──
+    domega_dp = ddp(omega, plevs_pa)
 
-    # RHS of Poisson equation: -∂ω_moist/∂p
+    # RHS of Poisson equation: -∂ω/∂p
     rhs_poisson = -domega_dp
 
     # ── Area-weighted mean removal for RHS compatibility ──
@@ -110,12 +107,16 @@ def solve_chi_moist(
         chi_k = solve_poisson_spherical_fft(
             rhs_poisson[k], lat, dy, dlon_rad, R_earth=R_EARTH
         )
-        chi_m[k] = chi_k
+        chi_out[k] = chi_k
         dchi_dx, dchi_dy = gradient(chi_k, dx_arr, dy)
-        u_div_m[k] = dchi_dx
-        v_div_m[k] = dchi_dy
+        u_div_out[k] = dchi_dx
+        v_div_out[k] = dchi_dy
 
-    return chi_m, u_div_m, v_div_m
+    return chi_out, u_div_out, v_div_out
+
+
+# Backward-compatible alias
+solve_chi_moist = solve_chi_from_omega
 
 
 def decompose_omega(
@@ -132,12 +133,10 @@ def decompose_omega(
     Given total omega and its QG (dry) component, this function:
 
     1. Computes the moist residual: ``ω_moist = ω_total − ω_dry``.
-    2. Solves for the moist velocity potential ``χ_moist`` via Poisson
-       equation on each pressure level.
-    3. Recovers the moist divergent wind ``(u_div_moist, v_div_moist)``
-       as the gradient of ``χ_moist``.
-    4. Optionally decomposes the total divergent wind into moist and dry
-       parts by subtraction.
+    2. Solves independently for **both** moist and dry velocity
+       potentials via Poisson equation on each pressure level.
+    3. Recovers the divergent wind for each component as the
+       gradient of its respective velocity potential.
 
     Args:
         omega_total: Total vertical velocity [Pa/s],
@@ -148,9 +147,11 @@ def decompose_omega(
         lon: Longitude [degrees], shape ``(nlon,)``.
         plevs_pa: Pressure levels [Pa], ascending, shape ``(nlev,)``.
         u_div: Total divergent u-component [m/s] (optional),
-            shape ``(nlev, nlat, nlon)``.
+            shape ``(nlev, nlat, nlon)``.  No longer used for dry
+            residual computation but accepted for API compatibility.
         v_div: Total divergent v-component [m/s] (optional),
-            shape ``(nlev, nlat, nlon)``.
+            shape ``(nlev, nlat, nlon)``.  No longer used for dry
+            residual computation but accepted for API compatibility.
 
     Returns:
         Dictionary containing:
@@ -159,24 +160,25 @@ def decompose_omega(
         - ``"chi_moist"``: Moist velocity potential.
         - ``"u_div_moist"``: Moist divergent u-component.
         - ``"v_div_moist"``: Moist divergent v-component.
-        - ``"u_div_dry"``: Dry divergent u (only if *u_div* provided).
-        - ``"v_div_dry"``: Dry divergent v (only if *v_div* provided).
+        - ``"chi_dry"``: Dry velocity potential.
+        - ``"u_div_dry"``: Dry divergent u-component.
+        - ``"v_div_dry"``: Dry divergent v-component.
     """
     omega_moist = omega_total - omega_dry
-    chi_m, u_div_m, v_div_m = solve_chi_moist(
+
+    chi_m, u_div_m, v_div_m = solve_chi_from_omega(
         omega_moist, lat, lon, plevs_pa
     )
+    chi_d, u_div_d, v_div_d = solve_chi_from_omega(
+        omega_dry, lat, lon, plevs_pa
+    )
 
-    result: dict[str, np.ndarray] = {
+    return {
         "omega_moist": omega_moist,
         "chi_moist": chi_m,
         "u_div_moist": u_div_m,
         "v_div_moist": v_div_m,
+        "chi_dry": chi_d,
+        "u_div_dry": u_div_d,
+        "v_div_dry": v_div_d,
     }
-
-    if u_div is not None:
-        result["u_div_dry"] = u_div - u_div_m
-    if v_div is not None:
-        result["v_div_dry"] = v_div - v_div_m
-
-    return result

@@ -9,6 +9,7 @@ from pvtend.helmholtz import (
     compute_vorticity_divergence,
     solve_poisson_spherical_fft,
     helmholtz_decomposition,
+    laplacian_spherical_fft,
 )
 from pvtend.constants import R_EARTH
 
@@ -92,3 +93,33 @@ class TestHelmholtzDecomposition:
         rel_err_v = np.abs(v_recon[3:-3, 3:-3] - v[3:-3, 3:-3]).mean() / (np.abs(v).max() + 1e-10)
         assert rel_err_u < 0.5  # Helmholtz not exact on limited area
         assert rel_err_v < 0.5
+
+
+class TestLaplacianRoundTrip:
+    """Test that laplacian_spherical_fft is the exact inverse of the Poisson solver."""
+
+    def test_roundtrip_interior(self, small_grid):
+        """Laplacian(solve_poisson(f)) == f at interior points."""
+        lat = small_grid["lat"]
+        lon = small_grid["lon"]
+        nlat, nlon = small_grid["nlat"], small_grid["nlon"]
+        dlat = np.deg2rad(small_grid["dlat"])
+        dlon_rad = np.deg2rad(small_grid["dlon"])
+        dy = R_EARTH * dlat
+
+        lat2d, lon2d = np.meshgrid(lat, lon, indexing="ij")
+        rhs = np.sin(np.deg2rad(lat2d) * 3) * np.cos(np.deg2rad(lon2d) * 4)
+
+        # Remove area-weighted mean for solvability
+        cos_phi = np.cos(np.deg2rad(lat))
+        area_w = cos_phi / cos_phi.sum()
+        rhs -= np.sum(area_w[:, None] * rhs) / nlon
+
+        chi = solve_poisson_spherical_fft(rhs, lat, dy, dlon_rad)
+        lap_chi = laplacian_spherical_fft(chi, lat, dy, dlon_rad)
+
+        # Interior should match to machine precision
+        np.testing.assert_allclose(
+            lap_chi[1:-1], rhs[1:-1], atol=1e-12,
+            err_msg="Laplacian round-trip failed at interior points",
+        )

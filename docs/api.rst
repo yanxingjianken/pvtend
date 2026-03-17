@@ -268,8 +268,14 @@ The **meridional** derivative retains centred finite differences (the
    :toctree: generated/
 
    solve_poisson_spherical_fft
+   laplacian_spherical_fft
    compute_vorticity_divergence
    gradient
+
+``laplacian_spherical_fft`` is the **forward operator** matching the
+Poisson solver's conservative spherical Laplacian stencil.  It enables
+machine-precision round-trip verification:
+:math:`\mathcal{L}(\text{solve\_poisson}(f)) = f` (interior points).
 
 .. currentmodule:: pvtend
 
@@ -295,11 +301,47 @@ The divergent-wind recovery proceeds as follows:
 2. Solve :math:`\nabla^2\chi_\text{moist} = -\partial\omega_\text{moist}/\partial p`
    on each pressure level (spherical Poisson solver).
 3. :math:`(u_\text{div,moist}, v_\text{div,moist}) = \nabla\chi_\text{moist}`
-4. Dry divergent wind by subtraction:
-   :math:`\mathbf{u}_\text{div,dry} = \mathbf{u}_\text{div} - \mathbf{u}_\text{div,moist}`
-5. QG-moist divergent wind via the same Poisson inversion applied to
+4. Solve :math:`\nabla^2\chi_\text{dry} = -\partial\omega_\text{dry}/\partial p`
+   independently on each pressure level (same spherical Poisson solver).
+5. :math:`(u_\text{div,dry}, v_\text{div,dry}) = \nabla\chi_\text{dry}`
+6. QG-moist divergent wind via the same Poisson inversion applied to
    :math:`\omega_\text{qg\_moist}`:
    :math:`(u_\text{div,qg\_moist}, v_\text{div,qg\_moist}) = \nabla\chi_\text{qg\_moist}`
+
+All three divergent-wind components are recovered via **independent
+Poisson inversions** using :func:`~pvtend.moist_dry.solve_chi_from_omega`.
+This avoids amplification of discretisation errors from the Helmholtz
+decomposition that would occur with a residual-based approach
+(:math:`\mathbf{u}_{\text{div,dry}} = \mathbf{u}_{\text{div}} - \mathbf{u}_{\text{div,moist}}`).
+
+Which solver is used where
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 35 35
+
+   * - Equation
+     - Solver
+     - Function
+   * - :math:`\nabla^2\psi = \zeta` (Helmholtz)
+     - Spherical FFT Poisson
+     - :func:`~pvtend.helmholtz.solve_poisson_spherical_fft`
+   * - :math:`\nabla^2\chi = \delta` (Helmholtz)
+     - Spherical FFT Poisson
+     - :func:`~pvtend.helmholtz.solve_poisson_spherical_fft`
+   * - :math:`\nabla^2\chi_\text{moist} = -\partial\omega_\text{moist}/\partial p`
+     - Spherical FFT Poisson
+     - :func:`~pvtend.moist_dry.solve_chi_from_omega`
+   * - :math:`\nabla^2\chi_\text{dry} = -\partial\omega_\text{dry}/\partial p`
+     - Spherical FFT Poisson
+     - :func:`~pvtend.moist_dry.solve_chi_from_omega`
+   * - :math:`\nabla^2\chi_\text{qg\_moist} = -\partial\omega_\text{qg\_moist}/\partial p`
+     - Spherical FFT Poisson
+     - :func:`~pvtend.moist_dry.solve_chi_from_omega`
+   * - :math:`\mathcal{L}(\chi) = f` (forward Laplacian for verification)
+     - Conservative spherical stencil
+     - :func:`~pvtend.helmholtz.laplacian_spherical_fft`
 
 Note: the **horizontal wind** decomposition remains **2-way**
 (dry + moist).  The QG-moist divergent wind is a physically
@@ -330,6 +372,7 @@ horizontal divergent wind.
    :toctree: generated/
 
    decompose_omega
+   solve_chi_from_omega
 
 
 Orthogonal Basis Decomposition

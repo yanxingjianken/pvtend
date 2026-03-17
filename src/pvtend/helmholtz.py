@@ -112,6 +112,13 @@ def gradient(
     meridional derivative keeps centred finite differences via
     :func:`derivatives.ddy`.
 
+    .. note::
+
+       The meridional derivative uses plain centred FD, which does NOT
+       match the conservative half-grid stencil in the Poisson solver.
+       Therefore ``div_FD(gradient(χ)) ≠ ∇²χ``.  For a consistent
+       round-trip use :func:`laplacian_spherical_fft` instead.
+
     Args:
         phi: Scalar field, shape ``(nlat, nlon)``.
         dx: Zonal grid spacing [m]. Scalar or array of shape ``(nlat,)``.
@@ -140,6 +147,72 @@ def gradient(
     dphi_dy = ddy(phi, dy)
 
     return dphi_dx, dphi_dy
+
+
+def laplacian_spherical_fft(
+    phi: np.ndarray,
+    lat: np.ndarray,
+    dy: float,
+    dlon_rad: float,
+    R_earth: float = R_EARTH,
+) -> np.ndarray:
+    """Apply the spherical Laplacian using the SAME stencil as the Poisson solver.
+
+    Computes :math:`\\nabla^2 \\phi` using the conservative-form spherical
+    Laplacian identical to the one in :func:`solve_poisson_spherical_fft`:
+
+    .. math::
+
+        \\nabla^2 \\phi = \\frac{1}{a^2 \\cos^2\\varphi}
+        \\frac{\\partial^2 \\phi}{\\partial \\lambda^2}
+        + \\frac{1}{a^2 \\cos\\varphi}
+        \\frac{\\partial}{\\partial \\varphi}
+        \\left(\\cos\\varphi
+        \\frac{\\partial \\phi}{\\partial \\varphi}\\right)
+
+    This function is the *analysis* (forward) operator conjugate to the
+    Poisson solver, so ``laplacian_spherical_fft(solve_poisson(..., f), ...)
+    == f`` to machine precision (interior points).
+
+    Args:
+        phi: Scalar field, shape ``(nlat, nlon)``.
+        lat: Latitude in degrees, shape ``(nlat,)``.
+        dy: Meridional grid spacing :math:`a \\Delta\\varphi` [m].
+        dlon_rad: Longitudinal grid spacing :math:`\\Delta\\lambda` [radians].
+        R_earth: Earth radius [m].
+
+    Returns:
+        :math:`\\nabla^2 \\phi`, shape ``(nlat, nlon)``.
+        Boundary rows (j=0 and j=-1) are set to zero (Dirichlet).
+    """
+    nlat, nlon = phi.shape
+    lat_rad = np.deg2rad(lat)
+    cos_phi = np.cos(lat_rad)
+    dphi = dy / R_earth
+    dphi2 = dphi * dphi
+    dlam2 = dlon_rad * dlon_rad
+
+    cos_half = np.cos(0.5 * (lat_rad[:-1] + lat_rad[1:]))
+
+    # Zonal second derivative via FFT (same discrete form as solver)
+    phi_hat = np.fft.rfft(phi, axis=1)
+    m = np.arange(phi_hat.shape[1])
+    lam_k_full = 2.0 * (np.cos(2.0 * np.pi * m / nlon) - 1.0)  # eigenvalues
+    d2phi_dlam2 = np.fft.irfft(phi_hat * lam_k_full[None, :], n=nlon, axis=1)
+
+    # Meridional conservative form with half-grid cosines
+    dphi_dphi_half = np.diff(phi, axis=0) / dphi
+    flux = cos_half[:, None] * dphi_dphi_half
+    merid = np.zeros_like(phi)
+    merid[1:-1] = np.diff(flux, axis=0) / dphi
+
+    lap = (d2phi_dlam2 / (R_earth**2 * cos_phi[:, None]**2 * dlam2)
+           + merid / (R_earth**2 * cos_phi[:, None]))
+
+    # Boundary rows: zero (consistent with Dirichlet BCs)
+    lap[0, :] = 0.0
+    lap[-1, :] = 0.0
+    return lap
 
 
 # ═══════════════════════════════════════════════════════════════
