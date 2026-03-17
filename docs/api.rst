@@ -180,15 +180,39 @@ and the harmonic residual satisfies :math:`\nabla\cdot\mathbf{u}_\text{har}=0`
 
 The decomposition proceeds by:
 
-1. Computing vorticity :math:`\zeta` and divergence :math:`\delta` from
-   the input wind via :func:`~pvtend.helmholtz.compute_vorticity_divergence`.
+1. Computing spherical vorticity :math:`\zeta` and divergence
+   :math:`\delta` from the input wind via
+   :func:`~pvtend.helmholtz.compute_vorticity_divergence`:
+
+   .. math::
+
+      \zeta = \frac{1}{a\cos\varphi}\!\left[
+        \frac{\partial v}{\partial\lambda}
+        - \frac{\partial(u\cos\varphi)}{\partial\varphi}\right]
+      = \frac{\partial v}{\partial x}
+        - \frac{\partial u}{\partial y}
+        + \frac{u\tan\varphi}{a}
+
+   .. math::
+
+      \delta = \frac{1}{a\cos\varphi}\!\left[
+        \frac{\partial u}{\partial\lambda}
+        + \frac{\partial(v\cos\varphi)}{\partial\varphi}\right]
+      = \frac{\partial u}{\partial x}
+        + \frac{\partial v}{\partial y}
+        - \frac{v\tan\varphi}{a}
+
+   The :math:`\pm\tan\varphi/a` metric terms arise from spherical
+   curvature and are significant at blocking latitudes (30–70°N).
+
 2. Removing the area-weighted (:math:`\cos\varphi`) mean from each
    (Fredholm solvability condition).
 3. Solving Poisson equations :math:`\nabla^2\psi=\zeta` and
    :math:`\nabla^2\chi=\delta` using the **spherical FFT Poisson solver**
    :func:`~pvtend.helmholtz.solve_poisson_spherical_fft`.
 4. Recovering :math:`(u_\text{rot},v_\text{rot})` and
-   :math:`(u_\text{div},v_\text{div})` via gradient operators.
+   :math:`(u_\text{div},v_\text{div})` via the **spectral gradient**
+   :func:`~pvtend.helmholtz.gradient`.
 5. Computing the harmonic residual by subtraction.
 
 Spherical Poisson solver
@@ -207,6 +231,29 @@ ignored — all solves use the spherical FFT method.
 
 **References:** Lynch P (1989) *MWR* 117, 1492–1500.
 
+Spectral gradient (wind recovery)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+After solving the Poisson equations, the divergent and rotational winds
+are recovered via :func:`~pvtend.helmholtz.gradient`.  The **zonal**
+derivative uses a spectral (FFT) method:
+
+.. math::
+
+   \frac{\partial\chi}{\partial x}\bigg|_{\!j}
+   = \frac{1}{\Delta x_j}\;\mathrm{IFFT}\!\left(
+     \mathrm{i}\,\frac{2\pi m}{N}\,\widehat{\chi}_m\right)
+
+where :math:`\widehat{\chi}_m` are the Fourier coefficients along a
+latitude circle of :math:`N` points.  This ensures that the discrete
+composition :math:`\nabla\cdot(\nabla\chi)` is consistent with the
+compact spherical Laplacian used by the Poisson solver, eliminating the
+:math:`\cos^2(m\pi/N)` attenuation that centred finite differences
+would introduce.  The Nyquist mode is zeroed for even :math:`N`.
+
+The **meridional** derivative retains centred finite differences (the
+:math:`\varphi` direction is non-periodic).
+
 .. autosummary::
    :toctree: generated/
 
@@ -222,6 +269,7 @@ ignored — all solves use the spherical FFT method.
 
    solve_poisson_spherical_fft
    compute_vorticity_divergence
+   gradient
 
 .. currentmodule:: pvtend
 

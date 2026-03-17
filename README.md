@@ -51,7 +51,7 @@ The CSVs are the inputs for `pvtend-pipeline compute`, which extracts event-cent
 
 - **PV tendency computation**: RHS has zonal advection, baroclinic counter propagation, vertical advection, and approximated diabatic heating terms.
 - **QG omega solver**: Hoskins Q-vector formulation with **two methods**: LOG20/SIP (default, Numba-accelerated 3-D elliptic, Li & O'Gorman 2020) and SP19 (Steinfeld & Pfahl 2019 empirical 1/3 scaling). Optional `center_lat` for dynamic f₀.
-- **Helmholtz decomposition**: Conservative spherical Poisson solver (FFT in lon + tridiagonal in lat) on the full NH grid
+- **Helmholtz decomposition**: Spherical vorticity/divergence (with tan φ/a metric), conservative spherical Poisson solver (FFT in lon + tridiagonal in lat), spectral gradient for wind recovery — all on the full NH grid
 - **Three-way omega decomposition**: ω_dry (QG A+B), ω_qg_moist (term C via ∂T/∂t), ω_moist (full residual), with corresponding divergent winds recovered by spherical Poisson inversion
 - **Orthogonal basis decomposition**: Projects PV tendency onto intensification (β), propagation (αx, αy), and deformation (γ) modes
 - **RWB detection**: Two classification methods — **bay** (path-order, recommended with circumpolar-cropped contours) and **tilt** (centerline slope ±0.15 dead zone). Circumpolar-first contour extraction for robust NH analysis.
@@ -166,7 +166,7 @@ src/pvtend/
 ├── derivatives.py       # Finite difference operators
 ├── climatology.py       # Fourier-filtered climatology
 ├── omega.py             # QG omega solver (LOG20/SIP or SP19)
-├── helmholtz.py         # Helmholtz decomposition (direct/FFT/DCT/SOR)
+├── helmholtz.py         # Helmholtz decomposition (spherical Poisson + spectral gradient)
 ├── moist_dry.py         # Moist/dry omega split
 ├── isentropic.py        # Isentropic PV-tendency diagnostics
 ├── tendency.py          # Main pipeline: data loading, derivatives, cross-terms, NPZ output

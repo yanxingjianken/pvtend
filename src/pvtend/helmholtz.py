@@ -50,8 +50,18 @@ def compute_vorticity_divergence(
     v: np.ndarray,
     dx: np.ndarray,
     dy: float,
+    lat: np.ndarray | None = None,
+    R_earth: float = R_EARTH,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Relative vorticity ζ = ∂v/∂x − ∂u/∂y and divergence δ = ∂u/∂x + ∂v/∂y.
+    """Spherical vorticity and divergence.
+
+    .. math::
+
+        \\zeta = \\partial v/\\partial x - \\partial u/\\partial y
+                + u \\tan\\varphi / a
+
+        \\delta = \\partial u/\\partial x + \\partial v/\\partial y
+                - v \\tan\\varphi / a
 
     Uses periodic zonal BCs (matching the full-NH ring) and one-sided
     differences at the meridional boundaries, via :func:`derivatives.ddx`
@@ -62,6 +72,10 @@ def compute_vorticity_divergence(
         v: Meridional wind, shape ``(nlat, nlon)``.
         dx: Zonal grid spacing [m]. Scalar or array of shape ``(nlat,)``.
         dy: Meridional grid spacing [m].
+        lat: Latitude in **degrees**, shape ``(nlat,)``.  When *None*
+            the spherical metric terms (tan φ / a) are omitted
+            (flat-earth fallback, deprecated).
+        R_earth: Earth radius [m].
 
     Returns:
         ``(vorticity, divergence)`` — each ``(nlat, nlon)``.
@@ -74,7 +88,15 @@ def compute_vorticity_divergence(
     du_dy = ddy(u, dy)
     dv_dy = ddy(v, dy)
 
-    return dv_dx - du_dy, du_dx + dv_dy
+    vort = dv_dx - du_dy
+    div = du_dx + dv_dy
+
+    if lat is not None:
+        tan_over_a = (np.tan(np.deg2rad(lat)) / R_earth)[:, np.newaxis]
+        vort = vort + u * tan_over_a
+        div = div - v * tan_over_a
+
+    return vort, div
 
 
 def gradient(
@@ -82,23 +104,42 @@ def gradient(
     dx: np.ndarray,
     dy: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """(∂φ/∂x, ∂φ/∂y) with periodic zonal BCs, one-sided at meridional edges.
+    """Physical gradient (∂φ/∂x, ∂φ/∂y) — spectral zonal, FD meridional.
 
-    Delegates to :func:`derivatives.ddx` (periodic) and
+    The zonal derivative uses a spectral (FFT) method so that the
+    composition div(grad(χ)) is consistent with the compact Laplacian
+    stencil used in :func:`solve_poisson_spherical_fft`.  The
+    meridional derivative keeps centred finite differences via
     :func:`derivatives.ddy`.
 
     Args:
         phi: Scalar field, shape ``(nlat, nlon)``.
         dx: Zonal grid spacing [m]. Scalar or array of shape ``(nlat,)``.
+            When an array, ``dx[j] = a · cos(φ_j) · Δλ``.
         dy: Meridional grid spacing [m].
 
     Returns:
         ``(dphi_dx, dphi_dy)`` — each ``(nlat, nlon)``.
     """
-    nlat = phi.shape[0]
+    nlat, nlon = phi.shape
     dx_arr = np.full(nlat, float(dx)) if np.isscalar(dx) else np.asarray(dx, float).ravel()
 
-    return ddx(phi, dx_arr, periodic=True), ddy(phi, dy)
+    # Zonal: spectral derivative via FFT (exact for the periodic ring)
+    phi_hat = np.fft.rfft(phi, axis=1)
+    m = np.arange(phi_hat.shape[1])            # wavenumber indices
+    # Derivative of trig interpolant in grid-index space:  d/dn → i·2πm/N
+    deriv_coeff = 1j * 2.0 * np.pi * m / nlon
+    # Zero the Nyquist mode for even N to avoid sign ambiguity
+    if nlon % 2 == 0:
+        deriv_coeff[-1] = 0.0
+    dphi_dn = np.fft.irfft(phi_hat * deriv_coeff[np.newaxis, :], n=nlon, axis=1)
+    # Convert from per-grid-point to per-metre
+    dphi_dx = dphi_dn / dx_arr[:, np.newaxis]
+
+    # Meridional: centred FD (non-periodic direction)
+    dphi_dy = ddy(phi, dy)
+
+    return dphi_dx, dphi_dy
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -364,7 +405,8 @@ def helmholtz_decomposition(
     dx = np.maximum(dx, dy * 0.1)
     dlon_rad = np.deg2rad(dlon)
 
-    vort, div = compute_vorticity_divergence(u_work, v_work, dx, dy)
+    vort, div = compute_vorticity_divergence(u_work, v_work, dx, dy,
+                                               lat=lat, R_earth=R_earth)
 
     # ── Area-weighted mean removal (Fredholm solvability) ──
     cos_phi = np.cos(lat_rad)

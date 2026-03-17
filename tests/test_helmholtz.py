@@ -33,7 +33,8 @@ class TestVorticityDivergence:
         dx_arr = R_EARTH * np.cos(np.deg2rad(lat)) * dlon  # (nlat,)
         dy = R_EARTH * dlat
 
-        vort, div = compute_vorticity_divergence(u, v, dx_arr, dy)
+        vort, div = compute_vorticity_divergence(u, v, dx_arr, dy,
+                                                  lat=small_grid["lat"])
 
         # Divergence of solid body should be ~0
         np.testing.assert_allclose(div[2:-2, 2:-2], 0.0, atol=1e-6)
