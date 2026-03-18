@@ -1,15 +1,26 @@
 """Hoskins (1978) Q-vector QG omega equation solver.
 
-Solves the quasi-geostrophic omega equation:
+Solves the quasi-geostrophic omega equation in σ-in-Laplacian form
+(Li & O'Gorman 2020):
 
-    ∇²_p ω + (f²₀/σ) ∂²ω/∂p² = -2∇·Q - β(R_d/σp)(∂T/∂x)
+    ∇²(σω) + f₀² ∂²ω/∂p² = A + B + C
 
-Q-vector:
-    Q = -(R_d/σp) * [(∂Vg/∂x · ∇T), (∂Vg/∂y · ∇T)]
+where:
+    A = 2 R_d/p · ∇·Q   (Dostalek et al. 2017 spherical Q-vector)
+    B = f₀ β ∂v_g/∂p     (direct β-term)
+    C = -(κ/p) ∇²J       (diabatic heating)
+
+Q-vector (Dostalek, Schubert & DeMaria 2017, Eq. 19):
+    Qλ = (1/a²)[∂T/∂φ(1/cosφ ∂v_g/∂λ + u_g tanφ) - 1/cosφ ∂T/∂λ ∂v_g/∂φ]
+    Qφ = (1/a²)[∂T/∂φ(-1/cosφ ∂u_g/∂λ + v_g tanφ) + 1/cosφ ∂T/∂λ ∂u_g/∂φ]
+
+Divergence (Lynch 1989):
+    ∇·Q = 1/(a cosφ) ∂Qλ/∂λ + 1/(a cosφ) ∂(Qφ cosφ)/∂φ
 
 Solver: Strongly Implicit Procedure (SIP, Stone 1968), full 3-D
-spherical stencil with tan(φ) metric term, following Li & O'Gorman
-(2020).  Numba-accelerated.
+spherical stencil with tan(φ) metric term.  σ enters the horizontal
+stencil at **neighbor** grid points (σ-in-Laplacian), matching LOG20
+``SIP_inversion.m``.  Numba-accelerated.
 
 BCs: Real ERA5 ω at top and bottom pressure levels (Dirichlet),
 lateral N/S faces may also use observed ω.
@@ -20,8 +31,9 @@ References:
     ω-equation. Q.J.R. Meteorol. Soc., 104, 31-38.
     Li L, O'Gorman P A (2020). Response of vertical velocities in
     extratropical precipitation extremes to climate change. J. Climate.
-    Bluestein H B (1992). Synoptic-Dynamic Meteorology in Midlatitudes,
-    Vol. II, eq. 5.7.54.
+    Dostalek J F, Schubert W H, DeMaria M (2017). Derivation of the
+    equations for Q vectors in spherical coordinates. MWR, 145, 2285-2289.
+    Lynch P (1989). Partitioning the wind in a limited domain. MWR, 117.
     Stone H L (1968). Iterative solution of implicit approximations of
     multidimensional partial differential equations. SIAM J. Numer.
     Anal., 5, 530-558.
@@ -41,7 +53,7 @@ F_MIN_LAT: float = 5.0          # degrees — regularize |f| >= f(F_MIN_LAT)
 # Latitude taper constants for QG validity
 LAT_QG_LO: float = 15.0    # below this: omega_dry ≡ 0
 LAT_QG_HI: float = 25.0    # above this: full weight
-LAT_QG_POLAR: float = 80.0  # above this: taper to 0
+LAT_QG_POLAR: float = 85.0  # above this: taper to 0
 
 
 def gaussian_smooth_2d(
@@ -209,25 +221,24 @@ def _compute_qg_rhs(
     *,
     center_lat: float | None = None,
     t_full: np.ndarray | None = None,
+    phi_3d: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float, float, np.ndarray]:
-    """Compute the Q-vector + β-term RHS shared by FFT and SIP solvers.
+    """Compute the Q-vector + β-term RHS (Dostalek 2017 spherical form).
 
-    The RHS is in σ₀-divided form:  ``Q = -R_d/(σ₀ p)·(∂Vg/∂·)·∇T``,
-    where σ₀(p) is computed from **domain-mean** T.
+    Uses the Dostalek, Schubert & DeMaria (2017) spherical Q-vector
+    with curvature/metric terms (tanφ, 1/cosφ), matching LOG20
+    ``Q_vector.m``.  The divergence uses the full spherical form
+    (LOG20 ``div.m``).
 
-    When solving for anomaly fields (t = T − T̄), pass the **full
-    physical temperature** via *t_full* so that σ₀ is computed
-    correctly (σ requires T ≈ 200–300 K, not anomaly ≈ 0 K).
-
-    Zonal gradients use periodic wrapping when the longitude span ≥ 350°
-    (full NH ring) and one-sided differences otherwise (local patch).
+    The RHS is **not** divided by σ (the σ-in-Laplacian form absorbs σ
+    into the LHS stencil).
 
     Returns
     -------
     rhs : (nlev, nlat, nlon)
-        Q-vector divergence + β-term forcing (σ₀-divided).
+        Q-vector divergence + β-term forcing (**not** σ-divided).
     sigma0 : (nlev,)
-        Domain-mean static stability profile.
+        Domain-mean static stability profile (for reference).
     f0 : float
         Constant Coriolis parameter at *center_lat*.
     beta0 : float
@@ -235,23 +246,18 @@ def _compute_qg_rhs(
     taper : (nlat,)
         Latitude taper mask.
     """
-    from .derivatives import ddx, ddy
+    from .derivatives import d_dlambda, d_dphi, div_spherical, ddp
 
     nlev, nlat, nlon = u.shape
     lat_rad = np.deg2rad(lat)
     dlat = np.abs(lat[1] - lat[0]) if nlat > 1 else 1.5
     dlon = np.abs(lon[1] - lon[0]) if nlon > 1 else 1.5
-    dy = np.deg2rad(dlat) * R_EARTH
-    dx_arr = np.deg2rad(dlon) * R_EARTH * np.cos(lat_rad)
-    dx_arr = np.maximum(dx_arr, dy * 0.1)
+    dphi_rad = np.deg2rad(dlat)
+    dlambda = np.deg2rad(dlon)
 
     # Detect full ring vs local patch
     lon_span = dlon * nlon
     periodic = lon_span > 350.0
-
-    def _grad(field_2d):
-        """Horizontal gradient respecting periodic/non-periodic lon."""
-        return ddx(field_2d, dx_arr, periodic=periodic), ddy(field_2d, dy)
 
     # Coriolis and beta
     f_min = 2 * OMEGA_E * np.sin(np.deg2rad(F_MIN_LAT))
@@ -271,7 +277,6 @@ def _compute_qg_rhs(
     )
 
     # Static stability profile σ₀(p) — domain-mean T (Bluestein eq 4.3.6)
-    # Use t_full (physical temperature) when available; otherwise t itself.
     t_for_sigma = t_full if t_full is not None else t
     kappa = R_DRY / 1004.0
     T_mean = np.nanmean(t_for_sigma, axis=(1, 2))
@@ -291,40 +296,83 @@ def _compute_qg_rhs(
     u_tapered = u * lat_taper_full[None, :, None]
     v_tapered = v * lat_taper_full[None, :, None]
 
-    # Smooth T before computing gradients (Li & O'Gorman 2020 approach)
-    dT_dx = np.zeros_like(t)
-    dT_dy = np.zeros_like(t)
-    for k in range(nlev):
-        t_k = gaussian_smooth_2d(t[k], sigma=GEO_SMOOTH_SIGMA)
-        dT_dx[k], dT_dy[k] = _grad(t_k)
+    # Pre-compute trigonometric arrays (nlat, 1) for broadcasting
+    cos_phi = np.cos(lat_rad)[:, None]           # (nlat, 1)
+    tan_phi = np.tan(lat_rad)[:, None]           # (nlat, 1)
+    inv_cos_phi = 1.0 / np.maximum(cos_phi, 1e-10)  # avoid pole singularity
+    R2 = R_EARTH ** 2
 
-    # Wind gradients
-    dug_dx = np.zeros_like(u)
-    dug_dy = np.zeros_like(u)
-    dvg_dx = np.zeros_like(v)
-    dvg_dy = np.zeros_like(v)
-    for k in range(nlev):
-        dug_dx[k], dug_dy[k] = _grad(u_tapered[k])
-        dvg_dx[k], dvg_dy[k] = _grad(v_tapered[k])
+    # === Angular derivatives of T (or T_geo via thermal wind) ===
+    dT_dlam = np.zeros_like(t)   # ∂T/∂λ [K/rad]
+    dT_dphi_arr = np.zeros_like(t)   # ∂T/∂φ [K/rad]
 
-    # Q-vector divergence and beta term → RHS
+    if phi_3d is not None:
+        # GEO_T: thermal-wind form (matching LOG20 Q_vector.m lines 34-35)
+        dug_dp_all = ddp(u_tapered, plevs_pa)
+        dvg_dp_all = ddp(v_tapered, plevs_pa)
+        for k in range(nlev):
+            dT_dlam[k] = (
+                f0_val * plevs_pa[k] / R_DRY
+                * (-dvg_dp_all[k]) * R_EARTH * cos_phi
+            )
+            dT_dphi_arr[k] = (
+                f0_val * plevs_pa[k] / R_DRY
+                * dug_dp_all[k] * R_EARTH
+            )
+    else:
+        # Direct angular derivatives of smoothed T
+        for k in range(nlev):
+            t_k = gaussian_smooth_2d(t[k], sigma=GEO_SMOOTH_SIGMA)
+            dT_dlam[k] = d_dlambda(t_k, dlambda, periodic)
+            dT_dphi_arr[k] = d_dphi(t_k, dphi_rad)
+
+    # === Angular derivatives of geostrophic wind ===
+    dug_dlam = np.zeros_like(u)
+    dug_dphi_a = np.zeros_like(u)
+    dvg_dlam = np.zeros_like(v)
+    dvg_dphi_a = np.zeros_like(v)
+    for k in range(nlev):
+        dug_dlam[k] = d_dlambda(u_tapered[k], dlambda, periodic)
+        dug_dphi_a[k] = d_dphi(u_tapered[k], dphi_rad)
+        dvg_dlam[k] = d_dlambda(v_tapered[k], dlambda, periodic)
+        dvg_dphi_a[k] = d_dphi(v_tapered[k], dphi_rad)
+
+    # === β-term: f·β·∂vg/∂p (LOG20 traditional_A.m) ===
+    dvg_dp = ddp(v_tapered, plevs_pa)
+
+    # === Dostalek (2017) spherical Q-vector + divergence → RHS ===
     rhs = np.zeros_like(u)
     for k in range(nlev):
-        coef = -R_DRY / (sigma0[k] * plevs_pa[k])
-        Q1 = coef * (dug_dx[k] * dT_dx[k] + dvg_dx[k] * dT_dy[k])
-        Q2 = coef * (dug_dy[k] * dT_dx[k] + dvg_dy[k] * dT_dy[k])
-        Q1 *= lat_taper_full[:, None]
-        Q2 *= lat_taper_full[:, None]
-        dQ1_dx, _ = _grad(Q1)
-        _, dQ2_dy = _grad(Q2)
-        div_Q = dQ1_dx + dQ2_dy
-        beta_term = (
-            beta_arr[:, None]
-            * (R_DRY / (sigma0[k] * plevs_pa[k]))
-            * dT_dx[k]
+        # Q-vector components (LOG20 Q_vector.m lines 39-45)
+        Qx = (1.0 / R2) * (
+            dT_dphi_arr[k] * (
+                inv_cos_phi * dvg_dlam[k]
+                + u_tapered[k] * tan_phi
+            )
+            - inv_cos_phi * dT_dlam[k] * dvg_dphi_a[k]
         )
+        Qy = (1.0 / R2) * (
+            dT_dphi_arr[k] * (
+                -inv_cos_phi * dug_dlam[k]
+                + v_tapered[k] * tan_phi
+            )
+            + inv_cos_phi * dT_dlam[k] * dug_dphi_a[k]
+        )
+
+        Qx *= lat_taper_full[:, None]
+        Qy *= lat_taper_full[:, None]
+
+        # Spherical divergence (LOG20 div.m)
+        div_Q = div_spherical(Qx, Qy, lat_rad, dphi_rad, dlambda, periodic)
+
+        # A = 2·Rd/p · div(Q)  (LOG20 Q_vector.m line 47)
+        A_k = 2.0 * R_DRY / plevs_pa[k] * div_Q
+
+        # B = f·β·∂vg/∂p  (LOG20 traditional_A.m line 28)
+        beta_term = f_arr[:, None] * beta_arr[:, None] * dvg_dp[k]
         beta_term *= lat_taper_full[:, None]
-        rhs[k] = -2.0 * div_Q - beta_term
+
+        rhs[k] = A_k + beta_term
 
     return rhs, sigma0, f0_val, beta0_val, lat_taper_full
 
@@ -624,6 +672,119 @@ else:
     _sip_core = _sip_core_python
 
 
+# ---------------------------------------------------------------------------
+#  Diabatic forcing functions (Term C)
+# ---------------------------------------------------------------------------
+
+def _compute_diabatic_rhs_log20(
+    t: np.ndarray,
+    dT_dt: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    omega_era5: np.ndarray,
+    sigma_3d: np.ndarray,
+    plevs_pa: np.ndarray,
+    lat: np.ndarray,
+    lon: np.ndarray,
+) -> np.ndarray:
+    """Full LOG20 diabatic forcing: C = -(κ/p) ∇²_spherical(J).
+
+    Computes J = J₁ + J₂ where:
+        J₁ = c_p (∂T/∂t + v·∇T)   (local + horizontal advection)
+        J₂ = -σ_local p / R_d c_p ω  (adiabatic warming/cooling)
+
+    Uses the conservative spherical Laplacian for ∇².
+
+    Returns C as (nlev, nlat, nlon), **non** σ₀-divided.
+    """
+    from .derivatives import ddx, ddy
+    from .helmholtz import laplacian_spherical_fft
+
+    nlev, nlat, nlon = t.shape
+    lat_rad = np.deg2rad(lat)
+    dlat = float(np.abs(lat[1] - lat[0])) if nlat > 1 else 1.5
+    dlon = float(np.abs(lon[1] - lon[0])) if nlon > 1 else 1.5
+    dy_m = np.deg2rad(dlat) * R_EARTH
+    dx_arr = np.deg2rad(dlon) * R_EARTH * np.cos(lat_rad)
+    dx_arr = np.maximum(dx_arr, dy_m * 0.1)
+    dlon_rad = np.deg2rad(dlon)
+    lon_span = dlon * nlon
+    periodic = lon_span > 350.0
+
+    kappa = R_DRY / 1004.0
+    c_p = 1004.0
+
+    dT_dt_safe = np.nan_to_num(dT_dt, nan=0.0, posinf=0.0, neginf=0.0)
+    C = np.zeros_like(t)
+
+    for k in range(nlev):
+        # Smooth T *before* taking derivatives (matches LOG20 Matlab;
+        # smoothing J *after* kills small-scale features that the
+        # Laplacian amplifies, underestimating C by ~36×).
+        t_smooth_k = gaussian_smooth_2d(t[k], sigma=GEO_SMOOTH_SIGMA)
+        dT_dt_smooth_k = gaussian_smooth_2d(dT_dt_safe[k],
+                                            sigma=GEO_SMOOTH_SIGMA)
+
+        # T gradients for advection (smoothed T, not T_geo)
+        dT_dx_k = ddx(t_smooth_k, dx_arr, periodic=periodic)
+        dT_dy_k = ddy(t_smooth_k, dy_m)
+
+        # J₁ = c_p (∂T_smooth/∂t + u ∂T_smooth/∂x + v ∂T_smooth/∂y)
+        J1_k = c_p * (dT_dt_smooth_k + u[k] * dT_dx_k + v[k] * dT_dy_k)
+        # J₂ = -σ_local × (p/R_d) × c_p × ω
+        J2_k = -sigma_3d[k] * (plevs_pa[k] / R_DRY) * c_p * omega_era5[k]
+        J_k = J1_k + J2_k
+
+        # C = -(κ/p) ∇²_spherical(J)
+        lap_J = laplacian_spherical_fft(J_k, lat, dy_m, dlon_rad,
+                                        R_earth=R_EARTH)
+        C[k] = -(kappa / plevs_pa[k]) * lap_J
+
+    return C
+
+
+def _compute_diabatic_rhs_emanuel(
+    theta_dot_lhr: np.ndarray,
+    t: np.ndarray,
+    theta: np.ndarray,
+    plevs_pa: np.ndarray,
+    lat: np.ndarray,
+    lon: np.ndarray,
+) -> np.ndarray:
+    """Emanuel LHR-based diabatic forcing: C_em = -(κ/p) ∇²_spherical(J_em).
+
+    J_em = c_p θ̇_LHR T/θ  [W/kg]
+
+    Returns C_em as (nlev, nlat, nlon), **non** σ₀-divided.
+    """
+    from .helmholtz import laplacian_spherical_fft
+
+    nlev, nlat, nlon = t.shape
+    dlat = float(np.abs(lat[1] - lat[0])) if nlat > 1 else 1.5
+    dlon = float(np.abs(lon[1] - lon[0])) if nlon > 1 else 1.5
+    dy_m = np.deg2rad(dlat) * R_EARTH
+    dlon_rad = np.deg2rad(dlon)
+
+    kappa = R_DRY / 1004.0
+    c_p = 1004.0
+
+    theta_dot_safe = np.nan_to_num(theta_dot_lhr, nan=0.0, posinf=0.0,
+                                   neginf=0.0)
+    C_em = np.zeros_like(t)
+
+    for k in range(nlev):
+        # J_em = c_p θ̇_LHR T/θ
+        with np.errstate(divide='ignore', invalid='ignore'):
+            J_em_k = c_p * theta_dot_safe[k] * t[k] / np.maximum(theta[k], 1.0)
+
+        # C_em = -(κ/p) ∇²_spherical(J_em)
+        lap_J = laplacian_spherical_fft(J_em_k, lat, dy_m, dlon_rad,
+                                        R_earth=R_EARTH)
+        C_em[k] = -(kappa / plevs_pa[k]) * lap_J
+
+    return C_em
+
+
 def solve_qg_omega_sip(
     u: np.ndarray,
     v: np.ndarray,
@@ -635,7 +796,11 @@ def solve_qg_omega_sip(
     center_lat: float | None = None,
     omega_b: np.ndarray | None = None,
     t_full: np.ndarray | None = None,
-    dT_dt: np.ndarray | None = None,
+    rhs_c: np.ndarray | None = None,
+    phi_3d: np.ndarray | None = None,
+    bc_top: np.ndarray | float | None = None,
+    bc_bot: np.ndarray | float | None = None,
+    bc_lateral: np.ndarray | None = None,
     maxit: int = 300,
     alpha: float = 0.93,
     resmax: float = 1e-14,
@@ -645,56 +810,62 @@ def solve_qg_omega_sip(
     Matches the Li & O'Gorman (2020) solver from
     ``dante831/QG-omega/source/SIP_inversion.m``.
 
-    Same RHS computation as :func:`solve_qg_omega` (Q-vector + β-term),
-    but retains **both** ∂²ω/∂x² and ∂²ω/∂y² on the LHS using the
-    full 7-point spherical stencil (no FFT in longitude).
+    Solves the σ-in-Laplacian form:
 
-    **Static stability**: uses local 3-D σ(k,j,i) computed from the
-    instantaneous temperature field, matching the dante831/QG-omega
-    MATLAB reference.  The RHS is initially computed with domain-mean
-    σ₀(p) then rescaled to σ(k,j,i); the SIP stencil vertical
-    coefficients use σ(k,j,i) directly.
+    .. math::
 
-    **Boundary conditions**: When *omega_b* is provided, the real ERA5
-    vertical velocity is prescribed on all Dirichlet faces (top/bottom
-    pressure levels, N/S meridional boundaries).  Otherwise ω = 0.
-    Longitude is periodic when the domain spans ≥ 350°.
+        \\nabla^2(\\sigma\\omega) + f_0^2 \\frac{\\partial^2\\omega}{\\partial p^2}
+        = A + B + C
 
-    **Diabatic heating (term C)**: When *dT_dt* is provided, the
-    diabatic heating term ``(R_d / (σ₀ p)) ∇²_H(∂T/∂t)`` is added to
-    the Q-vector RHS before solving.  This gives the **total QG omega**
-    (terms A+B+C).  Without *dT_dt*, only the dry terms (A+B) are used.
+    where A is the Dostalek (2017) spherical Q-vector divergence,
+    B = f₀β∂vg/∂p (direct form), and C = -(κ/p)∇²J (diabatic).
+
+    The SIP stencil uses local σ(k,j,i) at **neighbor** points in the
+    horizontal coefficients (AW, AE, AS, AN), and no σ in the vertical
+    coefficients (AB, AT).
+
+    **Boundary conditions**: Faces can be individually controlled:
+
+    - *omega_b*: prescribe ERA5 ω on all Dirichlet faces (default mode).
+    - *bc_top*/*bc_bot*: override top/bottom faces (e.g. 0.0 for dry solve).
+    - *bc_lateral*: override N/S lateral faces (e.g. ω_bar climatology).
+
+    **Diabatic heating (term C)**: When *rhs_c* is provided (pre-computed
+    via :func:`_compute_diabatic_rhs_log20` or
+    :func:`_compute_diabatic_rhs_emanuel`), it is added directly to
+    the A+B RHS before solving.
+
+    **Geostrophic temperature**: When *phi_3d* (geopotential) is
+    provided, thermal-wind angular gradients of T_geo are used for
+    the Q-vector, matching LOG20 ``GEO_T=true``.
 
     Args:
         u: Geostrophic zonal wind [m s⁻¹], ``(nlev, nlat, nlon)``.
         v: Geostrophic meridional wind [m s⁻¹], ``(nlev, nlat, nlon)``.
-        t: Temperature [K], ``(nlev, nlat, nlon)``.  For anomaly solves,
-            pass the anomaly field here and the **full** physical
-            temperature via *t_full*.
+        t: Temperature [K], ``(nlev, nlat, nlon)``.
         lat: Ascending latitude [degrees], ``(nlat,)``.
         lon: Longitude [degrees], ``(nlon,)``.
         plevs_pa: Pressure [Pa], ascending, ``(nlev,)``.
         center_lat: Latitude for constant f₀ and β₀.
         omega_b: Boundary omega ``(nlev, nlat, nlon)`` (None → 0).
-            When provided, real ERA5 ω values are used at the top
-            (100 hPa) and bottom (1000 hPa) pressure levels and at
-            the meridional boundaries.
-        t_full: Full physical temperature [K] for σ₀ and σ_3d
-            computation.  When ``None`` (default), *t* itself is used.
-            **Must be supplied when *t* is an anomaly field**,
-            otherwise σ ≈ 0 → NaN.
-        dT_dt: Eulerian temperature tendency ∂T/∂t [K s⁻¹],
-            ``(nlev, nlat, nlon)``.  When provided, used as a proxy for
-            diabatic heating J/Cp to add term C to the QG omega RHS.
+        t_full: Full physical temperature [K] for σ₀ and σ_3d.
+        rhs_c: Pre-computed diabatic forcing C ``(nlev, nlat, nlon)``,
+            -(κ/p)∇²J.  Added directly to A+B RHS (σ-in-Laplacian).
+        phi_3d: Geopotential Φ [m² s⁻²], ``(nlev, nlat, nlon)``.
+            When provided, T_geo from hydrostatic relation replaces
+            actual T for Q-vector ∇T gradients.
+        bc_top: Top boundary (k=0).  2D array or scalar.
+        bc_bot: Bottom boundary (k=-1).  2D array or scalar.
+        bc_lateral: Lateral boundary omega ``(nlev, nlat, nlon)``.
+            Overrides N/S faces from omega_b.
         maxit: Max SIP iterations (default 300).
         alpha: SIP relaxation parameter (default 0.93).
         resmax: Convergence threshold (default 1e-14).
 
     Returns:
         ``(omega, info)`` where *omega* is ``(nlev, nlat, nlon)``
-        QG vertical velocity [Pa s⁻¹] (dry A+B only when *dT_dt* is
-        None; total A+B+C when *dT_dt* is provided) and *info* is a
-        dict with ``'iters'``, ``'final_residual'``, ``'numba'``,
+        QG vertical velocity [Pa s⁻¹] and *info* is a dict with
+        ``'iters'``, ``'final_residual'``, ``'numba'``,
         ``'solve_time'``, ``'terms'``.
 
     References:
@@ -710,56 +881,24 @@ def solve_qg_omega_sip(
 
     nlev, nlat, nlon = u.shape
 
-    # --- 1. Compute Q-vector RHS (σ₀-divided, shared with FFT solver) ---
+    # --- 1. Compute Q-vector RHS (non σ-divided, Dostalek spherical) ---
     rhs, sigma0, f0, beta0, lat_taper_full = _compute_qg_rhs(
         u, v, t, lat, lon, plevs_pa,
         center_lat=center_lat,
         t_full=t_full,
+        phi_3d=phi_3d,
     )
     terms_used = "AB"
 
-    # --- 1a. Add diabatic term C when dT_dt is provided ---
-    # Term C (Sutcliffe form in σ₀-divided equation):
-    #   C_σ₀ = (R_d / (σ₀ p)) ∇²_H(∂T/∂t)
-    # where ∂T/∂t is the Eulerian temperature tendency (proxy for J/Cp).
-    # This has the same coefficient as the thermal-advection part of the
-    # Q-vector RHS, but replaces -Vg·∇T with dT/dt.
-    if dT_dt is not None:
-        from .derivatives import ddx, ddy
-
-        lat_rad = np.deg2rad(lat)
-        dlat = np.abs(lat[1] - lat[0]) if nlat > 1 else 1.5
-        dlon = np.abs(lon[1] - lon[0]) if nlon > 1 else 1.5
-        dy_m = np.deg2rad(dlat) * R_EARTH
-        dx_m = np.deg2rad(dlon) * R_EARTH * np.cos(lat_rad)
-        dx_m = np.maximum(dx_m, dy_m * 0.1)
-        lon_span = dlon * nlon
-        periodic_c = lon_span > 350.0
-
-        # NaN-safe dT_dt
-        dT_dt_safe = np.nan_to_num(dT_dt, nan=0.0, posinf=0.0, neginf=0.0)
-
-        for k in range(nlev):
-            # Smooth dT/dt before computing Laplacian (same as T)
-            dTdt_k = gaussian_smooth_2d(dT_dt_safe[k], sigma=GEO_SMOOTH_SIGMA)
-            # Horizontal gradient
-            d1_dx = ddx(dTdt_k, dx_m, periodic=periodic_c)
-            d1_dy = ddy(dTdt_k, dy_m)
-            # Horizontal Laplacian: ∇²(dT/dt) = ∂²/∂x² + ∂²/∂y²
-            d2_dx2 = ddx(d1_dx, dx_m, periodic=periodic_c)
-            d2_dy2 = ddy(d1_dy, dy_m)
-            lap_dTdt = d2_dx2 + d2_dy2
-
-            # Coefficient: R_d / (σ₀(k) * p(k))  — same form as Q-vector
-            coef_c = R_DRY / (sigma0[k] * plevs_pa[k])
-            rhs[k] += coef_c * lap_dTdt * lat_taper_full[:, None]
-
+    # --- 1a. Add pre-computed diabatic forcing C ---
+    # rhs_c is already -(κ/p)∇²_sph(J) — added directly (no σ division)
+    # because the σ-in-Laplacian form keeps σ on the LHS.
+    # Apply the same lat_taper as A+B to suppress polar singularities.
+    if rhs_c is not None:
+        rhs += rhs_c * lat_taper_full[None, :, None]
         terms_used = "ABC"
 
     # --- 1b. Local 3-D static stability σ(k,j,i) ---
-    # Domain-mean σ₀(p) is too coarse for a full-NH domain; compute σ
-    # from local T at each grid point (matching dante831 reference),
-    # then rescale the σ₀-divided RHS to σ_3d-divided.
     t_for_sigma = t_full if t_full is not None else t
     kappa = R_DRY / 1004.0
     sigma_3d = np.zeros((nlev, nlat, nlon))
@@ -790,9 +929,7 @@ def solve_qg_omega_sip(
             tmp = tmp2
         sigma_3d[k] = tmp
 
-    # Rescale RHS: undo σ₀ division, apply local σ_3d
-    for k in range(nlev):
-        rhs[k] *= sigma0[k] / sigma_3d[k]
+    # RHS is used directly — no σ₀→σ₃ᵈ rescaling needed (σ is on the LHS)
 
     # Detect full ring vs local patch — controls BCs in SIP core
     dlon_deg = np.abs(lon[1] - lon[0]) if len(lon) > 1 else 1.5
@@ -808,13 +945,15 @@ def solve_qg_omega_sip(
     f2_0 = f0 ** 2
 
     # --- 3. Build 7-point stencil coefficients ---
-    #   σ-divided form with local σ(k,j,i) (matching dante831):
-    #     AW = AE = 1/(r²cos²φ Δλ²)
-    #     AS = 1/(r²Δφ²) + tanφ/(2r²Δφ)
-    #     AN = 1/(r²Δφ²) - tanφ/(2r²Δφ)
-    #     AB = 2 f₀²/(σ(k,j,i) Δp₁ (Δp₁+Δp₂))
-    #     AT = 2 f₀²/(σ(k,j,i) Δp₂ (Δp₁+Δp₂))
-    #     AP = -2/(r²cos²φΔλ²) - 2/(r²Δφ²) - 2f₀²/(σ(k,j,i) Δp₁ Δp₂)
+    #   σ-in-Laplacian form (matching LOG20 SIP_inversion.m):
+    #     AW = σ(k,j,i-1) / (r²cos²φ Δλ²)     ← σ at WEST neighbor
+    #     AE = σ(k,j,i+1) / (r²cos²φ Δλ²)     ← σ at EAST neighbor
+    #     AS = (1/(r²Δφ²) + tanφ/(2r²Δφ)) σ(k,j-1,i)  ← σ at SOUTH
+    #     AN = (1/(r²Δφ²) - tanφ/(2r²Δφ)) σ(k,j+1,i)  ← σ at NORTH
+    #     AB = 2 f₀² / (Δp₁ (Δp₁+Δp₂))        ← NO σ
+    #     AT = 2 f₀² / (Δp₂ (Δp₁+Δp₂))        ← NO σ
+    #     AP = -2σ(k,j,i)/(r²cos²φΔλ²) - 2σ(k,j,i)/(r²Δφ²)
+    #          - 2f₀²/(Δp₁ Δp₂)
     AP = np.zeros((nlev, nlat, nlon))
     AE = np.zeros((nlev, nlat, nlon))
     AW = np.zeros((nlev, nlat, nlon))
@@ -825,6 +964,10 @@ def solve_qg_omega_sip(
 
     cos2_phi = np.cos(phi) ** 2
     tan_phi = np.tan(phi)
+
+    # Pre-compute shifted σ arrays for neighbor access
+    sigma_west = np.roll(sigma_3d, 1, axis=2)   # σ(k, j, i-1)
+    sigma_east = np.roll(sigma_3d, -1, axis=2)  # σ(k, j, i+1)
 
     for k in range(1, nlev - 1):
         dp1 = plevs_pa[k] - plevs_pa[k - 1]
@@ -838,31 +981,44 @@ def solve_qg_omega_sip(
             ns_base = 1.0 / (r ** 2 * dphi ** 2)
             ns_tan  = tp / (2.0 * r ** 2 * dphi)
 
-            # Horizontal coefficients — purely geometric
-            AW[k, j, :] = ew
-            AE[k, j, :] = ew
-            AS[k, j, :] = ns_base + ns_tan
-            AN[k, j, :] = ns_base - ns_tan
+            # Horizontal coefficients — σ at NEIGHBOR (σ-in-Laplacian)
+            AW[k, j, :] = ew * sigma_west[k, j, :]
+            AE[k, j, :] = ew * sigma_east[k, j, :]
+            AS[k, j, :] = (ns_base + ns_tan) * sigma_3d[k, j - 1, :]
+            AN[k, j, :] = (ns_base - ns_tan) * sigma_3d[k, j + 1, :]
 
-            # Vertical coefficients — local σ(k,j,i)
-            s_kji = sigma_3d[k, j, :]
-            AB[k, j, :] = 2.0 * f2_0 / (s_kji * dp1 * (dp1 + dp2))
-            AT[k, j, :] = 2.0 * f2_0 / (s_kji * dp2 * (dp1 + dp2))
+            # Vertical coefficients — NO σ (LOG20 SIP_inversion.m)
+            AB[k, j, :] = 2.0 * f2_0 / (dp1 * (dp1 + dp2))
+            AT[k, j, :] = 2.0 * f2_0 / (dp2 * (dp1 + dp2))
 
-            # Diagonal
-            AP[k, j, :] = -2.0 * ew - 2.0 * ns_base - 2.0 * f2_0 / (s_kji * dp1 * dp2)
+            # Diagonal: horizontal σ(center) + vertical (no σ)
+            s_c = sigma_3d[k, j, :]
+            AP[k, j, :] = (
+                -2.0 * ew * s_c
+                - 2.0 * ns_base * s_c
+                - 2.0 * f2_0 / (dp1 * dp2)
+            )
 
     # --- 4. Prepare solution array with BCs ---
     T_sol = np.zeros((nlev, nlat, nlon))
-    if omega_b is not None:
-        T_sol[0, :, :]  = omega_b[0, :, :]
+    # Top / bottom boundaries
+    if bc_top is not None:
+        T_sol[0, :, :] = bc_top
+    elif omega_b is not None:
+        T_sol[0, :, :] = omega_b[0, :, :]
+    if bc_bot is not None:
+        T_sol[-1, :, :] = bc_bot
+    elif omega_b is not None:
         T_sol[-1, :, :] = omega_b[-1, :, :]
-        T_sol[:, 0, :]  = omega_b[:, 0, :]
-        T_sol[:, -1, :] = omega_b[:, -1, :]
+    # Lateral (N/S faces)
+    lat_src = bc_lateral if bc_lateral is not None else omega_b
+    if lat_src is not None:
+        T_sol[:, 0, :]  = lat_src[:, 0, :]
+        T_sol[:, -1, :] = lat_src[:, -1, :]
     # For Dirichlet lon BCs, also fix i=0 and i=-1
-    if not periodic_lon and omega_b is not None:
-        T_sol[:, :, 0]  = omega_b[:, :, 0]
-        T_sol[:, :, -1] = omega_b[:, :, -1]
+    if not periodic_lon and lat_src is not None:
+        T_sol[:, :, 0]  = lat_src[:, :, 0]
+        T_sol[:, :, -1] = lat_src[:, :, -1]
 
     # --- 5. Solve with SIP core ---
     n_iters, final_res = _sip_core(

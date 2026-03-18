@@ -92,8 +92,9 @@ def ddy(field: np.ndarray, dy: float) -> np.ndarray:
 def ddp(field: np.ndarray, plevs_pa: np.ndarray) -> np.ndarray:
     """Pressure derivative ∂f/∂p for non-uniform levels.
 
-    Uses centred differences in the interior and one-sided differences
-    at the top/bottom pressure boundaries.
+    Uses a three-point Lagrange stencil in the interior (second-order
+    accurate on non-uniform grids, matching LOG20 ``d_dp.m``) and
+    one-sided differences at the top/bottom pressure boundaries.
 
     Args:
         field: Array with pressure as axis 0, shape ``(nlev, ...)``.
@@ -105,10 +106,15 @@ def ddp(field: np.ndarray, plevs_pa: np.ndarray) -> np.ndarray:
     nlev = field.shape[0]
     out = np.zeros_like(field)
 
-    # Interior: centred differences
+    # Interior: 3-point Lagrange stencil (second-order on non-uniform grids)
     for k in range(1, nlev - 1):
-        dp = plevs_pa[k + 1] - plevs_pa[k - 1]
-        out[k] = (field[k + 1] - field[k - 1]) / dp
+        h_m = plevs_pa[k] - plevs_pa[k - 1]      # h_minus
+        h_p = plevs_pa[k + 1] - plevs_pa[k]       # h_plus
+        out[k] = (
+            -h_p / (h_m * (h_m + h_p)) * field[k - 1]
+            + (h_p - h_m) / (h_m * h_p) * field[k]
+            + h_m / (h_p * (h_m + h_p)) * field[k + 1]
+        )
 
     # Boundaries: one-sided differences
     dp0 = plevs_pa[1] - plevs_pa[0]
@@ -158,6 +164,132 @@ def gradient_periodic(
         Tuple ``(dphi_dx, dphi_dy)``, each ``(nlat, nlon)``.
     """
     return ddx(phi, dx_arr, periodic=True), ddy(phi, dy)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Angular-coordinate derivative operators (matching LOG20)
+# ═══════════════════════════════════════════════════════════════
+
+
+def d_dlambda(
+    field: np.ndarray,
+    dlambda: float,
+    periodic: bool = True,
+) -> np.ndarray:
+    """Zonal derivative in angular coordinates ∂f/∂λ.
+
+    Matches LOG20 ``d_dlambda.m``: centred differences in the interior,
+    3-point one-sided stencils at boundaries (non-periodic), or periodic
+    wrapping.
+
+    Args:
+        field: 2-D ``(nlat, nlon)`` or 3-D ``(nlev, nlat, nlon)``.
+        dlambda: Zonal grid spacing in **radians**.
+        periodic: Wrap zonally (default True for full-globe grids).
+
+    Returns:
+        Same shape, in ``[field_units / radian]``.
+    """
+    if field.ndim == 3:
+        return np.stack(
+            [d_dlambda(field[k], dlambda, periodic) for k in range(field.shape[0])]
+        )
+
+    nlat, nlon = field.shape
+    out = np.empty_like(field)
+
+    # Interior: centred differences along lon (axis 1)
+    out[:, 1:-1] = (field[:, 2:] - field[:, :-2]) / (2 * dlambda)
+
+    if periodic:
+        out[:, 0] = (field[:, 1] - field[:, -1]) / (2 * dlambda)
+        out[:, -1] = (field[:, 0] - field[:, -2]) / (2 * dlambda)
+    else:
+        # 3-point one-sided (LOG20 d_dlambda.m)
+        out[:, 0] = (
+            -1.5 * field[:, 0] + 2.0 * field[:, 1] - 0.5 * field[:, 2]
+        ) / dlambda
+        out[:, -1] = (
+            1.5 * field[:, -1] - 2.0 * field[:, -2] + 0.5 * field[:, -3]
+        ) / dlambda
+
+    return out
+
+
+def d_dphi(
+    field: np.ndarray,
+    dphi: float,
+) -> np.ndarray:
+    """Meridional derivative in angular coordinates ∂f/∂φ.
+
+    Matches LOG20 ``d_dphi.m``: centred differences in the interior,
+    3-point one-sided stencils at the polar boundaries.
+
+    Args:
+        field: 2-D ``(nlat, nlon)`` or 3-D ``(nlev, nlat, nlon)``.
+        dphi: Meridional grid spacing in **radians**.
+
+    Returns:
+        Same shape, in ``[field_units / radian]``.
+    """
+    if field.ndim == 3:
+        return np.stack(
+            [d_dphi(field[k], dphi) for k in range(field.shape[0])]
+        )
+
+    out = np.empty_like(field)
+
+    # Interior: centred differences along lat (axis 0)
+    out[1:-1, :] = (field[2:, :] - field[:-2, :]) / (2 * dphi)
+
+    # Boundaries: 3-point one-sided (LOG20 d_dphi.m)
+    out[0, :] = (
+        -1.5 * field[0, :] + 2.0 * field[1, :] - 0.5 * field[2, :]
+    ) / dphi
+    out[-1, :] = (
+        1.5 * field[-1, :] - 2.0 * field[-2, :] + 0.5 * field[-3, :]
+    ) / dphi
+
+    return out
+
+
+def div_spherical(
+    Ax: np.ndarray,
+    Ay: np.ndarray,
+    lat_rad: np.ndarray,
+    dphi: float,
+    dlambda: float,
+    periodic: bool = True,
+) -> np.ndarray:
+    """Spherical divergence of a 2-D vector field (Aλ, Aφ).
+
+    Matches LOG20 ``div.m``:
+
+    .. math::
+
+        \\nabla\\cdot\\mathbf{A} =
+        \\frac{1}{a\\cos\\varphi}\\frac{\\partial A_\\lambda}{\\partial\\lambda}
+        + \\frac{1}{a\\cos\\varphi}
+          \\frac{\\partial(A_\\varphi\\cos\\varphi)}{\\partial\\varphi}
+
+    Args:
+        Ax: Zonal component, 2-D ``(nlat, nlon)``.
+        Ay: Meridional component, 2-D ``(nlat, nlon)``.
+        lat_rad: Latitude in radians, shape ``(nlat,)``.
+        dphi: Meridional spacing [rad].
+        dlambda: Zonal spacing [rad].
+        periodic: Periodic zonal boundary.
+
+    Returns:
+        Scalar divergence field, ``(nlat, nlon)``.
+    """
+    cos_phi = np.cos(lat_rad)[:, None]      # (nlat, 1)
+    inv_r_cos = 1.0 / (R_EARTH * cos_phi)   # (nlat, 1)
+
+    dAx_dlam = d_dlambda(Ax, dlambda, periodic)
+    dAy_cos_dphi = d_dphi(Ay * cos_phi, dphi)
+
+    return inv_r_cos * dAx_dlam + inv_r_cos * dAy_cos_dphi
 
 
 # ═══════════════════════════════════════════════════════════════

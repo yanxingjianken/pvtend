@@ -48,6 +48,9 @@ boundaries.
    ddy
    ddp
    ddt
+   d_dlambda
+   d_dphi
+   div_spherical
 
 
 Climatology
@@ -99,7 +102,8 @@ Two solver methods
    residual (no separate term-C solve).
 
 Both methods apply a **latitude taper** (linearly 0 → 1 between 15°N and
-25°N, tapering back to 0 above 80°N) to enforce QG validity.
+25°N, tapering back to 0 above 85°N) to all RHS terms (A, B, and C)
+to suppress polar metric-term singularities and enforce QG validity.
 
 Boundary conditions (LOG20)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
