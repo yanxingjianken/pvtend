@@ -117,39 +117,80 @@ homogeneous (:math:`\omega = 0`) boundaries.
 Diabatic heating — term C
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
+The solver supports **two** independent diabatic forcings, and is called
+**three** times per timestep:
+
+**LOG20 term C** (budget-closure, Li & O'Gorman 2020):
 When the Eulerian temperature tendency :math:`\partial T/\partial t` is
-available (``dT_dt`` parameter), the RHS gains an additional forcing:
+available (``dT_dt`` parameter), the diabatic heating rate is diagnosed
+from the thermodynamic equation:
 
 .. math::
 
-   \text{Term C} = \frac{R_d}{\sigma_0\,p}\,\nabla^2_p
-   \!\left(\frac{\partial T}{\partial t}\right)
-
-This term captures the diabatic contribution (predominantly latent
-heating) without requiring an explicit LHR parameterisation.  The solver
-is called **twice**:
-
-* **Without** ``dT_dt`` → :math:`\omega_\text{dry}` (terms A + B only)
-* **With** ``dT_dt`` → :math:`\omega_\text{dry+moist(QG)}` (A + B + C)
-
-The difference is the **QG-moist omega**:
+   J = \underbrace{c_p\!\left(\frac{\partial T}{\partial t}
+       + \mathbf{v}\cdot\nabla_p T\right)}_{J_1}
+     + \underbrace{\left(-\frac{\sigma\,p}{R_d}\;c_p\;\omega\right)}_{J_2}
 
 .. math::
 
-   \omega_\text{qg\_moist} = \omega_{A+B+C} - \omega_{A+B}
+   \text{Term C}_\text{LOG20} = -\frac{\kappa}{p}\;\nabla^2_s\,J
 
-and the full moist residual remains
-:math:`\omega_\text{moist} = \omega_\text{total} - \omega_\text{dry}`.
-This yields a **3-way vertical-velocity decomposition**:
+This captures **all** diabatic processes (LHR + radiation + sensible
+heat flux + diffusion).
+
+**Emanuel term** :math:`C_\text{em}` (parameterised LHR, Emanuel 1987;
+Tamarin & Kaspi 2016): The latent heat release is parameterised from
+thermodynamic profiles during saturated ascent (:math:`\omega < 0`):
+
+.. math::
+
+   \dot\theta_\text{LHR} = \omega\!\left(\frac{\partial\theta}{\partial p}
+   - \frac{\gamma_m}{\gamma_d}\;\frac{\theta}{\theta_E}\;
+     \frac{\partial\theta_E}{\partial p}\right)
+
+.. math::
+
+   J_\text{em} = c_p\;\dot\theta_\text{LHR}\;\frac{T}{\theta},
+   \qquad
+   C_\text{em} = -\frac{\kappa}{p}\;\nabla^2_s\,J_\text{em}
+
+This captures **only** latent heating during saturated ascent.
+
+**Three-solve strategy:**
+
+1. **QG-dry** (terms A+B, homogeneous top/bottom BCs) →
+   :math:`\omega_\text{dry}`
+2. **QG-total** (A+B+\ :math:`C_\text{LOG20}`, ERA5 BCs) →
+   :math:`\omega_\text{qg,total}`
+3. **Emanuel** (A+B+\ :math:`C_\text{em}`, ERA5 BCs) →
+   :math:`\omega_\text{em}`
+
+From these, **four** omega components are derived:
+
+.. math::
+
+   \omega_\text{qg\_moist} &= \omega_\text{qg,total} - \omega_\text{dry} \\
+   \omega_\text{em\_moist} &= \omega_\text{em} - \omega_\text{dry} \\
+   \omega_\text{moist}     &= \omega_\text{total} - \omega_\text{dry}
+
+This yields a **4-way vertical-velocity decomposition**:
 
 .. math::
 
    \omega = \underbrace{\omega_\text{dry}}_{\text{A+B}}
-          + \underbrace{\omega_\text{qg\_moist}}_{\text{term C response}}
+          + \underbrace{\omega_\text{qg\_moist}}_{\text{all diabatic (LOG20)}}
           + \underbrace{(\omega_\text{moist} - \omega_\text{qg\_moist})}_{\text{non-QG residual}}
+
+with the Emanuel-moist component
+:math:`\omega_\text{em\_moist}` providing a sub-partition that isolates
+the LHR-only contribution.  Comparing :math:`\omega_\text{qg\_moist}`
+and :math:`\omega_\text{em\_moist}` separates LHR from non-LHR diabatic
+effects.
 
 **References:** Hoskins B J, Draghici I, Davies H C (1978) *Q.J.R.M.S.*
 104, 31–38.  Li L, O'Gorman P A (2020) *J. Climate*.
+Emanuel K A, Fantini M, Thorpe A J (1987) *J. Atmos. Sci.* 44, 1559–1573.
+Tamarin T, Kaspi Y (2016) *J. Atmos. Sci.* 73, 1687–1707.
 Stone H L (1968) *SIAM J. Numer. Anal.* 5, 530–558.
 Steinfeld D, Pfahl S (2019) *Clim. Dyn.* 53, 6159–6180.
 
@@ -287,17 +328,21 @@ machine-precision round-trip verification:
 Moist/Dry Omega
 ---------------
 
-Partitions total vertical velocity into **three** components and
+Partitions total vertical velocity into **four** components and
 recovers the corresponding divergent winds:
 
 .. math::
 
    \omega = \underbrace{\omega_\text{dry}}_{\text{QG (A+B)}}
-          + \underbrace{\omega_\text{qg\_moist}}_{\text{QG (A+B+C) − (A+B)}}
+          + \underbrace{\omega_\text{qg\_moist}}_{\text{QG (A+B+C}_\text{LOG20}\text{) − (A+B)}}
           + \underbrace{\omega_\text{residual}}_{\text{non-QG}}
 
 with :math:`\omega_\text{moist} = \omega_\text{total} - \omega_\text{dry}`
 encompassing both QG-moist and non-QG contributions.
+
+An additional **Emanuel-moist** component
+:math:`\omega_\text{em\_moist} = \omega_{A+B+C_\text{em}} - \omega_{A+B}`
+isolates the LHR-only response (see :ref:`qg-omega` for details).
 
 The divergent-wind recovery proceeds as follows:
 
@@ -311,8 +356,11 @@ The divergent-wind recovery proceeds as follows:
 6. QG-moist divergent wind via the same Poisson inversion applied to
    :math:`\omega_\text{qg\_moist}`:
    :math:`(u_\text{div,qg\_moist}, v_\text{div,qg\_moist}) = \nabla\chi_\text{qg\_moist}`
+7. Emanuel-moist divergent wind via the same Poisson inversion applied to
+   :math:`\omega_\text{em\_moist}`:
+   :math:`(u_\text{div,em\_moist}, v_\text{div,em\_moist}) = \nabla\chi_\text{em\_moist}`
 
-All three divergent-wind components are recovered via **independent
+All four divergent-wind components are recovered via **independent
 Poisson inversions** using :func:`~pvtend.moist_dry.solve_chi_from_omega`.
 This avoids amplification of discretisation errors from the Helmholtz
 decomposition that would occur with a residual-based approach
@@ -343,16 +391,20 @@ Which solver is used where
    * - :math:`\nabla^2\chi_\text{qg\_moist} = -\partial\omega_\text{qg\_moist}/\partial p`
      - Spherical FFT Poisson
      - :func:`~pvtend.moist_dry.solve_chi_from_omega`
+   * - :math:`\nabla^2\chi_\text{em\_moist} = -\partial\omega_\text{em\_moist}/\partial p`
+     - Spherical FFT Poisson
+     - :func:`~pvtend.moist_dry.solve_chi_from_omega`
    * - :math:`\mathcal{L}(\chi) = f` (forward Laplacian for verification)
      - Conservative spherical stencil
      - :func:`~pvtend.helmholtz.laplacian_spherical_fft`
 
 Note: the **horizontal wind** decomposition remains **2-way**
-(dry + moist).  The QG-moist divergent wind is a physically
-interpretable *approximation* of the full moist divergent wind
-— it can substitute for :math:`\mathbf{u}_{\chi,\text{moist}}` in
-PV cross-term analyses but is **not** an additional additive component
-of the Helmholtz decomposition.
+(dry + moist).  The QG-moist and Emanuel-moist divergent winds are
+physically interpretable *sub-partitions* of the full moist divergent
+wind — they can substitute for :math:`\mathbf{u}_{\chi,\text{moist}}`
+in PV cross-term analyses but are **not** additional additive
+components of the Helmholtz decomposition.  Comparing their PV
+cross-terms isolates LHR from non-LHR diabatic effects.
 
 **Total-field approximation for horizontal divergence.**
 The QG omega solve and Poisson inversion are performed on **total
@@ -553,17 +605,23 @@ Orchestrates the full per-event computation:
 
 1. Load ERA5 data for the time window (including specific humidity *q*).
 2. Subtract hourly climatology → anomalies; compute :math:`\partial T/\partial t`.
-3. Compute all spatial / temporal derivatives.
+3. Compute all spatial / temporal derivatives, including Emanuel (1987)
+   LHR :math:`\dot\theta_\text{LHR}` and :math:`Q_\text{LHR}`.
 4. Helmholtz decomposition on the full NH hemisphere (spherical Poisson).
 5. QG omega (SIP, terms A+B) → :math:`\omega_\text{dry}`.
-6. QG omega (SIP, terms A+B+C with :math:`\partial T/\partial t`) →
+6. QG omega (SIP, terms A+B+\ :math:`C_\text{LOG20}` with
+   :math:`\partial T/\partial t`) →
    :math:`\omega_\text{qg\_moist} = \omega_{A+B+C} - \omega_{A+B}`.
-7. Moist / dry decomposition →
+7. QG omega (SIP, terms A+B+\ :math:`C_\text{em}` with Emanuel LHR) →
+   :math:`\omega_\text{em\_moist} = \omega_{A+B+C_\text{em}} - \omega_{A+B}`.
+8. Moist / dry decomposition →
    :math:`\omega_\text{moist}`, :math:`\omega_\text{qg\_moist}`,
+   :math:`\omega_\text{em\_moist}`,
    and their divergent winds via spherical Poisson inversion.
-8. Extract event-centred patches.
-9. Compute PV cross-terms (dry, moist, QG-moist) and vertical weighted averages.
-10. Write per-timestep NPZ files.
+9. Extract event-centred patches.
+10. Compute PV cross-terms (dry, moist, QG-moist, Emanuel-moist) and
+    vertical weighted averages.
+11. Write per-timestep NPZ files.
 
 :class:`TendencyComputer` is parameterised by event type
 (blocking / PRP), eliminating code duplication between scripts.
