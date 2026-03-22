@@ -665,6 +665,10 @@ contours followed by :func:`overturn_x_intervals` and
 threshold is applied: the event must be classified consistently across
 at least ``classify_threshold`` pressure levels to qualify.
 
+``--levels`` accepts integer hPa values (e.g. ``500 400 300 200``) or
+the string ``wavg`` to classify on the pre-computed weighted-average
+2-D Z field.  Use ``--threshold 1`` with a single level or ``wavg``.
+
 The CLI subcommand is ``pvtend-pipeline classify``.
 
 .. autosummary::

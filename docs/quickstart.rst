@@ -140,7 +140,7 @@ The full production pipeline is a **three-pass** workflow:
        --era5-dir /path/to/era5/ \
        --clim-path /path/to/climatology/era5_hourly_clim.nc \
        --out-dir /path/to/output/ \
-       --dh-range '-49:25:1' \
+       --dh-range='-49:25:1' \
        --center-mode eulerian \
        --year-range '1990:2011' \
        --stages onset peak decay \
@@ -150,6 +150,7 @@ The full production pipeline is a **three-pass** workflow:
    # ── Pass 1: RWB classification ───────────────────────────────────
    #   Detects overturning PV contours on multiple pressure levels and
    #   classifies each event-stage as AWB / CWB / neutral.
+   #   --levels accepts integer hPa values or 'wavg' (weighted-average Z).
    pvtend-pipeline classify \
        --npz-dir /path/to/output/ \
        --output /path/to/outputs/rwb_variant_tracksets.pkl \

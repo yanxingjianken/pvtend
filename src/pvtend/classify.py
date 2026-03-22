@@ -85,7 +85,7 @@ class ClassifyConfig:
     stages: list[str] = field(
         default_factory=lambda: ["onset", "peak", "decay"]
     )
-    classify_levels: list[int] = field(
+    classify_levels: list[int | str] = field(
         default_factory=lambda: [500, 400, 300, 200]
     )
     classify_threshold: int = 3
@@ -189,22 +189,35 @@ def _classify_bays_z2d(
 
 
 def _classify_multilevel(
-    z3d: np.ndarray,
-    levels_file: np.ndarray,
+    z3d: np.ndarray | None,
+    levels_file: np.ndarray | None,
     x_rel: np.ndarray,
     y_rel: np.ndarray,
     *,
-    classify_levels: Sequence[int],
+    classify_levels: Sequence[int | str],
     threshold: int,
     cfg: RWBConfig,
+    z2d_wavg: np.ndarray | None = None,
 ) -> tuple[bool, bool]:
-    """Multi-level classification; require *threshold* levels to agree."""
+    """Multi-level classification; require *threshold* levels to agree.
+
+    *classify_levels* may contain integer hPa values or the string
+    ``"wavg"``; the latter uses the pre-computed weighted-average 2-D
+    Z field (*z2d_wavg*).
+    """
     awb_count = cwb_count = 0
     for lev in classify_levels:
-        k = int(np.nanargmin(np.abs(levels_file - lev)))
-        if k >= z3d.shape[0]:
-            continue
-        awb, cwb = _classify_bays_z2d(z3d[k], x_rel, y_rel, cfg)
+        if isinstance(lev, str) and lev.lower() == "wavg":
+            if z2d_wavg is None:
+                continue
+            awb, cwb = _classify_bays_z2d(z2d_wavg, x_rel, y_rel, cfg)
+        else:
+            if z3d is None or levels_file is None:
+                continue
+            k = int(np.nanargmin(np.abs(levels_file - int(lev))))
+            if k >= z3d.shape[0]:
+                continue
+            awb, cwb = _classify_bays_z2d(z3d[k], x_rel, y_rel, cfg)
         awb_count += int(awb)
         cwb_count += int(cwb)
     return awb_count >= threshold, cwb_count >= threshold
@@ -346,7 +359,14 @@ def run_pass1(cfg: ClassifyConfig) -> ClassifyResult:
     stage_cwb: dict[str, set[int]] = {e: set() for e in cfg.stages}
     stage_neu: dict[str, set[int]] = {}
 
-    print(f"\n[pass1] classifying at levels {cfg.classify_levels} hPa  "
+    _need_wavg = any(
+        isinstance(l, str) and l.lower() == "wavg" for l in cfg.classify_levels
+    )
+    _need_3d = any(
+        not (isinstance(l, str) and l.lower() == "wavg") for l in cfg.classify_levels
+    )
+
+    print(f"\n[pass1] classifying at levels {cfg.classify_levels}  "
           f"(threshold={cfg.classify_threshold})", flush=True)
 
     for evt in cfg.stages:
@@ -379,16 +399,25 @@ def run_pass1(cfg: ClassifyConfig) -> ClassifyResult:
                         h_scale = float(Z["H_SCALE"])
                     x_rel = Z["X_rel"]
                     y_rel = Z["Y_rel"]
-                    if "z_3d" not in Z.files:
+
+                    z3d = None
+                    levels_file = None
+                    z2d_wavg = None
+                    if _need_3d and "z_3d" in Z.files:
+                        z3d = Z["z_3d"]
+                        levels_file = np.asarray(Z["levels"], dtype=float)
+                    if _need_wavg and "z" in Z.files:
+                        z2d_wavg = Z["z"]
+
+                    if z3d is None and z2d_wavg is None:
                         continue
-                    z3d = Z["z_3d"]
-                    levels_file = np.asarray(Z["levels"], dtype=float)
 
                     awb, cwb = _classify_multilevel(
                         z3d, levels_file, x_rel, y_rel,
                         classify_levels=cfg.classify_levels,
                         threshold=cfg.classify_threshold,
                         cfg=cfg.rwb_cfg,
+                        z2d_wavg=z2d_wavg,
                     )
                     if awb:
                         stage_awb[evt].add(tid)

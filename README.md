@@ -112,6 +112,7 @@ pvtend-pipeline compute \
     --dh-range=-49:25 --skip-existing
 
 # Step 2: RWB classification → variant tracksets PKL
+#   --levels accepts integer hPa values or 'wavg' (weighted-average Z)
 pvtend-pipeline classify \
     --npz-dir /data/composite_blocking_tempest/ \
     --output /data/outputs/rwb_variant_tracksets.pkl \
