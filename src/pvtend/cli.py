@@ -132,7 +132,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Event stages to classify (default: onset peak decay).",
     )
     classify.add_argument(
-        "--levels", nargs="+", default=[500, 400, 300, 200],
+        "--levels", nargs="+", type=_level_type, default=[500, 400, 300, 200],
         help="Pressure levels (integers) or 'wavg' for weighted-average 2-D Z.",
     )
     classify.add_argument(
@@ -189,6 +189,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+def _level_type(value: str) -> int | str:
+    """Argparse type for --levels: return int for numbers, str for 'wavg'."""
+    if value.lower() == "wavg":
+        return "wavg"
+    return int(value)
 
 
 # =====================================================================
@@ -360,21 +367,11 @@ def _cmd_classify(args: argparse.Namespace) -> None:
     from pvtend.classify import ClassifyConfig, run_pass1
     from pvtend.rwb import RWBConfig
 
-    # Parse levels: accept integers or 'wavg'
-    parsed_levels: list[int | str] = []
-    for lv in args.levels:
-        if isinstance(lv, int):
-            parsed_levels.append(lv)
-        elif str(lv).lower() == "wavg":
-            parsed_levels.append("wavg")
-        else:
-            parsed_levels.append(int(lv))
-
     cfg = ClassifyConfig(
         npz_dir=args.npz_dir,
         output_path=args.output,
         stages=args.stages,
-        classify_levels=parsed_levels,
+        classify_levels=args.levels,
         classify_threshold=args.threshold,
         rwb_cfg=RWBConfig(area_min_deg2=20.0, try_levels=400),
         exclude_file=args.exclude_file,
