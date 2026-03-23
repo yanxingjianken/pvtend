@@ -34,6 +34,16 @@ import numpy as np
 
 from .classify import ClassifyResult, _parse_track_id, _parse_dh, _load_excluded
 
+
+# ── Picklable defaultdict factories (lambdas are NOT picklable) ──────
+def _dd_dict() -> defaultdict:
+    return defaultdict(dict)
+
+
+def _dd_int() -> defaultdict:
+    return defaultdict(int)
+
+
 # ── Metadata keys in NPZ — skip when accumulating ────────────────────
 _META = frozenset({
     "Y_rel", "X_rel", "levels", "wavg_levels", "H_SCALE", "G0",
@@ -254,18 +264,18 @@ def build_composites(
     variants = list(variant_trackset.keys())
 
     # ── accumulators ──
-    sums: dict[str, dict[int, dict]] = defaultdict(lambda: defaultdict(dict))
-    valids: dict[str, dict[int, dict]] = defaultdict(lambda: defaultdict(dict))
-    counts: dict[str, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+    sums: dict[str, dict[int, dict]] = defaultdict(_dd_dict)
+    valids: dict[str, dict[int, dict]] = defaultdict(_dd_dict)
+    counts: dict[str, dict[int, int]] = defaultdict(_dd_int)
 
     sums_v: dict[str, dict[str, dict[int, dict]]] = {
-        v: defaultdict(lambda: defaultdict(dict)) for v in variants
+        v: defaultdict(_dd_dict) for v in variants
     }
     valids_v: dict[str, dict[str, dict[int, dict]]] = {
-        v: defaultdict(lambda: defaultdict(dict)) for v in variants
+        v: defaultdict(_dd_dict) for v in variants
     }
     counts_v: dict[str, dict[str, dict[int, int]]] = {
-        v: defaultdict(lambda: defaultdict(int)) for v in variants
+        v: defaultdict(_dd_int) for v in variants
     }
 
     LEVELS: np.ndarray | None = None
