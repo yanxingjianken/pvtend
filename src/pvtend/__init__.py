@@ -30,7 +30,10 @@ from pvtend.constants import (
 
 # Derivatives and climatology
 from pvtend.derivatives import ddx, ddy, ddp, ddt, d_dlambda, d_dphi, div_spherical
-from pvtend.climatology import compute_climatology, load_climatology
+from pvtend.climatology import (
+    compute_climatology, load_climatology,
+    compute_helmholtz_climatology, load_helmholtz_climatology,
+)
 
 # Solvers
 from pvtend.omega import solve_qg_omega_sip
@@ -39,7 +42,7 @@ from pvtend.helmholtz import (
     helmholtz_decomposition_3d,
     laplacian_spherical_fft,
 )
-from pvtend.moist_dry import decompose_omega, solve_chi_from_omega
+from pvtend.moist_dry import decompose_omega, solve_chi_from_omega, verify_div_additivity
 
 # Decomposition
 from pvtend.decomposition import (
@@ -95,11 +98,12 @@ __all__ = [
     "ddx", "ddy", "ddp", "ddt",
     # Climatology
     "compute_climatology", "load_climatology",
+    "compute_helmholtz_climatology", "load_helmholtz_climatology",
     # Solvers
     "solve_qg_omega_sip",
     "helmholtz_decomposition", "helmholtz_decomposition_3d",
     "laplacian_spherical_fft",
-    "decompose_omega", "solve_chi_from_omega",
+    "decompose_omega", "solve_chi_from_omega", "verify_div_additivity",
     # Decomposition
     "OrthogonalBasisFields", "compute_orthogonal_basis",
     "project_field", "collect_term_fields",

@@ -57,6 +57,7 @@ from .constants import (
 )
 from .derivatives import ddx, ddy, ddp, ddt
 from .helmholtz import helmholtz_decomposition, solve_poisson_spherical_fft, gradient
+from .climatology import load_helmholtz_climatology
 from .omega import (
     solve_qg_omega_sip,
     _compute_diabatic_rhs_log20,
@@ -75,6 +76,11 @@ VARS_3D: list[str] = [
     "pv_bar_dx", "pv_bar_dy", "pv_bar_dp", "pv_bar_dt",
     "pv_anom_dx", "pv_anom_dy", "pv_anom_dp", "pv_anom_dt",
     "theta", "theta_dt", "theta_dot", "Q",
+    # Total-wind Helmholtz (v2.0)
+    "u_rot", "u_div", "v_rot", "v_div",
+    # Climatological Helmholtz (v2.0)
+    "u_rot_bar", "u_div_bar", "v_rot_bar", "v_div_bar",
+    # Anomaly Helmholtz (total − clim)
     "u_anom_rot", "u_anom_div", "u_anom_har",
     "v_anom_rot", "v_anom_div", "v_anom_har",
     "u_div_moist", "v_div_moist",
@@ -92,6 +98,11 @@ _EXTRACT_VARS = [
     "pv_bar_dx", "pv_bar_dy", "pv_bar_dp", "pv_bar_dt",
     "pv_anom_dx", "pv_anom_dy", "pv_anom_dp", "pv_anom_dt",
     "theta", "theta_dt", "theta_dot", "Q",
+    # Total-wind Helmholtz (v2.0)
+    "u_rot", "u_div", "v_rot", "v_div",
+    # Climatological Helmholtz (v2.0)
+    "u_rot_bar", "u_div_bar", "v_rot_bar", "v_div_bar",
+    # Anomaly Helmholtz (total − clim)
     "u_anom_rot", "u_anom_div", "u_anom_har",
     "v_anom_rot", "v_anom_div", "v_anom_har",
     "z_bar", "t_bar",
@@ -114,6 +125,8 @@ class TendencyConfig:
         event_type: ``'blocking'`` or ``'prp'``.
         data_dir: Path to ERA5 monthly NetCDF files.
         clim_path: Path to climatology file or directory.
+        clim_helmholtz_dir: Directory with pre-computed Helmholtz
+            climatology files (from ``pvtend-pipeline clim-helmholtz``).
         output_dir: Root output directory for NPZ files.
         csv_path: Path to TempestExtremes event CSV.
         track_file: Path to tracking data file (for lagrangian mode).
@@ -136,6 +149,9 @@ class TendencyConfig:
     data_dir: Path = Path("/net/flood/data2/users/x_yan/era")
     clim_path: Path = Path(
         "/net/flood/data2/users/x_yan/era/era5_hourly_clim_1990-2019.nc"
+    )
+    clim_helmholtz_dir: Path = Path(
+        "/net/flood/data2/users/x_yan/era/clim"
     )
     output_dir: Path = Path(
         "/net/flood/data2/users/x_yan/composite_blocking_tempest"
@@ -847,7 +863,7 @@ def with_derivs_for_window(
     ).sortby("longitude")
 
     # ================================================================
-    #  FFT Helmholtz on the full NH grid
+    #  FFT Helmholtz on the TOTAL NH wind field (v2.0)
     # ================================================================
     lat_nh = ds.latitude.values
     lon_nh = ds.longitude.values
@@ -871,13 +887,14 @@ def with_derivs_for_window(
     v_div_all = np.zeros(shape_4d, dtype=np.float32)
     v_har_all = np.zeros(shape_4d, dtype=np.float32)
 
-    u_anom_vals = ds["u_anom"].values
-    v_anom_vals = ds["v_anom"].values
+    # Helmholtz on total (u, v) — not (u_anom, v_anom)
+    u_total_vals = ds["u"].values
+    v_total_vals = ds["v"].values
 
     for ti in range(ntimes):
         for li in range(nlevs):
-            u2d = u_anom_vals[ti, li]
-            v2d = v_anom_vals[ti, li]
+            u2d = u_total_vals[ti, li]
+            v2d = v_total_vals[ti, li]
             if flip_lat:
                 u2d = u2d[::-1]
                 v2d = v2d[::-1]
@@ -895,17 +912,61 @@ def with_derivs_for_window(
             v_div_all[ti, li] = helm["v_div"]
             v_har_all[ti, li] = helm["v_har"]
 
-    _log(f"  FFT-NH Helmholtz done: {ntimes} times × {nlevs} levels")
+    _log(f"  FFT-NH Helmholtz (total wind) done: {ntimes} times × {nlevs} levels")
 
+    # ── Store total Helmholtz fields ──
     dims4d = ("valid_time", plev, "latitude", "longitude")
-    coords4d = ds["u_anom"].coords
+    coords4d = ds["u"].coords
     for name, arr in [
-        ("u_anom_rot", u_rot_all), ("u_anom_div", u_div_all),
-        ("u_anom_har", u_har_all),
-        ("v_anom_rot", v_rot_all), ("v_anom_div", v_div_all),
-        ("v_anom_har", v_har_all),
+        ("u_rot", u_rot_all), ("u_div", u_div_all),
+        ("v_rot", v_rot_all), ("v_div", v_div_all),
     ]:
         ds[name] = xr.DataArray(arr, dims=dims4d, coords=coords4d)
+
+    # ================================================================
+    #  Load climatological Helmholtz & compute anomaly by subtraction
+    # ================================================================
+    # Gather unique months needed in this time window
+    months_needed = sorted(set(ds.valid_time.dt.month.values.tolist()))
+    clim_helm_cache: dict[int, dict[str, np.ndarray]] = {}
+    for m in months_needed:
+        clim_helm_cache[m] = load_helmholtz_climatology(
+            cfg.clim_helmholtz_dir, m)
+
+    # Build 4-D bar arrays by matching each timestep to its month/hour/level
+    u_rot_bar_4d = np.zeros(shape_4d, dtype=np.float32)
+    u_div_bar_4d = np.zeros(shape_4d, dtype=np.float32)
+    v_rot_bar_4d = np.zeros(shape_4d, dtype=np.float32)
+    v_div_bar_4d = np.zeros(shape_4d, dtype=np.float32)
+
+    times = pd.to_datetime(ds.valid_time.values)
+    for ti, t in enumerate(times):
+        m = t.month
+        hr = t.hour
+        ch = clim_helm_cache[m]
+        # Climatology files have shape (nt_clim, nlev, nlat, nlon)
+        # where nt_clim is the number of hours; index by hour
+        if ch["u_rot_bar"].shape[0] > hr:
+            u_rot_bar_4d[ti] = ch["u_rot_bar"][hr]
+            u_div_bar_4d[ti] = ch["u_div_bar"][hr]
+            v_rot_bar_4d[ti] = ch["v_rot_bar"][hr]
+            v_div_bar_4d[ti] = ch["v_div_bar"][hr]
+
+    for name, arr in [
+        ("u_rot_bar", u_rot_bar_4d), ("u_div_bar", u_div_bar_4d),
+        ("v_rot_bar", v_rot_bar_4d), ("v_div_bar", v_div_bar_4d),
+    ]:
+        ds[name] = xr.DataArray(arr, dims=dims4d, coords=coords4d)
+
+    # ── Anomaly Helmholtz by subtraction: u'_rot = u_rot − ū_rot ──
+    ds["u_anom_rot"] = ds["u_rot"] - ds["u_rot_bar"]
+    ds["u_anom_div"] = ds["u_div"] - ds["u_div_bar"]
+    ds["u_anom_har"] = xr.DataArray(u_har_all, dims=dims4d, coords=coords4d)
+    ds["v_anom_rot"] = ds["v_rot"] - ds["v_rot_bar"]
+    ds["v_anom_div"] = ds["v_div"] - ds["v_div_bar"]
+    ds["v_anom_har"] = xr.DataArray(v_har_all, dims=dims4d, coords=coords4d)
+
+    _log("  Climatological Helmholtz loaded; anomaly Helmholtz computed by subtraction")
 
     return ds
 
@@ -1202,8 +1263,9 @@ class TendencyComputer:
             vw = partial(vwm, z_m_3d=z_m_3d, wavg_idx=wavg_idx)
 
             # ────────────────────────────────────────────
-            #  3-D cross terms
+            #  3-D cross terms (53-term v2.0 catalog)
             # ────────────────────────────────────────────
+            # ── 12 base (bar/anom × bar/anom) ──
             uanom_pvbar_dx_3d = cube3d["u_anom"] * cube3d["pv_bar_dx"]
             uanom_pvanom_dx_3d = cube3d["u_anom"] * cube3d["pv_anom_dx"]
             ubar_pvanom_dx_3d = cube3d["u_bar"] * cube3d["pv_anom_dx"]
@@ -1219,22 +1281,26 @@ class TendencyComputer:
             wbar_pvanom_dp_3d = cube3d["w_bar"] * cube3d["pv_anom_dp"]
             wbar_pvbar_dp_3d = cube3d["w_bar"] * cube3d["pv_bar_dp"]
 
-            # Helmholtz cross terms
-            urot_pvbar_dx_3d = cube3d["u_anom_rot"] * cube3d["pv_bar_dx"]
-            urot_pvanom_dx_3d = cube3d["u_anom_rot"] * cube3d["pv_anom_dx"]
-            udiv_pvbar_dx_3d = cube3d["u_anom_div"] * cube3d["pv_bar_dx"]
-            udiv_pvanom_dx_3d = cube3d["u_anom_div"] * cube3d["pv_anom_dx"]
-            uhar_pvbar_dx_3d = cube3d["u_anom_har"] * cube3d["pv_bar_dx"]
-            uhar_pvanom_dx_3d = cube3d["u_anom_har"] * cube3d["pv_anom_dx"]
+            # ── 16 Helmholtz primary (anom + bar rot/div) ──
+            uanom_rot_pvbar_dx_3d = cube3d["u_anom_rot"] * cube3d["pv_bar_dx"]
+            uanom_rot_pvanom_dx_3d = cube3d["u_anom_rot"] * cube3d["pv_anom_dx"]
+            uanom_div_pvbar_dx_3d = cube3d["u_anom_div"] * cube3d["pv_bar_dx"]
+            uanom_div_pvanom_dx_3d = cube3d["u_anom_div"] * cube3d["pv_anom_dx"]
+            urot_bar_pvbar_dx_3d = cube3d["u_rot_bar"] * cube3d["pv_bar_dx"]
+            urot_bar_pvanom_dx_3d = cube3d["u_rot_bar"] * cube3d["pv_anom_dx"]
+            udiv_bar_pvbar_dx_3d = cube3d["u_div_bar"] * cube3d["pv_bar_dx"]
+            udiv_bar_pvanom_dx_3d = cube3d["u_div_bar"] * cube3d["pv_anom_dx"]
 
-            vrot_pvbar_dy_3d = cube3d["v_anom_rot"] * cube3d["pv_bar_dy"]
-            vrot_pvanom_dy_3d = cube3d["v_anom_rot"] * cube3d["pv_anom_dy"]
-            vdiv_pvbar_dy_3d = cube3d["v_anom_div"] * cube3d["pv_bar_dy"]
-            vdiv_pvanom_dy_3d = cube3d["v_anom_div"] * cube3d["pv_anom_dy"]
-            vhar_pvbar_dy_3d = cube3d["v_anom_har"] * cube3d["pv_bar_dy"]
-            vhar_pvanom_dy_3d = cube3d["v_anom_har"] * cube3d["pv_anom_dy"]
+            vanom_rot_pvbar_dy_3d = cube3d["v_anom_rot"] * cube3d["pv_bar_dy"]
+            vanom_rot_pvanom_dy_3d = cube3d["v_anom_rot"] * cube3d["pv_anom_dy"]
+            vanom_div_pvbar_dy_3d = cube3d["v_anom_div"] * cube3d["pv_bar_dy"]
+            vanom_div_pvanom_dy_3d = cube3d["v_anom_div"] * cube3d["pv_anom_dy"]
+            vrot_bar_pvbar_dy_3d = cube3d["v_rot_bar"] * cube3d["pv_bar_dy"]
+            vrot_bar_pvanom_dy_3d = cube3d["v_rot_bar"] * cube3d["pv_anom_dy"]
+            vdiv_bar_pvbar_dy_3d = cube3d["v_div_bar"] * cube3d["pv_bar_dy"]
+            vdiv_bar_pvanom_dy_3d = cube3d["v_div_bar"] * cube3d["pv_anom_dy"]
 
-            # Moist/dry divergent cross terms
+            # ── 16 divergent dry/moist horizontal ──
             udm_pvbar_dx_3d = cube3d["u_div_moist"] * cube3d["pv_bar_dx"]
             udm_pvanom_dx_3d = cube3d["u_div_moist"] * cube3d["pv_anom_dx"]
             udd_pvbar_dx_3d = cube3d["u_div_dry"] * cube3d["pv_bar_dx"]
@@ -1245,31 +1311,27 @@ class TendencyComputer:
             vdd_pvbar_dy_3d = cube3d["v_div_dry"] * cube3d["pv_bar_dy"]
             vdd_pvanom_dy_3d = cube3d["v_div_dry"] * cube3d["pv_anom_dy"]
 
-            # Moist/dry omega cross terms
-            w_dry_pvbar_dp_3d = cube3d["w_dry"] * cube3d["pv_bar_dp"]
-            w_dry_pvanom_dp_3d = cube3d["w_dry"] * cube3d["pv_anom_dp"]
-            w_moist_pvbar_dp_3d = cube3d["w_moist"] * cube3d["pv_bar_dp"]
-            w_moist_pvanom_dp_3d = cube3d["w_moist"] * cube3d["pv_anom_dp"]
-
-            # QG-moist divergent cross terms
             udqm_pvbar_dx_3d = cube3d["u_div_qg_moist"] * cube3d["pv_bar_dx"]
             udqm_pvanom_dx_3d = cube3d["u_div_qg_moist"] * cube3d["pv_anom_dx"]
             vdqm_pvbar_dy_3d = cube3d["v_div_qg_moist"] * cube3d["pv_bar_dy"]
             vdqm_pvanom_dy_3d = cube3d["v_div_qg_moist"] * cube3d["pv_anom_dy"]
 
-            # QG-moist omega cross terms
-            w_qgm_pvbar_dp_3d = cube3d["w_qg_moist"] * cube3d["pv_bar_dp"]
-            w_qgm_pvanom_dp_3d = cube3d["w_qg_moist"] * cube3d["pv_anom_dp"]
-
-            # Emanuel-moist divergent cross terms
             udem_pvbar_dx_3d = cube3d["u_div_emanuel_moist"] * cube3d["pv_bar_dx"]
             udem_pvanom_dx_3d = cube3d["u_div_emanuel_moist"] * cube3d["pv_anom_dx"]
             vdem_pvbar_dy_3d = cube3d["v_div_emanuel_moist"] * cube3d["pv_bar_dy"]
             vdem_pvanom_dy_3d = cube3d["v_div_emanuel_moist"] * cube3d["pv_anom_dy"]
 
-            # Emanuel-moist omega cross terms
+            # ── 8 alt vertical (dry/moist/qg/em omega) ──
+            w_dry_pvbar_dp_3d = cube3d["w_dry"] * cube3d["pv_bar_dp"]
+            w_dry_pvanom_dp_3d = cube3d["w_dry"] * cube3d["pv_anom_dp"]
+            w_moist_pvbar_dp_3d = cube3d["w_moist"] * cube3d["pv_bar_dp"]
+            w_moist_pvanom_dp_3d = cube3d["w_moist"] * cube3d["pv_anom_dp"]
+            w_qgm_pvbar_dp_3d = cube3d["w_qg_moist"] * cube3d["pv_bar_dp"]
+            w_qgm_pvanom_dp_3d = cube3d["w_qg_moist"] * cube3d["pv_anom_dp"]
             w_em_pvbar_dp_3d = cube3d["w_emanuel_moist"] * cube3d["pv_bar_dp"]
             w_em_pvanom_dp_3d = cube3d["w_emanuel_moist"] * cube3d["pv_anom_dp"]
+
+            # ── 1 diabatic (Q_LHR) — already in cube3d["Q"] ──
 
             # ────────────────────────────────────────────
             #  Write NPZ (atomic via tempfile)
@@ -1327,6 +1389,17 @@ class TendencyComputer:
                     theta_dt=vw(cube3d["theta_dt"]),
                     theta_dot=vw(cube3d["theta_dot"]),
                     Q=vw(cube3d["Q"]),
+                    # Total Helmholtz (v2.0)
+                    u_rot=vw(cube3d["u_rot"]),
+                    u_div=vw(cube3d["u_div"]),
+                    v_rot=vw(cube3d["v_rot"]),
+                    v_div=vw(cube3d["v_div"]),
+                    # Climatological Helmholtz (v2.0)
+                    u_rot_bar=vw(cube3d["u_rot_bar"]),
+                    u_div_bar=vw(cube3d["u_div_bar"]),
+                    v_rot_bar=vw(cube3d["v_rot_bar"]),
+                    v_div_bar=vw(cube3d["v_div_bar"]),
+                    # Anomaly Helmholtz
                     u_anom_rot=vw(cube3d["u_anom_rot"]),
                     u_anom_div=vw(cube3d["u_anom_div"]),
                     u_anom_har=vw(cube3d["u_anom_har"]),
@@ -1348,7 +1421,8 @@ class TendencyComputer:
                     q=vw(cube3d["q"]),
                     t_dt=vw(cube3d["t_dt"]),
 
-                    # ── 2-D cross terms ──
+                    # ── 2-D cross terms (53-term v2.0 catalog) ──
+                    # 12 base
                     u_anom_pv_bar_dx=vw(uanom_pvbar_dx_3d),
                     u_anom_pv_anom_dx=vw(uanom_pvanom_dx_3d),
                     u_bar_pv_anom_dx=vw(ubar_pvanom_dx_3d),
@@ -1361,18 +1435,24 @@ class TendencyComputer:
                     w_anom_pv_anom_dp=vw(wanom_pvanom_dp_3d),
                     w_bar_pv_anom_dp=vw(wbar_pvanom_dp_3d),
                     w_bar_pv_bar_dp=vw(wbar_pvbar_dp_3d),
-                    u_rot_pv_bar_dx=vw(urot_pvbar_dx_3d),
-                    u_rot_pv_anom_dx=vw(urot_pvanom_dx_3d),
-                    u_div_pv_bar_dx=vw(udiv_pvbar_dx_3d),
-                    u_div_pv_anom_dx=vw(udiv_pvanom_dx_3d),
-                    u_har_pv_bar_dx=vw(uhar_pvbar_dx_3d),
-                    u_har_pv_anom_dx=vw(uhar_pvanom_dx_3d),
-                    v_rot_pv_bar_dy=vw(vrot_pvbar_dy_3d),
-                    v_rot_pv_anom_dy=vw(vrot_pvanom_dy_3d),
-                    v_div_pv_bar_dy=vw(vdiv_pvbar_dy_3d),
-                    v_div_pv_anom_dy=vw(vdiv_pvanom_dy_3d),
-                    v_har_pv_bar_dy=vw(vhar_pvbar_dy_3d),
-                    v_har_pv_anom_dy=vw(vhar_pvanom_dy_3d),
+                    # 16 Helmholtz (anom + bar rot/div)
+                    u_anom_rot_pv_bar_dx=vw(uanom_rot_pvbar_dx_3d),
+                    u_anom_rot_pv_anom_dx=vw(uanom_rot_pvanom_dx_3d),
+                    u_anom_div_pv_bar_dx=vw(uanom_div_pvbar_dx_3d),
+                    u_anom_div_pv_anom_dx=vw(uanom_div_pvanom_dx_3d),
+                    u_rot_bar_pv_bar_dx=vw(urot_bar_pvbar_dx_3d),
+                    u_rot_bar_pv_anom_dx=vw(urot_bar_pvanom_dx_3d),
+                    u_div_bar_pv_bar_dx=vw(udiv_bar_pvbar_dx_3d),
+                    u_div_bar_pv_anom_dx=vw(udiv_bar_pvanom_dx_3d),
+                    v_anom_rot_pv_bar_dy=vw(vanom_rot_pvbar_dy_3d),
+                    v_anom_rot_pv_anom_dy=vw(vanom_rot_pvanom_dy_3d),
+                    v_anom_div_pv_bar_dy=vw(vanom_div_pvbar_dy_3d),
+                    v_anom_div_pv_anom_dy=vw(vanom_div_pvanom_dy_3d),
+                    v_rot_bar_pv_bar_dy=vw(vrot_bar_pvbar_dy_3d),
+                    v_rot_bar_pv_anom_dy=vw(vrot_bar_pvanom_dy_3d),
+                    v_div_bar_pv_bar_dy=vw(vdiv_bar_pvbar_dy_3d),
+                    v_div_bar_pv_anom_dy=vw(vdiv_bar_pvanom_dy_3d),
+                    # 16 divergent dry/moist horizontal
                     u_div_moist_pv_bar_dx=vw(udm_pvbar_dx_3d),
                     u_div_moist_pv_anom_dx=vw(udm_pvanom_dx_3d),
                     u_div_dry_pv_bar_dx=vw(udd_pvbar_dx_3d),
@@ -1381,20 +1461,21 @@ class TendencyComputer:
                     v_div_moist_pv_anom_dy=vw(vdm_pvanom_dy_3d),
                     v_div_dry_pv_bar_dy=vw(vdd_pvbar_dy_3d),
                     v_div_dry_pv_anom_dy=vw(vdd_pvanom_dy_3d),
-                    w_dry_pv_bar_dp=vw(w_dry_pvbar_dp_3d),
-                    w_dry_pv_anom_dp=vw(w_dry_pvanom_dp_3d),
-                    w_moist_pv_bar_dp=vw(w_moist_pvbar_dp_3d),
-                    w_moist_pv_anom_dp=vw(w_moist_pvanom_dp_3d),
                     u_div_qg_moist_pv_bar_dx=vw(udqm_pvbar_dx_3d),
                     u_div_qg_moist_pv_anom_dx=vw(udqm_pvanom_dx_3d),
                     v_div_qg_moist_pv_bar_dy=vw(vdqm_pvbar_dy_3d),
                     v_div_qg_moist_pv_anom_dy=vw(vdqm_pvanom_dy_3d),
-                    w_qg_moist_pv_bar_dp=vw(w_qgm_pvbar_dp_3d),
-                    w_qg_moist_pv_anom_dp=vw(w_qgm_pvanom_dp_3d),
                     u_div_emanuel_moist_pv_bar_dx=vw(udem_pvbar_dx_3d),
                     u_div_emanuel_moist_pv_anom_dx=vw(udem_pvanom_dx_3d),
                     v_div_emanuel_moist_pv_bar_dy=vw(vdem_pvbar_dy_3d),
                     v_div_emanuel_moist_pv_anom_dy=vw(vdem_pvanom_dy_3d),
+                    # 8 alt vertical
+                    w_dry_pv_bar_dp=vw(w_dry_pvbar_dp_3d),
+                    w_dry_pv_anom_dp=vw(w_dry_pvanom_dp_3d),
+                    w_moist_pv_bar_dp=vw(w_moist_pvbar_dp_3d),
+                    w_moist_pv_anom_dp=vw(w_moist_pvanom_dp_3d),
+                    w_qg_moist_pv_bar_dp=vw(w_qgm_pvbar_dp_3d),
+                    w_qg_moist_pv_anom_dp=vw(w_qgm_pvanom_dp_3d),
                     w_emanuel_moist_pv_bar_dp=vw(w_em_pvbar_dp_3d),
                     w_emanuel_moist_pv_anom_dp=vw(w_em_pvanom_dp_3d),
 
@@ -1426,6 +1507,17 @@ class TendencyComputer:
                     theta_dt_3d=cube3d["theta_dt"],
                     theta_dot_3d=cube3d["theta_dot"],
                     Q_3d=cube3d["Q"],
+                    # Total Helmholtz 3-D
+                    u_rot_3d=cube3d["u_rot"],
+                    u_div_3d_helm=cube3d["u_div"],
+                    v_rot_3d=cube3d["v_rot"],
+                    v_div_3d_helm=cube3d["v_div"],
+                    # Clim Helmholtz 3-D
+                    u_rot_bar_3d=cube3d["u_rot_bar"],
+                    u_div_bar_3d=cube3d["u_div_bar"],
+                    v_rot_bar_3d=cube3d["v_rot_bar"],
+                    v_div_bar_3d=cube3d["v_div_bar"],
+                    # Anomaly Helmholtz 3-D
                     u_anom_rot_3d=cube3d["u_anom_rot"],
                     u_anom_div_3d=cube3d["u_anom_div"],
                     u_anom_har_3d=cube3d["u_anom_har"],
@@ -1446,6 +1538,7 @@ class TendencyComputer:
                     v_div_emanuel_moist_3d=cube3d["v_div_emanuel_moist"],
                     q_3d=cube3d["q"],
                     t_dt_3d=cube3d["t_dt"],
+                    # Cross-terms 3-D
                     u_anom_pv_bar_dx_3d=uanom_pvbar_dx_3d,
                     u_anom_pv_anom_dx_3d=uanom_pvanom_dx_3d,
                     u_bar_pv_anom_dx_3d=ubar_pvanom_dx_3d,
@@ -1458,18 +1551,22 @@ class TendencyComputer:
                     w_anom_pv_anom_dp_3d=wanom_pvanom_dp_3d,
                     w_bar_pv_anom_dp_3d=wbar_pvanom_dp_3d,
                     w_bar_pv_bar_dp_3d=wbar_pvbar_dp_3d,
-                    u_rot_pv_bar_dx_3d=urot_pvbar_dx_3d,
-                    u_rot_pv_anom_dx_3d=urot_pvanom_dx_3d,
-                    u_div_pv_bar_dx_3d=udiv_pvbar_dx_3d,
-                    u_div_pv_anom_dx_3d=udiv_pvanom_dx_3d,
-                    u_har_pv_bar_dx_3d=uhar_pvbar_dx_3d,
-                    u_har_pv_anom_dx_3d=uhar_pvanom_dx_3d,
-                    v_rot_pv_bar_dy_3d=vrot_pvbar_dy_3d,
-                    v_rot_pv_anom_dy_3d=vrot_pvanom_dy_3d,
-                    v_div_pv_bar_dy_3d=vdiv_pvbar_dy_3d,
-                    v_div_pv_anom_dy_3d=vdiv_pvanom_dy_3d,
-                    v_har_pv_bar_dy_3d=vhar_pvbar_dy_3d,
-                    v_har_pv_anom_dy_3d=vhar_pvanom_dy_3d,
+                    u_anom_rot_pv_bar_dx_3d=uanom_rot_pvbar_dx_3d,
+                    u_anom_rot_pv_anom_dx_3d=uanom_rot_pvanom_dx_3d,
+                    u_anom_div_pv_bar_dx_3d=uanom_div_pvbar_dx_3d,
+                    u_anom_div_pv_anom_dx_3d=uanom_div_pvanom_dx_3d,
+                    u_rot_bar_pv_bar_dx_3d=urot_bar_pvbar_dx_3d,
+                    u_rot_bar_pv_anom_dx_3d=urot_bar_pvanom_dx_3d,
+                    u_div_bar_pv_bar_dx_3d=udiv_bar_pvbar_dx_3d,
+                    u_div_bar_pv_anom_dx_3d=udiv_bar_pvanom_dx_3d,
+                    v_anom_rot_pv_bar_dy_3d=vanom_rot_pvbar_dy_3d,
+                    v_anom_rot_pv_anom_dy_3d=vanom_rot_pvanom_dy_3d,
+                    v_anom_div_pv_bar_dy_3d=vanom_div_pvbar_dy_3d,
+                    v_anom_div_pv_anom_dy_3d=vanom_div_pvanom_dy_3d,
+                    v_rot_bar_pv_bar_dy_3d=vrot_bar_pvbar_dy_3d,
+                    v_rot_bar_pv_anom_dy_3d=vrot_bar_pvanom_dy_3d,
+                    v_div_bar_pv_bar_dy_3d=vdiv_bar_pvbar_dy_3d,
+                    v_div_bar_pv_anom_dy_3d=vdiv_bar_pvanom_dy_3d,
                     u_div_moist_pv_bar_dx_3d=udm_pvbar_dx_3d,
                     u_div_moist_pv_anom_dx_3d=udm_pvanom_dx_3d,
                     u_div_dry_pv_bar_dx_3d=udd_pvbar_dx_3d,

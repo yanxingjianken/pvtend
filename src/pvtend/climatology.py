@@ -17,7 +17,8 @@ from typing import Optional, Sequence
 import numpy as np
 import xarray as xr
 
-from .constants import CLIM_VARIABLES, MONTH_ABBREVS
+from .constants import CLIM_VARIABLES, MONTH_ABBREVS, R_EARTH
+from .helmholtz import helmholtz_decomposition
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -268,3 +269,178 @@ def _save_clim_nc(data: np.ndarray, var_name: str, path: Path) -> None:
     dim_names = ["time"] + [f"dim_{i}" for i in range(data.ndim - 1)]
     ds = xr.Dataset({var_name: (dim_names, data)})
     ds.to_netcdf(path)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Climatological Helmholtz decomposition
+# ═══════════════════════════════════════════════════════════════
+
+
+def compute_helmholtz_climatology(
+    clim_dir: str | Path,
+    output_dir: str | Path,
+    lat: np.ndarray,
+    lon: np.ndarray,
+    *,
+    clim_stem: str = "era5_hourly_clim_1990-2020",
+    engine: str = "netcdf4",
+) -> list[Path]:
+    """Pre-compute Helmholtz decomposition of the climatological wind.
+
+    For each of the 12 months, loads the hourly climatological (u_bar,
+    v_bar) fields, applies ``helmholtz_decomposition`` at every
+    (hour, level) slice, and writes two NetCDF files per month
+    containing u_rot_bar/u_div_bar and v_rot_bar/v_div_bar.
+
+    Args:
+        clim_dir: Directory containing per-variable-per-month climatology
+            NetCDF files (e.g. ``era5_hourly_clim_1990-2020_jan_u.nc``).
+        output_dir: Where to write the 24 Helmholtz climatology files.
+        lat: Latitude array [degrees], matching the climatology grid.
+        lon: Longitude array [degrees], matching the climatology grid.
+        clim_stem: Filename stem for the climatology files.
+        engine: NetCDF engine.
+
+    Returns:
+        List of 24 output file paths.
+    """
+    clim_dir = Path(clim_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ensure ascending latitude for Helmholtz solver
+    if lat[0] > lat[-1]:
+        lat_asc = lat[::-1]
+        flip_lat = True
+    else:
+        lat_asc = lat
+        flip_lat = False
+
+    output_files: list[Path] = []
+
+    for month in range(1, 13):
+        month3 = MONTH_ABBREVS[month - 1]
+        print(f"  Helmholtz clim: month={month3} ...", flush=True)
+
+        # Load climatological u and v for this month
+        u_path = clim_dir / f"{clim_stem}_{month3}_u.nc"
+        v_path = clim_dir / f"{clim_stem}_{month3}_v.nc"
+        if not u_path.exists() or not v_path.exists():
+            print(f"    WARNING: missing {u_path} or {v_path}, skipping")
+            continue
+
+        ds_u = xr.open_dataset(u_path, engine=engine)
+        ds_v = xr.open_dataset(v_path, engine=engine)
+
+        # Climatology files are 6-D: (month, day, hour, level, lat, lon).
+        # Average over month and day → (hour, level, lat, lon) so
+        # tendency.py can index the first dim directly by hour (0–23).
+        u_bar = ds_u["u"].mean(dim=["month", "day"]).values  # (24, nlev, nlat, nlon)
+        v_bar = ds_v["v"].mean(dim=["month", "day"]).values
+
+        nt = u_bar.shape[0]    # 24 hours
+        nlev = u_bar.shape[1]  # 9 pressure levels
+
+        u_rot_bar = np.zeros_like(u_bar)
+        u_div_bar = np.zeros_like(u_bar)
+        v_rot_bar = np.zeros_like(v_bar)
+        v_div_bar = np.zeros_like(v_bar)
+
+        for ti in range(nt):
+            for li in range(nlev):
+                u2d = u_bar[ti, li]
+                v2d = v_bar[ti, li]
+                if flip_lat:
+                    u2d = u2d[::-1]
+                    v2d = v2d[::-1]
+                helm = helmholtz_decomposition(
+                    u2d, v2d, lat_asc, lon,
+                    R_earth=R_EARTH, method="spherical",
+                )
+                if flip_lat:
+                    u_rot_bar[ti, li] = helm["u_rot"][::-1]
+                    u_div_bar[ti, li] = helm["u_div"][::-1]
+                    v_rot_bar[ti, li] = helm["v_rot"][::-1]
+                    v_div_bar[ti, li] = helm["v_div"][::-1]
+                else:
+                    u_rot_bar[ti, li] = helm["u_rot"]
+                    u_div_bar[ti, li] = helm["u_div"]
+                    v_rot_bar[ti, li] = helm["v_rot"]
+                    v_div_bar[ti, li] = helm["v_div"]
+
+        ds_u.close()
+        ds_v.close()
+
+        # Write u-components
+        u_out_path = output_dir / f"{clim_stem}_{month3}_u_helmholtz.nc"
+        dims = ["hour", "pressure_level", "latitude", "longitude"]
+        ds_out = xr.Dataset({
+            "u_rot_bar": (dims, u_rot_bar.astype(np.float32)),
+            "u_div_bar": (dims, u_div_bar.astype(np.float32)),
+        })
+        ds_out.to_netcdf(u_out_path)
+        output_files.append(u_out_path)
+
+        # Write v-components
+        v_out_path = output_dir / f"{clim_stem}_{month3}_v_helmholtz.nc"
+        ds_out = xr.Dataset({
+            "v_rot_bar": (dims, v_rot_bar.astype(np.float32)),
+            "v_div_bar": (dims, v_div_bar.astype(np.float32)),
+        })
+        ds_out.to_netcdf(v_out_path)
+        output_files.append(v_out_path)
+
+        print(f"    Wrote {u_out_path.name}, {v_out_path.name}")
+
+    return output_files
+
+
+def load_helmholtz_climatology(
+    clim_dir: str | Path,
+    month: int,
+    *,
+    clim_stem: str = "era5_hourly_clim_1990-2020",
+    engine: str = "netcdf4",
+) -> dict[str, np.ndarray]:
+    """Load pre-computed Helmholtz-decomposed climatological wind fields.
+
+    Args:
+        clim_dir: Directory containing Helmholtz climatology files.
+        month: Month number (1–12).
+        clim_stem: Filename stem.
+        engine: NetCDF engine.
+
+    Returns:
+        Dictionary with keys ``u_rot_bar``, ``u_div_bar``,
+        ``v_rot_bar``, ``v_div_bar`` — each shape
+        ``(24, nlev, nlat, nlon)``  (hour × level × lat × lon).
+
+    Raises:
+        FileNotFoundError: If the Helmholtz climatology files are missing.
+    """
+    clim_dir = Path(clim_dir)
+
+    month3 = MONTH_ABBREVS[month - 1]
+    u_path = clim_dir / f"{clim_stem}_{month3}_u_helmholtz.nc"
+    v_path = clim_dir / f"{clim_stem}_{month3}_v_helmholtz.nc"
+
+    if not u_path.exists() or not v_path.exists():
+        raise FileNotFoundError(
+            f"Helmholtz climatology not found: {u_path} and/or {v_path}. "
+            f"Run `pvtend-pipeline clim-helmholtz` first."
+        )
+
+    ds_u = xr.open_dataset(u_path, engine=engine)
+    ds_v = xr.open_dataset(v_path, engine=engine)
+
+    result = {
+        "u_rot_bar": ds_u["u_rot_bar"].values,
+        "u_div_bar": ds_u["u_div_bar"].values,
+        "v_rot_bar": ds_v["v_rot_bar"].values,
+        "v_div_bar": ds_v["v_div_bar"].values,
+    }
+
+    ds_u.close()
+    ds_v.close()
+
+    return result

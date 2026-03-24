@@ -182,3 +182,27 @@ def decompose_omega(
         "u_div_dry": u_div_d,
         "v_div_dry": v_div_d,
     }
+
+
+def verify_div_additivity(
+    u_div: np.ndarray,
+    u_div_dry: np.ndarray,
+    u_div_moist: np.ndarray,
+) -> float:
+    """Verify additive consistency of divergent wind decomposition.
+
+    Checks that the independently Poisson-inverted dry and moist
+    divergent winds sum to the total divergent wind to machine
+    precision:
+
+        max |u_div_dry + u_div_moist − u_div|
+
+    Args:
+        u_div: Total divergent component, any shape.
+        u_div_dry: Dry divergent component, same shape.
+        u_div_moist: Moist divergent component, same shape.
+
+    Returns:
+        Maximum absolute error of the additive split.
+    """
+    return float(np.max(np.abs(u_div_dry + u_div_moist - u_div)))

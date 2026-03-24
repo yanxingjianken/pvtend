@@ -122,6 +122,9 @@ Command-line pipeline
 
 The full production pipeline is a **three-pass** workflow:
 
+0. **Pre-compute Helmholtz climatology** (one-time) — decompose the
+   climatological (ū, v̄) into rotational / divergent parts for each month.
+   Results are cached as 24 NetCDF files (~seconds).
 1. **Compute** (Pass 0) — extract PV tendency terms for each tracked event into
    per-timestep NPZ files.  This is the most expensive step; with
    ``--n-workers 48`` it takes **~12 hours** for ~500 events.
@@ -132,6 +135,12 @@ The full production pipeline is a **three-pass** workflow:
 
 .. code-block:: bash
 
+   # ── Pass 0a: Pre-compute Helmholtz climatology (one-time) ────────
+   pvtend-pipeline clim-helmholtz \
+       --clim-dir /path/to/climatology/ \
+       --output-dir /path/to/climatology/ \
+       --clim-stem era5_hourly_clim_1990-2020
+
    # ── Pass 0: Compute PV tendencies ────────────────────────────────
    # Recommended: 48 parallel workers → ~12 h for ~500 blocking events
    pvtend-pipeline compute \
@@ -139,6 +148,7 @@ The full production pipeline is a **three-pass** workflow:
        --events-csv tracked_events.csv \
        --era5-dir /path/to/era5/ \
        --clim-path /path/to/climatology/era5_hourly_clim.nc \
+       --clim-helmholtz-dir /path/to/climatology/ \
        --out-dir /path/to/output/ \
        --dh-range='-49:25:1' \
        --center-mode eulerian \

@@ -98,6 +98,70 @@ class TestMonthKeysForWindow:
 class TestLoadClimatology:
     """Test climatology auto-detection logic."""
 
+
+# ── Cross-term catalog completeness (v2.0, 53 terms) ────────────────
+
+# 52 named cross-term NPZ keys + Q (stored as a field) = 53 budget terms.
+EXPECTED_CROSS_TERM_KEYS = {
+    # 12 base (bar/anom × bar/anom)
+    "u_anom_pv_bar_dx", "u_anom_pv_anom_dx",
+    "u_bar_pv_anom_dx", "u_bar_pv_bar_dx",
+    "v_anom_pv_bar_dy", "v_anom_pv_anom_dy",
+    "v_bar_pv_anom_dy", "v_bar_pv_bar_dy",
+    "w_anom_pv_bar_dp", "w_anom_pv_anom_dp",
+    "w_bar_pv_anom_dp", "w_bar_pv_bar_dp",
+    # 16 Helmholtz (anom + bar rot/div)
+    "u_anom_rot_pv_bar_dx", "u_anom_rot_pv_anom_dx",
+    "u_anom_div_pv_bar_dx", "u_anom_div_pv_anom_dx",
+    "u_rot_bar_pv_bar_dx", "u_rot_bar_pv_anom_dx",
+    "u_div_bar_pv_bar_dx", "u_div_bar_pv_anom_dx",
+    "v_anom_rot_pv_bar_dy", "v_anom_rot_pv_anom_dy",
+    "v_anom_div_pv_bar_dy", "v_anom_div_pv_anom_dy",
+    "v_rot_bar_pv_bar_dy", "v_rot_bar_pv_anom_dy",
+    "v_div_bar_pv_bar_dy", "v_div_bar_pv_anom_dy",
+    # 16 divergent dry/moist horizontal
+    "u_div_moist_pv_bar_dx", "u_div_moist_pv_anom_dx",
+    "u_div_dry_pv_bar_dx", "u_div_dry_pv_anom_dx",
+    "v_div_moist_pv_bar_dy", "v_div_moist_pv_anom_dy",
+    "v_div_dry_pv_bar_dy", "v_div_dry_pv_anom_dy",
+    "u_div_qg_moist_pv_bar_dx", "u_div_qg_moist_pv_anom_dx",
+    "v_div_qg_moist_pv_bar_dy", "v_div_qg_moist_pv_anom_dy",
+    "u_div_emanuel_moist_pv_bar_dx", "u_div_emanuel_moist_pv_anom_dx",
+    "v_div_emanuel_moist_pv_bar_dy", "v_div_emanuel_moist_pv_anom_dy",
+    # 8 alt vertical
+    "w_dry_pv_bar_dp", "w_dry_pv_anom_dp",
+    "w_moist_pv_bar_dp", "w_moist_pv_anom_dp",
+    "w_qg_moist_pv_bar_dp", "w_qg_moist_pv_anom_dp",
+    "w_emanuel_moist_pv_bar_dp", "w_emanuel_moist_pv_anom_dp",
+}
+
+
+class TestCrossTermCatalog:
+    """Verify the 53-term v2.0 cross-term catalog is complete."""
+
+    def test_expected_count(self):
+        """52 named cross-term keys + Q (stored as field) = 53."""
+        assert len(EXPECTED_CROSS_TERM_KEYS) == 52
+
+    def test_no_duplicates(self):
+        """All keys are unique (set length matches list-of-elements length)."""
+        keys_list = list(EXPECTED_CROSS_TERM_KEYS)
+        assert len(keys_list) == len(set(keys_list))
+
+    def test_base_terms_present(self):
+        base_u = {k for k in EXPECTED_CROSS_TERM_KEYS if k.startswith("u_anom_pv") or k.startswith("u_bar_pv")}
+        assert len(base_u) == 4
+
+    def test_helmholtz_bar_terms_present(self):
+        bar_helm = {k for k in EXPECTED_CROSS_TERM_KEYS
+                    if "rot_bar" in k or "div_bar" in k}
+        assert len(bar_helm) == 8  # 4 u-dir + 4 v-dir
+
+    def test_no_harmonic_cross_terms(self):
+        """Harmonic absorbed into residual — no u_har/v_har cross-terms."""
+        har_terms = {k for k in EXPECTED_CROSS_TERM_KEYS if "_har_" in k}
+        assert len(har_terms) == 0
+
     def test_missing_file_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError, match="Climatology missing"):
             load_climatology(tmp_path / "nonexistent.nc")

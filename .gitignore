@@ -38,6 +38,9 @@ docs/generated/
 # Downloaded data (large)
 examples/era5_jan2025/
 
+# Paper (local only, not tracked)
+paper/
+
 # OS
 .DS_Store
 Thumbs.db

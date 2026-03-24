@@ -113,6 +113,29 @@ def _build_parser() -> argparse.ArgumentParser:
         "--skip-existing", action="store_true",
         help="Skip events whose NPZ files already exist.",
     )
+    compute.add_argument(
+        "--clim-helmholtz-dir", type=Path, default=None,
+        help="Directory with pre-computed Helmholtz climatology NetCDFs.  "
+             "Defaults to the same directory as --clim-path.",
+    )
+
+    # ── clim-helmholtz ───────────────────────────────────────────
+    clim_helm = sub.add_parser(
+        "clim-helmholtz",
+        help="Pre-compute Helmholtz decomposition of climatological wind → NetCDFs.",
+    )
+    clim_helm.add_argument(
+        "--clim-dir", required=True, type=Path,
+        help="Directory with per-variable-per-month climatology NetCDFs.",
+    )
+    clim_helm.add_argument(
+        "--output-dir", required=True, type=Path,
+        help="Output directory for the 24 Helmholtz climatology files.",
+    )
+    clim_helm.add_argument(
+        "--clim-stem", type=str, default="era5_hourly_clim_1990-2020",
+        help="Filename stem for the climatology files (default: era5_hourly_clim_1990-2020).",
+    )
 
     # ── classify ─────────────────────────────────────────────────
     classify = sub.add_parser(
@@ -268,6 +291,13 @@ def _cmd_compute(args: argparse.Namespace) -> None:
         center_mode=args.center_mode,
         skip_existing=args.skip_existing,
         n_workers=args.n_workers,
+        clim_helmholtz_dir=(
+            args.clim_helmholtz_dir
+            if args.clim_helmholtz_dir is not None
+            else args.clim_path
+            if args.clim_path.is_dir()
+            else args.clim_path.parent
+        ),
     )
     computer = TendencyComputer(config)
 
@@ -362,6 +392,27 @@ def _cmd_compute(args: argparse.Namespace) -> None:
     print(f"[pvtend] Done — wrote {n_total} NPZ files.")
 
 
+def _cmd_clim_helmholtz(args: argparse.Namespace) -> None:
+    """Execute the ``clim-helmholtz`` subcommand."""
+    import numpy as np
+    from pvtend.climatology import compute_helmholtz_climatology
+    from pvtend.grid import default_nh_grid
+
+    grid = default_nh_grid()
+    lat = grid.lat
+    lon = grid.lon
+
+    written = compute_helmholtz_climatology(
+        clim_dir=args.clim_dir,
+        output_dir=args.output_dir,
+        lat=lat,
+        lon=lon,
+        clim_stem=args.clim_stem,
+    )
+    print(f"[pvtend] Wrote {len(written)} Helmholtz climatology files "
+          f"to {args.output_dir}")
+
+
 def _cmd_classify(args: argparse.Namespace) -> None:
     """Execute the ``classify`` subcommand (Pass 1)."""
     from pvtend.classify import ClassifyConfig, run_pass1
@@ -450,6 +501,7 @@ def main(argv: list[str] | None = None) -> int:
 
     dispatch = {
         "compute": _cmd_compute,
+        "clim-helmholtz": _cmd_clim_helmholtz,
         "classify": _cmd_classify,
         "composite": _cmd_composite,
         "decompose": _cmd_decompose,

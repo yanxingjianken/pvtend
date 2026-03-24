@@ -49,10 +49,12 @@ The CSVs are the inputs for `pvtend-pipeline compute`, which extracts event-cent
 
 ## Features
 
+- **Helmholtz-first architecture** (v2.0): Helmholtz decomposition on the **total wind** field; climatological Helmholtz pre-computed as 24 monthly NetCDF files; anomaly Helmholtz = total − clim (no separate anomaly solve)
+- **53 cross-term PV tendency budget**: 20 primary + 16 alt-vertical + 16 div dry/moist horizontal + Q_LHR, all written per-timestep to NPZ
 - **PV tendency computation**: RHS has zonal advection, baroclinic counter propagation, vertical advection, and approximated diabatic heating terms.
 - **QG omega solver**: Hoskins Q-vector formulation with **two methods**: LOG20/SIP (default, Numba-accelerated 3-D elliptic, Li & O'Gorman 2020) and SP19 (Steinfeld & Pfahl 2019 empirical 1/3 scaling). Optional `center_lat` for dynamic f₀.
 - **Helmholtz decomposition**: Spherical vorticity/divergence (with tan φ/a metric), conservative spherical Poisson solver (FFT in lon + tridiagonal in lat), spectral gradient for wind recovery — all on the full NH grid
-- **Three-way omega decomposition**: ω_dry (QG A+B), ω_qg_moist (term C via ∂T/∂t), ω_moist (full residual), with corresponding divergent winds recovered by spherical Poisson inversion
+- **Four-way omega decomposition**: ω_dry (QG A+B), ω_qg_moist (term C via ∂T/∂t), ω_emanuel_moist (Emanuel LHR), ω_moist (full residual), with corresponding divergent winds recovered by **independent** spherical Poisson inversion (verified linear to machine precision)
 - **Orthogonal basis decomposition**: Projects PV tendency onto intensification (β), propagation (αx, αy), and deformation (γ) modes
 - **RWB detection**: Two classification methods — **bay** (path-order, recommended with circumpolar-cropped contours) and **tilt** (centerline slope ±0.15 dead zone). Circumpolar-first contour extraction for robust NH analysis.
 - **Composite lifecycle**: Multi-stage ensemble averaging with onset/peak/decay staging
@@ -102,12 +104,18 @@ print(f"β = {result['beta']:.3e}")  # intensification rate
 ### CLI Pipeline
 
 ```bash
+# Step 0a: Pre-compute Helmholtz climatology (once, ~5 min)
+pvtend-pipeline clim-helmholtz \
+    --clim-dir /data/climatology/ \
+    --out-dir /data/climatology/
+
 # Step 1: Compute PV tendencies → per-event NPZ files
 pvtend-pipeline compute \
     --event-type blocking \
     --events-csv events.csv \
     --era5-dir /data/era5/ \
     --clim-path /data/climatology/era5_hourly_clim.nc \
+    --clim-helmholtz-dir /data/climatology/ \
     --out-dir /data/composite_blocking_tempest/ \
     --dh-range=-49:25 --skip-existing
 
@@ -139,12 +147,16 @@ graph TD
     B --> C[Regridded NH Grid]
     C --> D[pvtend.climatology]
     D --> E[Monthly Climatology]
-    C & E --> F[pvtend.tendency.TendencyComputer]
+    E --> E2[pvtend.climatology — clim-helmholtz]
+    E2 --> E3[24 Helmholtz Clim NetCDF]
+    C & E & E3 --> F[pvtend.tendency.TendencyComputer]
     F --> G[PV Tendency Terms]
+    F --> I[pvtend.helmholtz — Helmholtz on total wind]
+    I --> I2[u_rot, u_div, v_rot, v_div]
+    I2 & E3 --> I3[Anomaly Helmholtz = total − clim]
     G --> H[pvtend.omega — QG ω solver]
-    G --> I[pvtend.helmholtz — Helmholtz decomp.]
-    H & I --> J[pvtend.moist_dry — ω splitting]
-    G & J --> K[Per-event NPZ patches]
+    H & I2 --> J[pvtend.moist_dry — ω splitting + 4 independent Poisson inversions]
+    G & J & I3 --> K[Per-event NPZ patches — 53 cross-terms]
     K --> L1[pvtend.classify — RWB Pass 1]
     L1 --> L1a[rwb_variant_tracksets.pkl]
     K & L1a --> L2[pvtend.composite_builder — Pass 2]
@@ -160,17 +172,17 @@ graph TD
 src/pvtend/
 ├── __init__.py          # Public API
 ├── _version.py          # Version
-├── cli.py               # CLI entry point (compute, classify, composite, decompose)
+├── cli.py               # CLI entry point (clim-helmholtz, compute, classify, composite, decompose)
 ├── constants.py         # Physical constants
 ├── grid.py              # NH grid & event patches
 ├── preprocessing.py     # ERA5 loading & regridding
 ├── derivatives.py       # Finite difference operators
-├── climatology.py       # Fourier-filtered climatology
+├── climatology.py       # Fourier-filtered climatology + Helmholtz climatology (compute/load)
 ├── omega.py             # QG omega solver (LOG20/SIP or SP19)
 ├── helmholtz.py         # Helmholtz decomposition (spherical Poisson + spectral gradient + laplacian_spherical_fft)
-├── moist_dry.py         # Moist/dry omega split & independent Poisson wind recovery (solve_chi_from_omega)
+├── moist_dry.py         # Moist/dry omega split & independent Poisson wind recovery (solve_chi_from_omega, verify_div_additivity)
 ├── isentropic.py        # Isentropic PV-tendency diagnostics
-├── tendency.py          # Main pipeline: data loading, derivatives, cross-terms, NPZ output
+├── tendency.py          # Main pipeline: Helmholtz-first, 53 cross-terms, data loading, derivatives, NPZ output
 ├── classify.py          # RWB classification Pass 1 (AWB/CWB/NEUTRAL → variant PKL)
 ├── composite_builder.py # Variant-aware composite accumulation Pass 2
 ├── rwb.py               # RWB detection (bay & tilt methods, circumpolar-first)

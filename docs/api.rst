@@ -61,11 +61,18 @@ The climatology is smoothed in time (day-of-year) using a low-pass
 **Fourier filter** (4 harmonics) and optionally with 2 zonal modes,
 producing per-variable, per-month NetCDF files for anomaly computation.
 
+The **Helmholtz climatology** pre-computes the rotational/divergent
+decomposition of the climatological wind for each month (24 NetCDF
+files).  These are loaded during the tendency pipeline to compute
+anomaly Helmholtz fields by subtraction.
+
 .. autosummary::
    :toctree: generated/
 
    compute_climatology
    load_climatology
+   compute_helmholtz_climatology
+   load_helmholtz_climatology
 
 
 .. _qg-omega:
@@ -429,6 +436,7 @@ horizontal divergent wind.
 
    decompose_omega
    solve_chi_from_omega
+   verify_div_additivity
 
 
 Orthogonal Basis Decomposition
@@ -601,27 +609,32 @@ Convenience wrappers handle multi-event NPZ data directly.
 Tendency Pipeline
 -----------------
 
-Orchestrates the full per-event computation:
+Orchestrates the full per-event computation (Helmholtz-first, v2.0):
 
 1. Load ERA5 data for the time window (including specific humidity *q*).
 2. Subtract hourly climatology → anomalies; compute :math:`\partial T/\partial t`.
 3. Compute all spatial / temporal derivatives, including Emanuel (1987)
    LHR :math:`\dot\theta_\text{LHR}` and :math:`Q_\text{LHR}`.
-4. Helmholtz decomposition on the full NH hemisphere (spherical Poisson).
-5. QG omega (SIP, terms A+B) → :math:`\omega_\text{dry}`.
-6. QG omega (SIP, terms A+B+\ :math:`C_\text{LOG20}` with
+4. **Helmholtz on total wind** (full NH, spherical Poisson) →
+   :math:`(u_\text{rot}, u_\text{div}, v_\text{rot}, v_\text{div})`.
+5. Load pre-computed **Helmholtz climatology** (24 monthly NetCDF files)
+   → :math:`(\bar u_\text{rot}, \bar u_\text{div}, \bar v_\text{rot}, \bar v_\text{div})`.
+6. **Anomaly Helmholtz** = total − clim (no separate anomaly solve).
+7. QG omega (SIP, terms A+B) → :math:`\omega_\text{dry}`.
+8. QG omega (SIP, terms A+B+\ :math:`C_\text{LOG20}` with
    :math:`\partial T/\partial t`) →
    :math:`\omega_\text{qg\_moist} = \omega_{A+B+C} - \omega_{A+B}`.
-7. QG omega (SIP, terms A+B+\ :math:`C_\text{em}` with Emanuel LHR) →
+9. QG omega (SIP, terms A+B+\ :math:`C_\text{em}` with Emanuel LHR) →
    :math:`\omega_\text{em\_moist} = \omega_{A+B+C_\text{em}} - \omega_{A+B}`.
-8. Moist / dry decomposition →
-   :math:`\omega_\text{moist}`, :math:`\omega_\text{qg\_moist}`,
-   :math:`\omega_\text{em\_moist}`,
-   and their divergent winds via spherical Poisson inversion.
-9. Extract event-centred patches.
-10. Compute PV cross-terms (dry, moist, QG-moist, Emanuel-moist) and
+10. Moist / dry decomposition →
+    :math:`\omega_\text{moist}`, :math:`\omega_\text{qg\_moist}`,
+    :math:`\omega_\text{em\_moist}`,
+    and their divergent winds via **independent** spherical Poisson inversion.
+11. Extract event-centred patches.
+12. Compute **53 PV cross-terms** (20 primary + 16 alt-vertical +
+    16 div dry/moist horizontal + :math:`Q_\text{LHR}`) and
     vertical weighted averages.
-11. Write per-timestep NPZ files.
+13. Write per-timestep NPZ files.
 
 :class:`TendencyComputer` is parameterised by event type
 (blocking / PRP), eliminating code duplication between scripts.
