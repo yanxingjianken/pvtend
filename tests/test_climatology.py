@@ -75,11 +75,12 @@ class TestHelmholtzClimatologyRoundTrip:
         result = load_helmholtz_climatology(
             clim_env["out_dir"], month=1, clim_stem=clim_env["stem"],
         )
+        nday = 2  # synthetic fixture has nday=2
         nhour, nlev = clim_env["nhour"], clim_env["nlev"]
         nlat, nlon = clim_env["nlat"], clim_env["nlon"]
         for key in ("u_rot_bar", "u_div_bar", "v_rot_bar", "v_div_bar"):
             assert key in result
-            assert result[key].shape == (nhour, nlev, nlat, nlon)
+            assert result[key].shape == (nday, nhour, nlev, nlat, nlon)
 
     def test_load_missing_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError, match="Helmholtz climatology not found"):

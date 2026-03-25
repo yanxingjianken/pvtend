@@ -333,47 +333,49 @@ def compute_helmholtz_climatology(
         ds_v = xr.open_dataset(v_path, engine=engine)
 
         # Climatology files are 6-D: (month, day, hour, level, lat, lon).
-        # Average over month and day → (hour, level, lat, lon) so
-        # tendency.py can index the first dim directly by hour (0–23).
-        u_bar = ds_u["u"].mean(dim=["month", "day"]).values  # (24, nlev, nlat, nlon)
-        v_bar = ds_v["v"].mean(dim=["month", "day"]).values
+        # Average over month (single element) but KEEP day dimension so
+        # tendency.py can index by (day, hour) → (day, hour, level, lat, lon).
+        u_bar = ds_u["u"].mean(dim="month").values  # (nday, 24, nlev, nlat, nlon)
+        v_bar = ds_v["v"].mean(dim="month").values
 
-        nt = u_bar.shape[0]    # 24 hours
-        nlev = u_bar.shape[1]  # 9 pressure levels
+        nday = u_bar.shape[0]
+        nt = u_bar.shape[1]    # 24 hours
+        nlev = u_bar.shape[2]  # 9 pressure levels
 
         u_rot_bar = np.zeros_like(u_bar)
         u_div_bar = np.zeros_like(u_bar)
         v_rot_bar = np.zeros_like(v_bar)
         v_div_bar = np.zeros_like(v_bar)
 
-        for ti in range(nt):
-            for li in range(nlev):
-                u2d = u_bar[ti, li]
-                v2d = v_bar[ti, li]
-                if flip_lat:
-                    u2d = u2d[::-1]
-                    v2d = v2d[::-1]
-                helm = helmholtz_decomposition(
-                    u2d, v2d, lat_asc, lon,
-                    R_earth=R_EARTH, method="spherical",
-                )
-                if flip_lat:
-                    u_rot_bar[ti, li] = helm["u_rot"][::-1]
-                    u_div_bar[ti, li] = helm["u_div"][::-1]
-                    v_rot_bar[ti, li] = helm["v_rot"][::-1]
-                    v_div_bar[ti, li] = helm["v_div"][::-1]
-                else:
-                    u_rot_bar[ti, li] = helm["u_rot"]
-                    u_div_bar[ti, li] = helm["u_div"]
-                    v_rot_bar[ti, li] = helm["v_rot"]
-                    v_div_bar[ti, li] = helm["v_div"]
+        for di in range(nday):
+            for ti in range(nt):
+                for li in range(nlev):
+                    u2d = u_bar[di, ti, li]
+                    v2d = v_bar[di, ti, li]
+                    if flip_lat:
+                        u2d = u2d[::-1]
+                        v2d = v2d[::-1]
+                    helm = helmholtz_decomposition(
+                        u2d, v2d, lat_asc, lon,
+                        R_earth=R_EARTH, method="spherical",
+                    )
+                    if flip_lat:
+                        u_rot_bar[di, ti, li] = helm["u_rot"][::-1]
+                        u_div_bar[di, ti, li] = helm["u_div"][::-1]
+                        v_rot_bar[di, ti, li] = helm["v_rot"][::-1]
+                        v_div_bar[di, ti, li] = helm["v_div"][::-1]
+                    else:
+                        u_rot_bar[di, ti, li] = helm["u_rot"]
+                        u_div_bar[di, ti, li] = helm["u_div"]
+                        v_rot_bar[di, ti, li] = helm["v_rot"]
+                        v_div_bar[di, ti, li] = helm["v_div"]
 
         ds_u.close()
         ds_v.close()
 
         # Write u-components
         u_out_path = output_dir / f"{clim_stem}_{month3}_u_helmholtz.nc"
-        dims = ["hour", "pressure_level", "latitude", "longitude"]
+        dims = ["day", "hour", "pressure_level", "latitude", "longitude"]
         ds_out = xr.Dataset({
             "u_rot_bar": (dims, u_rot_bar.astype(np.float32)),
             "u_div_bar": (dims, u_div_bar.astype(np.float32)),
@@ -413,7 +415,7 @@ def load_helmholtz_climatology(
     Returns:
         Dictionary with keys ``u_rot_bar``, ``u_div_bar``,
         ``v_rot_bar``, ``v_div_bar`` — each shape
-        ``(24, nlev, nlat, nlon)``  (hour × level × lat × lon).
+        ``(nday, 24, nlev, nlat, nlon)``  (day × hour × level × lat × lon).
 
     Raises:
         FileNotFoundError: If the Helmholtz climatology files are missing.

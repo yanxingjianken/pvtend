@@ -100,7 +100,7 @@ Two solver methods
    Li & O'Gorman (2020).  Numba-accelerated (``nogil=True``) when
    available (~3–6 s per event); falls back to pure-Python if ``numba``
    is not installed.  Always solved on the **full Northern Hemisphere**
-   grid (periodic in longitude, Dirichlet at equatorial and polar faces)
+   grid (periodic in longitude, Neumann at equatorial and polar faces)
    and the event patch is extracted afterward.
 
 2. **sp19** — Steinfeld & Pfahl (2019) empirical scaling.
@@ -277,9 +277,12 @@ Laplacian** (following MiniUFO/xinvert) that combines:
 * a tridiagonal solve in latitude with the full
   :math:`\cos\varphi` metric factors.
 
-This is the sole Poisson backend in v1.0.  The ``method`` keyword on
-:func:`helmholtz_decomposition` is accepted for API compatibility but
-ignored — all solves use the spherical FFT method.
+The solver supports both **Dirichlet** (default, for backward
+compatibility) and **Neumann** (ghost-point) boundary conditions in
+latitude via the ``bc_type`` parameter.  Since v2.1,
+:func:`helmholtz_decomposition` uses ``bc_type="neumann"`` with
+physical BCs derived from the ERA5 wind field, reducing the harmonic
+residual from ~44% to ~5% on the bounded NH domain.
 
 **References:** Lynch P (1989) *MWR* 117, 1492–1500.
 
@@ -617,7 +620,8 @@ Orchestrates the full per-event computation (Helmholtz-first, v2.0):
    LHR :math:`\dot\theta_\text{LHR}` and :math:`Q_\text{LHR}`.
 4. **Helmholtz on total wind** (full NH, spherical Poisson) →
    :math:`(u_\text{rot}, u_\text{div}, v_\text{rot}, v_\text{div})`.
-5. Load pre-computed **Helmholtz climatology** (24 monthly NetCDF files)
+5. Load pre-computed **Helmholtz climatology** (24 monthly NetCDF files,
+   day-resolved 5-D fields since v2.1)
    → :math:`(\bar u_\text{rot}, \bar u_\text{div}, \bar v_\text{rot}, \bar v_\text{div})`.
 6. **Anomaly Helmholtz** = total − clim (no separate anomaly solve).
 7. QG omega (SIP, terms A+B) → :math:`\omega_\text{dry}`.

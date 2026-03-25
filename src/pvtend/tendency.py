@@ -81,8 +81,8 @@ VARS_3D: list[str] = [
     # Climatological Helmholtz (v2.0)
     "u_rot_bar", "u_div_bar", "v_rot_bar", "v_div_bar",
     # Anomaly Helmholtz (total − clim)
-    "u_anom_rot", "u_anom_div", "u_anom_har",
-    "v_anom_rot", "v_anom_div", "v_anom_har",
+    "u_rot_anom", "u_div_anom", "u_har_anom",
+    "v_rot_anom", "v_div_anom", "v_har_anom",
     "u_div_moist", "v_div_moist",
     "u_div_dry", "v_div_dry",
     "u_div_qg_moist", "v_div_qg_moist",
@@ -103,8 +103,8 @@ _EXTRACT_VARS = [
     # Climatological Helmholtz (v2.0)
     "u_rot_bar", "u_div_bar", "v_rot_bar", "v_div_bar",
     # Anomaly Helmholtz (total − clim)
-    "u_anom_rot", "u_anom_div", "u_anom_har",
-    "v_anom_rot", "v_anom_div", "v_anom_har",
+    "u_rot_anom", "u_div_anom", "u_har_anom",
+    "v_rot_anom", "v_div_anom", "v_har_anom",
     "z_bar", "t_bar",
 ]
 
@@ -943,14 +943,16 @@ def with_derivs_for_window(
     for ti, t in enumerate(times):
         m = t.month
         hr = t.hour
+        day = t.day  # 1-based calendar day
         ch = clim_helm_cache[m]
-        # Climatology files have shape (nt_clim, nlev, nlat, nlon)
-        # where nt_clim is the number of hours; index by hour
-        if ch["u_rot_bar"].shape[0] > hr:
-            u_rot_bar_4d[ti] = ch["u_rot_bar"][hr]
-            u_div_bar_4d[ti] = ch["u_div_bar"][hr]
-            v_rot_bar_4d[ti] = ch["v_rot_bar"][hr]
-            v_div_bar_4d[ti] = ch["v_div_bar"][hr]
+        # Climatology files now have shape (nday, 24, nlev, nlat, nlon)
+        # Index by (day-1, hour) for daily-hourly resolution
+        di = day - 1  # 0-based day index
+        if di < ch["u_rot_bar"].shape[0] and hr < ch["u_rot_bar"].shape[1]:
+            u_rot_bar_4d[ti] = ch["u_rot_bar"][di, hr]
+            u_div_bar_4d[ti] = ch["u_div_bar"][di, hr]
+            v_rot_bar_4d[ti] = ch["v_rot_bar"][di, hr]
+            v_div_bar_4d[ti] = ch["v_div_bar"][di, hr]
 
     for name, arr in [
         ("u_rot_bar", u_rot_bar_4d), ("u_div_bar", u_div_bar_4d),
@@ -959,12 +961,12 @@ def with_derivs_for_window(
         ds[name] = xr.DataArray(arr, dims=dims4d, coords=coords4d)
 
     # ── Anomaly Helmholtz by subtraction: u'_rot = u_rot − ū_rot ──
-    ds["u_anom_rot"] = ds["u_rot"] - ds["u_rot_bar"]
-    ds["u_anom_div"] = ds["u_div"] - ds["u_div_bar"]
-    ds["u_anom_har"] = xr.DataArray(u_har_all, dims=dims4d, coords=coords4d)
-    ds["v_anom_rot"] = ds["v_rot"] - ds["v_rot_bar"]
-    ds["v_anom_div"] = ds["v_div"] - ds["v_div_bar"]
-    ds["v_anom_har"] = xr.DataArray(v_har_all, dims=dims4d, coords=coords4d)
+    ds["u_rot_anom"] = ds["u_rot"] - ds["u_rot_bar"]
+    ds["u_div_anom"] = ds["u_div"] - ds["u_div_bar"]
+    ds["u_har_anom"] = xr.DataArray(u_har_all, dims=dims4d, coords=coords4d)
+    ds["v_rot_anom"] = ds["v_rot"] - ds["v_rot_bar"]
+    ds["v_div_anom"] = ds["v_div"] - ds["v_div_bar"]
+    ds["v_har_anom"] = xr.DataArray(v_har_all, dims=dims4d, coords=coords4d)
 
     _log("  Climatological Helmholtz loaded; anomaly Helmholtz computed by subtraction")
 
@@ -1282,19 +1284,19 @@ class TendencyComputer:
             wbar_pvbar_dp_3d = cube3d["w_bar"] * cube3d["pv_bar_dp"]
 
             # ── 16 Helmholtz primary (anom + bar rot/div) ──
-            uanom_rot_pvbar_dx_3d = cube3d["u_anom_rot"] * cube3d["pv_bar_dx"]
-            uanom_rot_pvanom_dx_3d = cube3d["u_anom_rot"] * cube3d["pv_anom_dx"]
-            uanom_div_pvbar_dx_3d = cube3d["u_anom_div"] * cube3d["pv_bar_dx"]
-            uanom_div_pvanom_dx_3d = cube3d["u_anom_div"] * cube3d["pv_anom_dx"]
+            urot_anom_pvbar_dx_3d = cube3d["u_rot_anom"] * cube3d["pv_bar_dx"]
+            urot_anom_pvanom_dx_3d = cube3d["u_rot_anom"] * cube3d["pv_anom_dx"]
+            udiv_anom_pvbar_dx_3d = cube3d["u_div_anom"] * cube3d["pv_bar_dx"]
+            udiv_anom_pvanom_dx_3d = cube3d["u_div_anom"] * cube3d["pv_anom_dx"]
             urot_bar_pvbar_dx_3d = cube3d["u_rot_bar"] * cube3d["pv_bar_dx"]
             urot_bar_pvanom_dx_3d = cube3d["u_rot_bar"] * cube3d["pv_anom_dx"]
             udiv_bar_pvbar_dx_3d = cube3d["u_div_bar"] * cube3d["pv_bar_dx"]
             udiv_bar_pvanom_dx_3d = cube3d["u_div_bar"] * cube3d["pv_anom_dx"]
 
-            vanom_rot_pvbar_dy_3d = cube3d["v_anom_rot"] * cube3d["pv_bar_dy"]
-            vanom_rot_pvanom_dy_3d = cube3d["v_anom_rot"] * cube3d["pv_anom_dy"]
-            vanom_div_pvbar_dy_3d = cube3d["v_anom_div"] * cube3d["pv_bar_dy"]
-            vanom_div_pvanom_dy_3d = cube3d["v_anom_div"] * cube3d["pv_anom_dy"]
+            vrot_anom_pvbar_dy_3d = cube3d["v_rot_anom"] * cube3d["pv_bar_dy"]
+            vrot_anom_pvanom_dy_3d = cube3d["v_rot_anom"] * cube3d["pv_anom_dy"]
+            vdiv_anom_pvbar_dy_3d = cube3d["v_div_anom"] * cube3d["pv_bar_dy"]
+            vdiv_anom_pvanom_dy_3d = cube3d["v_div_anom"] * cube3d["pv_anom_dy"]
             vrot_bar_pvbar_dy_3d = cube3d["v_rot_bar"] * cube3d["pv_bar_dy"]
             vrot_bar_pvanom_dy_3d = cube3d["v_rot_bar"] * cube3d["pv_anom_dy"]
             vdiv_bar_pvbar_dy_3d = cube3d["v_div_bar"] * cube3d["pv_bar_dy"]
@@ -1400,12 +1402,12 @@ class TendencyComputer:
                     v_rot_bar=vw(cube3d["v_rot_bar"]),
                     v_div_bar=vw(cube3d["v_div_bar"]),
                     # Anomaly Helmholtz
-                    u_anom_rot=vw(cube3d["u_anom_rot"]),
-                    u_anom_div=vw(cube3d["u_anom_div"]),
-                    u_anom_har=vw(cube3d["u_anom_har"]),
-                    v_anom_rot=vw(cube3d["v_anom_rot"]),
-                    v_anom_div=vw(cube3d["v_anom_div"]),
-                    v_anom_har=vw(cube3d["v_anom_har"]),
+                    u_rot_anom=vw(cube3d["u_rot_anom"]),
+                    u_div_anom=vw(cube3d["u_div_anom"]),
+                    u_har_anom=vw(cube3d["u_har_anom"]),
+                    v_rot_anom=vw(cube3d["v_rot_anom"]),
+                    v_div_anom=vw(cube3d["v_div_anom"]),
+                    v_har_anom=vw(cube3d["v_har_anom"]),
                     u_div_moist=vw(cube3d["u_div_moist"]),
                     v_div_moist=vw(cube3d["v_div_moist"]),
                     u_div_dry=vw(cube3d["u_div_dry"]),
@@ -1436,18 +1438,18 @@ class TendencyComputer:
                     w_bar_pv_anom_dp=vw(wbar_pvanom_dp_3d),
                     w_bar_pv_bar_dp=vw(wbar_pvbar_dp_3d),
                     # 16 Helmholtz (anom + bar rot/div)
-                    u_anom_rot_pv_bar_dx=vw(uanom_rot_pvbar_dx_3d),
-                    u_anom_rot_pv_anom_dx=vw(uanom_rot_pvanom_dx_3d),
-                    u_anom_div_pv_bar_dx=vw(uanom_div_pvbar_dx_3d),
-                    u_anom_div_pv_anom_dx=vw(uanom_div_pvanom_dx_3d),
+                    u_rot_anom_pv_bar_dx=vw(urot_anom_pvbar_dx_3d),
+                    u_rot_anom_pv_anom_dx=vw(urot_anom_pvanom_dx_3d),
+                    u_div_anom_pv_bar_dx=vw(udiv_anom_pvbar_dx_3d),
+                    u_div_anom_pv_anom_dx=vw(udiv_anom_pvanom_dx_3d),
                     u_rot_bar_pv_bar_dx=vw(urot_bar_pvbar_dx_3d),
                     u_rot_bar_pv_anom_dx=vw(urot_bar_pvanom_dx_3d),
                     u_div_bar_pv_bar_dx=vw(udiv_bar_pvbar_dx_3d),
                     u_div_bar_pv_anom_dx=vw(udiv_bar_pvanom_dx_3d),
-                    v_anom_rot_pv_bar_dy=vw(vanom_rot_pvbar_dy_3d),
-                    v_anom_rot_pv_anom_dy=vw(vanom_rot_pvanom_dy_3d),
-                    v_anom_div_pv_bar_dy=vw(vanom_div_pvbar_dy_3d),
-                    v_anom_div_pv_anom_dy=vw(vanom_div_pvanom_dy_3d),
+                    v_rot_anom_pv_bar_dy=vw(vrot_anom_pvbar_dy_3d),
+                    v_rot_anom_pv_anom_dy=vw(vrot_anom_pvanom_dy_3d),
+                    v_div_anom_pv_bar_dy=vw(vdiv_anom_pvbar_dy_3d),
+                    v_div_anom_pv_anom_dy=vw(vdiv_anom_pvanom_dy_3d),
                     v_rot_bar_pv_bar_dy=vw(vrot_bar_pvbar_dy_3d),
                     v_rot_bar_pv_anom_dy=vw(vrot_bar_pvanom_dy_3d),
                     v_div_bar_pv_bar_dy=vw(vdiv_bar_pvbar_dy_3d),
@@ -1518,12 +1520,12 @@ class TendencyComputer:
                     v_rot_bar_3d=cube3d["v_rot_bar"],
                     v_div_bar_3d=cube3d["v_div_bar"],
                     # Anomaly Helmholtz 3-D
-                    u_anom_rot_3d=cube3d["u_anom_rot"],
-                    u_anom_div_3d=cube3d["u_anom_div"],
-                    u_anom_har_3d=cube3d["u_anom_har"],
-                    v_anom_rot_3d=cube3d["v_anom_rot"],
-                    v_anom_div_3d=cube3d["v_anom_div"],
-                    v_anom_har_3d=cube3d["v_anom_har"],
+                    u_rot_anom_3d=cube3d["u_rot_anom"],
+                    u_div_anom_3d=cube3d["u_div_anom"],
+                    u_har_anom_3d=cube3d["u_har_anom"],
+                    v_rot_anom_3d=cube3d["v_rot_anom"],
+                    v_div_anom_3d=cube3d["v_div_anom"],
+                    v_har_anom_3d=cube3d["v_har_anom"],
                     u_div_moist_3d=cube3d["u_div_moist"],
                     v_div_moist_3d=cube3d["v_div_moist"],
                     u_div_dry_3d=cube3d["u_div_dry"],
@@ -1551,18 +1553,18 @@ class TendencyComputer:
                     w_anom_pv_anom_dp_3d=wanom_pvanom_dp_3d,
                     w_bar_pv_anom_dp_3d=wbar_pvanom_dp_3d,
                     w_bar_pv_bar_dp_3d=wbar_pvbar_dp_3d,
-                    u_anom_rot_pv_bar_dx_3d=uanom_rot_pvbar_dx_3d,
-                    u_anom_rot_pv_anom_dx_3d=uanom_rot_pvanom_dx_3d,
-                    u_anom_div_pv_bar_dx_3d=uanom_div_pvbar_dx_3d,
-                    u_anom_div_pv_anom_dx_3d=uanom_div_pvanom_dx_3d,
+                    u_rot_anom_pv_bar_dx_3d=urot_anom_pvbar_dx_3d,
+                    u_rot_anom_pv_anom_dx_3d=urot_anom_pvanom_dx_3d,
+                    u_div_anom_pv_bar_dx_3d=udiv_anom_pvbar_dx_3d,
+                    u_div_anom_pv_anom_dx_3d=udiv_anom_pvanom_dx_3d,
                     u_rot_bar_pv_bar_dx_3d=urot_bar_pvbar_dx_3d,
                     u_rot_bar_pv_anom_dx_3d=urot_bar_pvanom_dx_3d,
                     u_div_bar_pv_bar_dx_3d=udiv_bar_pvbar_dx_3d,
                     u_div_bar_pv_anom_dx_3d=udiv_bar_pvanom_dx_3d,
-                    v_anom_rot_pv_bar_dy_3d=vanom_rot_pvbar_dy_3d,
-                    v_anom_rot_pv_anom_dy_3d=vanom_rot_pvanom_dy_3d,
-                    v_anom_div_pv_bar_dy_3d=vanom_div_pvbar_dy_3d,
-                    v_anom_div_pv_anom_dy_3d=vanom_div_pvanom_dy_3d,
+                    v_rot_anom_pv_bar_dy_3d=vrot_anom_pvbar_dy_3d,
+                    v_rot_anom_pv_anom_dy_3d=vrot_anom_pvanom_dy_3d,
+                    v_div_anom_pv_bar_dy_3d=vdiv_anom_pvbar_dy_3d,
+                    v_div_anom_pv_anom_dy_3d=vdiv_anom_pvanom_dy_3d,
                     v_rot_bar_pv_bar_dy_3d=vrot_bar_pvbar_dy_3d,
                     v_rot_bar_pv_anom_dy_3d=vrot_bar_pvanom_dy_3d,
                     v_div_bar_pv_bar_dy_3d=vdiv_bar_pvbar_dy_3d,

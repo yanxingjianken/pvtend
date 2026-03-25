@@ -279,27 +279,30 @@ def solve_poisson_spherical_fft(
     dy: float,
     dlon_rad: float,
     R_earth: float = R_EARTH,
+    bc_type: str = "dirichlet",
+    bc_south: np.ndarray | None = None,
+    bc_north: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Solve the spherical Poisson equation — periodic in λ, Dirichlet in φ.
+    """Solve the spherical Poisson equation — periodic in λ, configurable φ BCs.
 
     Solves the full spherical Laplacian on a lat-lon grid:
 
         (1/(a²cos²φ)) ∂²χ/∂λ² + (1/a²cosφ) ∂/∂φ(cosφ ∂χ/∂φ) = f
 
     Uses the **conservative (divergence) form** for the meridional
-    operator — following xinvert (MiniUFO) — which naturally includes
-    the −tan(φ) curvature term without explicit first-derivative
-    discretisation.  Multiply through by a²cosφ:
+    operator — following xinvert (MiniUFO).  Multiply through by a²cosφ:
 
         (1/cosφ) ∂²χ/∂λ² + ∂/∂φ(cosφ ∂χ/∂φ) = f · a² · cosφ
 
-    The meridional tridiagonal coefficients become:
+    Two boundary condition types in φ:
 
-        a_j = cos(φ_{j−½}) / Δφ²
-        c_j = cos(φ_{j+½}) / Δφ²
-        b_j = λ_k / (cos(φ_j) · Δλ²) − (a_j + c_j) / Δφ²
-
-    (but note a_j, c_j already contain 1/Δφ², stored without it below).
+    * ``"dirichlet"`` (legacy): χ = 0 at both φ boundaries.
+      Solves interior rows only (nlat−2 unknowns).
+    * ``"neumann"`` (default, Li et al. 2006): ∂χ/∂φ = g at boundaries.
+      *bc_south* and *bc_north* are the prescribed ∂χ/∂φ values (1-D,
+      shape ``(nlon,)``).  Solves the full nlat system with the
+      boundary rows replaced by one-sided FD conditions.  This
+      minimises the harmonic residual in bounded domains.
 
     Args:
         rhs: Right-hand side of ∇²χ = rhs, shape ``(nlat, nlon)``.
@@ -307,15 +310,20 @@ def solve_poisson_spherical_fft(
         dy: Meridional grid spacing a·Δφ [m].
         dlon_rad: Longitudinal grid spacing Δλ in **radians**.
         R_earth: Earth radius [m].
+        bc_type: ``"dirichlet"`` or ``"neumann"`` (default).
+        bc_south: ∂χ/∂φ at the south boundary, shape ``(nlon,)``.
+            Required when *bc_type* is ``"neumann"``.
+        bc_north: ∂χ/∂φ at the north boundary, shape ``(nlon,)``.
+            Required when *bc_type* is ``"neumann"``.
 
     Returns:
-        Solution χ with Dirichlet BCs at lat boundaries,
-        shape ``(nlat, nlon)``.
+        Solution χ, shape ``(nlat, nlon)``.
+
+    References:
+        Li Z, Chao Y, McWilliams JC (2006) MWR 134, 3384–3394.
+        Lynch P (1989) MWR 117, 1492–1500.
     """
     nlat, nlon = rhs.shape
-    ni = nlat - 2
-    if ni == 0:
-        return np.zeros_like(rhs)
 
     lat_rad = np.deg2rad(lat)
     cos_phi = np.cos(lat_rad)                      # (nlat,)
@@ -326,31 +334,92 @@ def solve_poisson_spherical_fft(
     # Half-grid cosines: cos(φ_{j+½})
     cos_half = np.cos(0.5 * (lat_rad[:-1] + lat_rad[1:]))  # (nlat-1,)
 
-    # ── Scale RHS: f_scaled = f · a² · cosφ  (but our rhs is already
-    #    in physical units of 1/s, so scale by R_earth² · cosφ)
+    # ── Scale RHS: f_scaled = f · a² · cosφ
     rhs_scaled = rhs * (R_earth ** 2) * cos_phi[:, None]
 
     rhs_hat = np.fft.fft(rhs_scaled, axis=1)
+
+    if bc_type == "dirichlet":
+        # Legacy path: solve interior rows only (nlat−2 unknowns)
+        ni = nlat - 2
+        if ni == 0:
+            return np.zeros_like(rhs)
+        phi_hat = np.zeros_like(rhs_hat)
+        for kk in range(nlon):
+            lam_k = 2.0 * (np.cos(2.0 * np.pi * kk / nlon) - 1.0)
+            a_vec = np.empty(ni)
+            c_vec = np.empty(ni)
+            b_vec = np.empty(ni)
+            f_vec = np.empty(ni, dtype=complex)
+            for j in range(ni):
+                jg = j + 1
+                a_vec[j] = cos_half[jg - 1] / dphi2
+                c_vec[j] = cos_half[jg] / dphi2
+                b_vec[j] = lam_k / (cos_phi[jg] * dlam2) - (a_vec[j] + c_vec[j])
+                f_vec[j] = rhs_hat[jg, kk]
+            phi_hat[1:-1, kk] = _thomas(a_vec, b_vec, c_vec, f_vec)
+        return np.fft.ifft(phi_hat, axis=1).real
+
+    # ── Neumann path: ghost-point approach ──
+    # Uses a ghost point at each φ boundary so the Laplacian stencil
+    # extends to the boundary rows.  The Neumann BC ∂χ/∂φ = g fixes
+    # the ghost-point value, and the known term is moved to the RHS.
+    if bc_south is None or bc_north is None:
+        raise ValueError("bc_south and bc_north required for neumann BCs")
+
+    # FFT the boundary Neumann data
+    bc_south_hat = np.fft.fft(bc_south)
+    bc_north_hat = np.fft.fft(bc_north)
+
+    # Half-grid cosines at the domain boundaries (ghost-point half-levels)
+    cos_half_south = np.cos(lat_rad[0] - 0.5 * dphi)   # below south boundary
+    cos_half_north = np.cos(lat_rad[-1] + 0.5 * dphi)   # above north boundary
+
     phi_hat = np.zeros_like(rhs_hat)
 
     for kk in range(nlon):
         lam_k = 2.0 * (np.cos(2.0 * np.pi * kk / nlon) - 1.0)
 
-        a_vec = np.empty(ni)     # sub-diagonal
-        c_vec = np.empty(ni)     # super-diagonal
-        b_vec = np.empty(ni)     # main diagonal
-        f_vec = np.empty(ni, dtype=complex)
+        a_vec = np.zeros(nlat)
+        c_vec = np.zeros(nlat)
+        b_vec = np.zeros(nlat)
+        f_vec = np.zeros(nlat, dtype=complex)
 
-        for j in range(ni):
-            jg = j + 1                             # global index
-            a_vec[j] = cos_half[jg - 1] / dphi2       # cos(φ_{j-½})
-            c_vec[j] = cos_half[jg] / dphi2           # cos(φ_{j+½})
-            b_vec[j] = lam_k / (cos_phi[jg] * dlam2) - (a_vec[j] + c_vec[j])
-            f_vec[j] = rhs_hat[jg, kk]
+        # For k=0 (zonal mean), the Neumann Laplacian has a constant
+        # null space.  Pin χ̂[0] = 0 to regularise; the area-weighted
+        # mean removal below adjusts the gauge afterwards.
+        if kk == 0:
+            b_vec[0] = 1.0
+            f_vec[0] = 0.0
+        else:
+            # Row 0 (south): ghost-point Neumann
+            # χ_ghost = χ[0] - Δφ·g_south  →  move known term to RHS
+            c_vec[0] = cos_half[0] / dphi2
+            b_vec[0] = lam_k / (cos_phi[0] * dlam2) - cos_half[0] / dphi2
+            f_vec[0] = rhs_hat[0, kk] + cos_half_south * bc_south_hat[kk] / dphi
 
-        phi_hat[1:-1, kk] = _thomas(a_vec, b_vec, c_vec, f_vec)
+        # Interior rows 1..nlat-2: standard Laplacian (unchanged)
+        for j in range(1, nlat - 1):
+            a_vec[j] = cos_half[j - 1] / dphi2
+            c_vec[j] = cos_half[j] / dphi2
+            b_vec[j] = lam_k / (cos_phi[j] * dlam2) - (a_vec[j] + c_vec[j])
+            f_vec[j] = rhs_hat[j, kk]
 
-    return np.fft.ifft(phi_hat, axis=1).real
+        # Row nlat-1 (north): ghost-point Neumann
+        # χ_ghost = χ[-1] + Δφ·g_north  →  move known term to RHS
+        a_vec[-1] = cos_half[-1] / dphi2
+        b_vec[-1] = lam_k / (cos_phi[-1] * dlam2) - cos_half[-1] / dphi2
+        f_vec[-1] = rhs_hat[-1, kk] - cos_half_north * bc_north_hat[kk] / dphi
+
+        phi_hat[:, kk] = _thomas(a_vec, b_vec, c_vec, f_vec)
+
+    result = np.fft.ifft(phi_hat, axis=1).real
+
+    # Pin solution: remove area-weighted mean (Neumann null space)
+    area_w = cos_phi / cos_phi.sum()
+    result -= np.sum(area_w[:, None] * result) / nlon
+
+    return result
 
 
 # ── DEPRECATED: solve_poisson_dct ───────────────────────────────────
@@ -489,9 +558,23 @@ def helmholtz_decomposition(
     div = div - div_mean
     vort = vort - vort_mean
 
-    # ── Spherical Poisson solve ──
-    chi = solve_poisson_spherical_fft(div, lat, dy, dlon_rad, R_earth=R_earth)
-    psi = solve_poisson_spherical_fft(vort, lat, dy, dlon_rad, R_earth=R_earth)
+    # ── Spherical Poisson solve (Neumann BCs: minimise harmonic) ──
+    # For ψ: ∂ψ/∂φ = −a·u at boundaries  (since u_rot = −(1/a)∂ψ/∂φ)
+    # For χ: ∂χ/∂φ =  a·v at boundaries  (since v_div =  (1/a)∂χ/∂φ)
+    dphi_bc = dy / R_earth  # Δφ in radians (consistent with solver)
+    bc_psi_south = -R_earth * u_work[0, :]   # ∂ψ/∂φ at south
+    bc_psi_north = -R_earth * u_work[-1, :]  # ∂ψ/∂φ at north
+    bc_chi_south = R_earth * v_work[0, :]    # ∂χ/∂φ at south
+    bc_chi_north = R_earth * v_work[-1, :]   # ∂χ/∂φ at north
+
+    chi = solve_poisson_spherical_fft(
+        div, lat, dy, dlon_rad, R_earth=R_earth,
+        bc_type="neumann", bc_south=bc_chi_south, bc_north=bc_chi_north,
+    )
+    psi = solve_poisson_spherical_fft(
+        vort, lat, dy, dlon_rad, R_earth=R_earth,
+        bc_type="neumann", bc_south=bc_psi_south, bc_north=bc_psi_north,
+    )
 
     dchi_dx, dchi_dy = gradient(chi, dx, dy)
     dpsi_dx, dpsi_dy = gradient(psi, dx, dy)

@@ -24,6 +24,7 @@
    .. autosummary::
    
       ~TendencyConfig.center_mode
+      ~TendencyConfig.clim_helmholtz_dir
       ~TendencyConfig.clim_path
       ~TendencyConfig.csv_path
       ~TendencyConfig.data_dir
