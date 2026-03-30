@@ -17,7 +17,7 @@ from .basis import (
 from ..constants import MASK_PV_THRESHOLD
 from .projection import project_field, collect_term_fields
 from .smoothing import gaussian_smooth_nan, fourier_lowpass_nan
-from .interpolation import lerp_fields, compute_pv_center
+from .interpolation import lerp_fields
 
 __all__ = [
     "OrthogonalBasisFields",
@@ -27,7 +27,6 @@ __all__ = [
     "gaussian_smooth_nan",
     "fourier_lowpass_nan",
     "lerp_fields",
-    "compute_pv_center",
     "PRENORM_PHI1",
     "PRENORM_PHI2",
     "PRENORM_PHI3",

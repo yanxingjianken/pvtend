@@ -194,7 +194,7 @@ src/pvtend/
 │   ├── __init__.py
 │   ├── smoothing.py
 │   ├── basis.py
-│   ├── interpolation.py # Temporal bi-linear interpolation (lerp_fields, compute_pv_center)
+│   ├── interpolation.py # Temporal bi-linear interpolation (lerp_fields)
 │   └── projection.py
 ├── plotting/            # Visualization
 │   ├── __init__.py

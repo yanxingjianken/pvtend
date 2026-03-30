@@ -35,36 +35,3 @@ def lerp_fields(
         out[k] = (1.0 - alpha) * np.asarray(fields_prev[k], dtype=np.float64) + \
                  alpha * np.asarray(fields_curr[k], dtype=np.float64)
     return out
-
-
-def compute_pv_center(
-    pv_anom: np.ndarray,
-    x_rel: np.ndarray,
-    y_rel: np.ndarray,
-) -> tuple[float, float]:
-    """Compute the abs(pv_anom)-weighted centroid over the pv_anom < 0 region.
-
-    Args:
-        pv_anom: 2-D PV anomaly field (ny, nx).
-        x_rel: 1-D or 2-D relative longitude array (degrees).
-        y_rel: 1-D or 2-D relative latitude array (degrees).
-
-    Returns:
-        (cx, cy) centroid in the same units as *x_rel* / *y_rel*.
-        Returns (0.0, 0.0) if no negative PV anomaly exists.
-    """
-    pv = np.asarray(pv_anom, dtype=np.float64)
-    if x_rel.ndim == 1 and y_rel.ndim == 1:
-        X, Y = np.meshgrid(x_rel, y_rel)
-    else:
-        X, Y = np.asarray(x_rel, dtype=np.float64), np.asarray(y_rel, dtype=np.float64)
-
-    mask = pv < 0
-    if not mask.any():
-        return 0.0, 0.0
-
-    w = np.abs(pv[mask])
-    w_sum = w.sum()
-    cx = float(np.sum(w * X[mask]) / w_sum)
-    cy = float(np.sum(w * Y[mask]) / w_sum)
-    return cx, cy

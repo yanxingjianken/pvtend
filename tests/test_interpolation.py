@@ -1,11 +1,11 @@
-"""Tests for lerp_fields and compute_pv_center."""
+"""Tests for lerp_fields."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from pvtend.decomposition.interpolation import lerp_fields, compute_pv_center
+from pvtend.decomposition.interpolation import lerp_fields
 from pvtend.decomposition.basis import compute_orthogonal_basis
 
 
@@ -53,46 +53,6 @@ class TestLerpFields:
         curr = {"foo": np.array([3.0, 4.0])}
         out = lerp_fields(prev, curr, alpha=0.5, keys=("foo",))
         np.testing.assert_allclose(out["foo"], [2.0, 3.0])
-
-
-class TestComputePvCenter:
-    """Weighted centroid of negative PV anomaly region."""
-
-    def test_single_negative_point(self):
-        pv = np.zeros((5, 5))
-        pv[2, 3] = -1.0
-        x = np.arange(5, dtype=float)
-        y = np.arange(5, dtype=float)
-        cx, cy = compute_pv_center(pv, x, y)
-        assert cx == pytest.approx(3.0)
-        assert cy == pytest.approx(2.0)
-
-    def test_symmetric_blob(self):
-        x = np.linspace(-5, 5, 11)
-        y = np.linspace(-5, 5, 11)
-        X, Y = np.meshgrid(x, y)
-        pv = -np.exp(-(X**2 + Y**2))  # centred Gaussian
-        cx, cy = compute_pv_center(pv, x, y)
-        assert cx == pytest.approx(0.0, abs=0.01)
-        assert cy == pytest.approx(0.0, abs=0.01)
-
-    def test_no_negative_returns_origin(self):
-        pv = np.ones((5, 5))  # all positive
-        x = np.arange(5, dtype=float)
-        y = np.arange(5, dtype=float)
-        cx, cy = compute_pv_center(pv, x, y)
-        assert cx == 0.0
-        assert cy == 0.0
-
-    def test_2d_coordinate_input(self):
-        x1d = np.array([0.0, 1.0, 2.0])
-        y1d = np.array([0.0, 1.0])
-        X, Y = np.meshgrid(x1d, y1d)
-        pv = np.zeros((2, 3))
-        pv[0, 2] = -1.0  # x=2, y=0
-        cx, cy = compute_pv_center(pv, X, Y)
-        assert cx == pytest.approx(2.0)
-        assert cy == pytest.approx(0.0)
 
 
 class TestBasisNextAPI:

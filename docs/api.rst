@@ -509,7 +509,6 @@ basis pipeline:
    :toctree: generated/
 
    lerp_fields
-   compute_pv_center
 
 .. autosummary::
    :toctree: generated/
