@@ -155,6 +155,10 @@ def compute_orthogonal_basis(
     smoothing_method: str = "gaussian",
     grid_spacing: float = 1.5,
     apply_lat_weighting: bool = False,
+    pv_anom_next: np.ndarray | None = None,
+    pv_dx_next: np.ndarray | None = None,
+    pv_dy_next: np.ndarray | None = None,
+    interp_alpha: float = 0.75,
 ) -> OrthogonalBasisFields:
     """Compute four orthogonal basis fields from composite PV fields.
 
@@ -175,10 +179,37 @@ def compute_orthogonal_basis(
         smoothing_method: 'gaussian' or 'fourier'.
         grid_spacing: Grid spacing in degrees.
         apply_lat_weighting: Use cos(lat) weighting.
+        pv_anom_next: PV anomaly q' at dh (the later snapshot). If provided,
+            ``pv_dx_next`` and ``pv_dy_next`` must also be given. The three
+            positional fields (``pv_anom``, ``pv_dx``, ``pv_dy``) are treated
+            as the earlier snapshot (dh-1) and linearly interpolated toward
+            the ``_next`` fields before basis construction.
+        pv_dx_next: Zonal PV gradient at dh.
+        pv_dy_next: Meridional PV gradient at dh.
+        interp_alpha: Interpolation weight for the *_next* fields.
+            Default 0.75 yields fields representative of 15 min before dh.
+            Ignored when ``_next`` fields are not provided.
 
     Returns:
         OrthogonalBasisFields container.
     """
+    # --- Optional temporal interpolation ---
+    _next_fields = (pv_anom_next, pv_dx_next, pv_dy_next)
+    _next_given = [f is not None for f in _next_fields]
+    if any(_next_given):
+        if not all(_next_given):
+            raise ValueError(
+                "Provide all three of pv_anom_next, pv_dx_next, "
+                "pv_dy_next, or none of them."
+            )
+        a = float(interp_alpha)
+        pv_anom = (1.0 - a) * np.asarray(pv_anom, dtype=np.float64) + \
+                  a * np.asarray(pv_anom_next, dtype=np.float64)
+        pv_dx = (1.0 - a) * np.asarray(pv_dx, dtype=np.float64) + \
+                a * np.asarray(pv_dx_next, dtype=np.float64)
+        pv_dy = (1.0 - a) * np.asarray(pv_dy, dtype=np.float64) + \
+                a * np.asarray(pv_dy_next, dtype=np.float64)
+
     # Step 1: Compute cross-derivative (before pre-normalization)
     raw_phi_def = compute_quadrupole_basis(pv_dx, y_rel)
 

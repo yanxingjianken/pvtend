@@ -253,8 +253,13 @@ def plot_var(
         dh_basis = max(dh - 1, -13)
         evs_b = load_events(data_root, stage, dh_basis) if dh_basis != dh else evs
         pv_b = np.nanmean([get_field(e, "pv_anom", level) for e in evs_b], axis=0)
-        dx_b = np.nanmean([get_field(e, "pv_anom_dx", level) for e in evs_b], axis=0)
-        dy_b = np.nanmean([get_field(e, "pv_anom_dy", level) for e in evs_b], axis=0)
+        dx_b = np.nanmean([get_field(e, "pv_dx", level) for e in evs_b], axis=0)
+        dy_b = np.nanmean([get_field(e, "pv_dy", level) for e in evs_b], axis=0)
+
+        # dh composite means for temporal interpolation
+        pv_n = np.nanmean([get_field(e, "pv_anom", level) for e in evs], axis=0)
+        dx_n = np.nanmean([get_field(e, "pv_dx", level) for e in evs], axis=0)
+        dy_n = np.nanmean([get_field(e, "pv_dy", level) for e in evs], axis=0)
 
         basis = compute_orthogonal_basis(
             pv_b, dx_b, dy_b, x_rel, y_rel,
@@ -262,6 +267,9 @@ def plot_var(
             apply_smoothing=True,
             smoothing_deg=smooth_deg,
             grid_spacing=grid_sp,
+            pv_anom_next=pv_n,
+            pv_dx_next=dx_n,
+            pv_dy_next=dy_n,
         )
 
         if use_sig_mask:

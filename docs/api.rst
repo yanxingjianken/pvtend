@@ -458,6 +458,59 @@ weakening:
 The projection coefficients :math:`c_i(t)` quantify each term's
 contribution to the blocking lifecycle at each timestep.
 
+Temporal down-scaling (bi-linear interpolation)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:func:`compute_orthogonal_basis` supports **temporal down-scaling** from
+hourly ERA5 snapshots to a sub-hourly evaluation instant via built-in
+bi-linear interpolation.  When the ``pv_anom_next``, ``pv_dx_next``, and
+``pv_dy_next`` keyword arguments are supplied (the fields at hour *dh*),
+the positional fields (at hour *dh − 1*) are interpolated before basis
+construction:
+
+.. math::
+
+   f_{\alpha} = (1 - \alpha)\,f_{dh-1} + \alpha\,f_{dh}
+
+The default :math:`\alpha = 0.75` places the evaluation instant at
+**dh − 15 min** (¾ of the way from *dh − 1* toward *dh*), effectively
+down-scaling from 1-hour to 15-minute temporal resolution.
+
+Because linear interpolation commutes with spatial differentiation on a
+fixed grid, the interpolated gradients satisfy
+:math:`\nabla f_{\alpha} = (1-\alpha)\,\nabla f_{dh-1} + \alpha\,\nabla f_{dh}`,
+and the cross-derivative :math:`\partial^2 q/\partial x\,\partial y`
+inherits the same property.
+
+.. list-table:: Temporal interpolation parameters
+   :widths: 25 50
+   :header-rows: 1
+
+   * - Parameter
+     - Description
+   * - ``pv_anom_next``
+     - PV anomaly :math:`q'` at *dh* (the later snapshot).
+   * - ``pv_dx_next``
+     - Zonal PV gradient :math:`\partial q/\partial x` at *dh*.
+   * - ``pv_dy_next``
+     - Meridional PV gradient :math:`\partial q/\partial y` at *dh*.
+   * - ``interp_alpha``
+     - Weight for the *_next* fields (default **0.75**).
+       Set to 0 to use only dh − 1, or 1 to use only dh.
+
+All three ``_next`` fields must be provided together (or none).
+When omitted the function falls back to the original single-snapshot
+behaviour with no interpolation.
+
+A standalone helper is also available for manual interpolation outside the
+basis pipeline:
+
+.. autosummary::
+   :toctree: generated/
+
+   lerp_fields
+   compute_pv_center
+
 .. autosummary::
    :toctree: generated/
 
@@ -785,7 +838,10 @@ Composite explorer
 :func:`~pvtend.plotting.plot_var` is a **self-contained** single-variable
 composite viewer that loads NPZ events, computes a bootstrap significance
 mask (N = 1000, 95 % CI by default), and optionally projects onto the
-dh − 1 orthogonal basis.
+orthogonal basis.  When ``projection=True`` the basis is built from
+temporally interpolated fields (bi-linear, :math:`\alpha = 0.75` by
+default, i.e. dh − 15 min) using the ``_next`` API of
+:func:`compute_orthogonal_basis`.
 
 **Two layout modes:**
 

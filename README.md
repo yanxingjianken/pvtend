@@ -55,7 +55,7 @@ The CSVs are the inputs for `pvtend-pipeline compute`, which extracts event-cent
 - **QG omega solver**: Hoskins Q-vector formulation with **two methods**: LOG20/SIP (default, Numba-accelerated 3-D elliptic, Li & O'Gorman 2020) and SP19 (Steinfeld & Pfahl 2019 empirical 1/3 scaling). Optional `center_lat` for dynamic f₀.
 - **Helmholtz decomposition**: Spherical vorticity/divergence (with tan φ/a metric), conservative spherical Poisson solver (FFT in lon + tridiagonal in lat), spectral gradient for wind recovery — all on the full NH grid
 - **Four-way omega decomposition**: ω_dry (QG A+B), ω_qg_moist (term C via ∂T/∂t), ω_emanuel_moist (Emanuel LHR), ω_moist (full residual), with corresponding divergent winds recovered by **independent** spherical Poisson inversion (verified linear to machine precision)
-- **Orthogonal basis decomposition**: Projects PV tendency onto intensification (β), propagation (αx, αy), and deformation (γ) modes
+- **Orthogonal basis decomposition**: Projects PV tendency onto intensification (β), propagation (αx, αy), and deformation (γ) modes. Built-in **temporal down-scaling** (bi-linear interpolation, α = 0.75 by default) from hourly to 15-minute evaluation instants via `_next` keyword arguments
 - **RWB detection**: Two classification methods — **bay** (path-order, recommended with circumpolar-cropped contours) and **tilt** (centerline slope ±0.15 dead zone). Circumpolar-first contour extraction for robust NH analysis.
 - **Composite lifecycle**: Multi-stage ensemble averaging with onset/peak/decay staging
 - **NaN-safe throughout**: All grid, derivative, solver, bootstrap, and plotting routines use `nanmean`/`nanpercentile` to handle partial-NaN edge events without corrupting composites or flipping projection signs
@@ -194,6 +194,7 @@ src/pvtend/
 │   ├── __init__.py
 │   ├── smoothing.py
 │   ├── basis.py
+│   ├── interpolation.py # Temporal bi-linear interpolation (lerp_fields, compute_pv_center)
 │   └── projection.py
 ├── plotting/            # Visualization
 │   ├── __init__.py

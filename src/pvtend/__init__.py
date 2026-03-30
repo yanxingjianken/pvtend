@@ -50,6 +50,8 @@ from pvtend.decomposition import (
     compute_orthogonal_basis,
     project_field,
     collect_term_fields,
+    lerp_fields,
+    compute_pv_center,
 )
 
 # Isentropic interpolation
@@ -107,6 +109,7 @@ __all__ = [
     # Decomposition
     "OrthogonalBasisFields", "compute_orthogonal_basis",
     "project_field", "collect_term_fields",
+    "lerp_fields", "compute_pv_center",
     # RWB
     "RWBConfig", "detect_rwb_events",
     "circumpolar_contours", "crop_contour_to_patch",
