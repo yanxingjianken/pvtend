@@ -2,13 +2,7 @@
 
 Provides :func:`plot_var` — a self-contained function that loads NPZ
 composites, computes bootstrap significance, and optionally projects
-onto the orthogonal basis.
-
-When ``projection=True``, each event builds **its own** orthogonal
-basis (``interp_alpha=1``) and projects onto it.  The per-event
-projected maps (INT, PRP, DEF, Resid) are then composited and
-bootstrap-tested at every pixel — this captures nonlinear covariance
-effects lost by composite-mean projection.
+onto the dh−1 orthogonal basis.
 
 Ported from ``examples/04_single_var_composite.ipynb`` so that any
 notebook (including 07) can reuse it via::
@@ -158,56 +152,6 @@ def bootstrap_sig(
     return mean, sig_mask
 
 
-# ── Per-event projection helpers ─────────────────────────────────────
-
-
-def _project_single_event(
-    event: dict,
-    var_spec: str | list[str] | Callable,
-    level: str | int,
-    x_rel: np.ndarray,
-    y_rel: np.ndarray,
-    mask_negative: bool,
-    smooth_deg: float,
-    grid_sp: float,
-) -> dict | None:
-    """Build per-event basis and project → returns maps + coefficients."""
-    _smooth = lambda f: gaussian_smooth_nan(
-        f, smoothing_deg=smooth_deg, grid_spacing=grid_sp
-    )
-
-    pv_anom = get_field(event, "pv_anom", level)
-    pv_dx = get_field(event, "pv_dx", level)
-    pv_dy = get_field(event, "pv_dy", level)
-
-    try:
-        basis_e = compute_orthogonal_basis(
-            pv_anom, pv_dx, pv_dy, x_rel, y_rel,
-            mask_negative=mask_negative,
-            apply_smoothing=True,
-            smoothing_deg=smooth_deg,
-            grid_spacing=grid_sp,
-            interp_alpha=1,
-        )
-    except Exception:
-        return None
-
-    fld = _resolve_var_spec(event, var_spec, level)
-    fld_s = _smooth(fld)
-    p = project_field(fld_s, basis_e)
-    return {
-        "int": p["int"],
-        "prop": p["prop"],
-        "def": p["def"],
-        "resid": p["resid"],
-        "beta": p["beta"],
-        "ax": p["ax"],
-        "ay": p["ay"],
-        "gamma": p["gamma"],
-        "rmse": p["rmse"],
-    }
-
-
 # ── Main plot function ───────────────────────────────────────────────────────
 
 
@@ -229,8 +173,8 @@ def plot_var(
     figsize_scale: float = 1.0,
     label: str | None = None,
     vmax: float | None = None,
+    use_sig_mask: bool = True,
     mask_negative: bool = True,
-    n_workers: int = 48,
 ) -> dict:
     """Composite + bootstrap plot for any variable(s).
 
@@ -258,8 +202,6 @@ def plot_var(
         vmax: Fixed colour-scale max.  When ``None`` (default) the 95th
             percentile of ``|mean|`` is used.  Pass the same value to
             multiple calls to enforce a shared colour range.
-        n_workers: Number of parallel workers for per-event projection
-            (default 48).
 
     Returns:
         Result dict with key ``"vmax"`` (the colour-range used) and,
@@ -305,54 +247,40 @@ def plot_var(
         var_label = var_spec
     level_str = "wavg" if isinstance(level, str) else f"{level} hPa"
 
-    # ── 3. Projection (if requested) — per-event basis ──
+    # ── 3. Projection (if requested) ──
     proj = None
-    proj_sig = {}  # per-panel sig masks
     if projection:
-        from functools import partial as _partial
+        dh_basis = max(dh - 1, -13)
+        evs_b = load_events(data_root, stage, dh_basis) if dh_basis != dh else evs
+        pv_b = np.nanmean([get_field(e, "pv_anom", level) for e in evs_b], axis=0)
+        dx_b = np.nanmean([get_field(e, "pv_dx", level) for e in evs_b], axis=0)
+        dy_b = np.nanmean([get_field(e, "pv_dy", level) for e in evs_b], axis=0)
 
-        _proj_fn = _partial(
-            _project_single_event,
-            var_spec=var_spec, level=level,
-            x_rel=x_rel, y_rel=y_rel,
+        # dh composite means for temporal interpolation
+        pv_n = np.nanmean([get_field(e, "pv_anom", level) for e in evs], axis=0)
+        dx_n = np.nanmean([get_field(e, "pv_dx", level) for e in evs], axis=0)
+        dy_n = np.nanmean([get_field(e, "pv_dy", level) for e in evs], axis=0)
+
+        basis = compute_orthogonal_basis(
+            pv_n, dx_n, dy_n, x_rel, y_rel,
             mask_negative=mask_negative,
-            smooth_deg=smooth_deg, grid_sp=grid_sp,
+            apply_smoothing=True,
+            smoothing_deg=smooth_deg,
+            grid_spacing=grid_sp,
+            pv_anom_prev=pv_b,
+            pv_dx_prev=dx_b,
+            pv_dy_prev=dy_b,
+            interp_alpha=1,
         )
-        print(f"  Per-event projection ({N} events, {n_workers} workers) ...")
-        with ThreadPoolExecutor(max_workers=n_workers) as pool:
-            proj_results = list(pool.map(_proj_fn, evs))
 
-        # Filter failed events
-        proj_results = [r for r in proj_results if r is not None]
-        n_proj = len(proj_results)
-        n_fail = N - n_proj
-        if n_fail:
-            print(f"  ⚠ {n_fail} events failed basis construction")
-
-        # Stack per-event projected maps
-        map_keys = ["int", "prop", "def", "resid"]
-        stacked = {k: np.array([r[k] for r in proj_results]) for k in map_keys}
-
-        # Bootstrap significance on each projected panel
-        rng_p = np.random.default_rng(seed)
-        for k in map_keys:
-            boot_maps = np.empty((n_boot, *stacked[k].shape[1:]))
-            for b in range(n_boot):
-                idx = rng_p.integers(0, n_proj, size=n_proj)
-                boot_maps[b] = np.nanmean(stacked[k][idx], axis=0)
-            lo = np.nanpercentile(boot_maps, 100 * alpha / 2, axis=0)
-            hi = np.nanpercentile(boot_maps, 100 * (1 - alpha / 2), axis=0)
-            proj_sig[k] = ~((lo <= 0) & (hi >= 0))
-
-        # Composite mean of projected maps
-        proj = {
-            k: np.nanmean(stacked[k], axis=0) for k in map_keys
-        }
-        # Mean scalar coefficients
-        for c in ["beta", "ax", "ay", "gamma", "rmse"]:
-            proj[c] = float(np.mean([r[c] for r in proj_results]))
+        if use_sig_mask:
+            field_sig = np.where(sig_mask, mean_fld, 0.0)
+        else:
+            field_sig = mean_fld.copy()
+        field_sig_s = _smooth(field_sig)
+        proj = project_field(field_sig_s, basis)
         print(
-            f"  Projection (per-event, N={n_proj}): "
+            f"  Projection (sig-only): "
             f"β={proj['beta']:.3e}  αx={proj['ax']:.3f}  "
             f"αy={proj['ay']:.3f}  γ={proj['gamma']:.3e}"
         )
@@ -408,19 +336,16 @@ def plot_var(
     ax1.set_aspect("equal")
     plt.colorbar(im1, ax=ax1, shrink=0.85)
 
-    # Rows 2-3: projection (2×2) with per-panel sig hatching
+    # Rows 2-3: projection (2×2)
     if projection and proj is not None:
-        panel_keys = ["int", "prop", "def", "resid"]
-        panel_labels = [
-            "INT (β · Φ₁)",
-            "PRP (αx·Φ₂ + αy·Φ₃)",
-            "DEF (γ · Φ₄)",
-            "Residual",
+        panels = [
+            ("INT (β · Φ₁)", proj["int"]),
+            ("PRP (αx·Φ₂ + αy·Φ₃)", proj["prop"]),
+            ("DEF (γ · Φ₄)", proj["def"]),
+            ("Residual", proj["resid"]),
         ]
-        panels = list(zip(panel_labels, panel_keys))
         all_abs = np.concatenate([
-            np.abs(proj[k][np.isfinite(proj[k])])
-            for _, k in panels if np.any(np.isfinite(proj[k]))
+            np.abs(p[np.isfinite(p)]) for _, p in panels if np.any(np.isfinite(p))
         ])
         vmax_p = float(np.percentile(all_abs, 95)) if all_abs.size else 1e-30
         vmax_p = max(vmax_p, 1e-30)
@@ -434,27 +359,19 @@ def plot_var(
             f"RMSE/max={proj['rmse']/(np.nanmax(np.abs(mean_fld))+1e-30):.3f}"
         )
 
-        for idx, (lbl, pkey) in enumerate(panels):
+        for idx, (lbl, field) in enumerate(panels):
             row = 1 + idx // 2
             col = idx % 2
             ax = fig.add_subplot(gs[row, col])
             im = ax.contourf(
-                X_rel, Y_rel, proj[pkey], levels=clev_p,
+                X_rel, Y_rel, field, levels=clev_p,
                 cmap="RdBu_r", extend="both",
             )
             ax.contour(
                 X_rel, Y_rel, pv_anom_mean,
                 levels=[pv_contour], colors="white", linewidths=2.0,
             )
-            # Hatch non-significant pixels on projected panel
-            if pkey in proj_sig:
-                ax.contourf(
-                    X_rel, Y_rel, (~proj_sig[pkey]).astype(float),
-                    levels=[0.5, 1.5], hatches=["xxx"],
-                    colors="none", zorder=5,
-                )
-            pct = 100 * np.nanmean(proj_sig.get(pkey, np.ones_like(proj[pkey], dtype=bool)))
-            ax.set_title(f"{lbl}  ({pct:.0f}% sig)", fontsize=10, fontweight="bold")
+            ax.set_title(lbl, fontsize=10, fontweight="bold")
             ax.set_xlabel("X (deg)")
             if col == 0:
                 ax.set_ylabel("Y (deg)")
