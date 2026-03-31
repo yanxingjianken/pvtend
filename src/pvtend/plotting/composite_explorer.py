@@ -163,7 +163,7 @@ def plot_var(
     dh: int = 0,
     level: str | int = "wavg",
     projection: bool = False,
-    smooth_deg: float = 6.0,
+    smooth_deg: float = 3.0,
     grid_sp: float = 1.5,
     n_boot: int = 1000,
     alpha: float = 0.05,
@@ -262,14 +262,15 @@ def plot_var(
         dy_n = np.nanmean([get_field(e, "pv_dy", level) for e in evs], axis=0)
 
         basis = compute_orthogonal_basis(
-            pv_b, dx_b, dy_b, x_rel, y_rel,
+            pv_n, dx_n, dy_n, x_rel, y_rel,
             mask_negative=mask_negative,
             apply_smoothing=True,
             smoothing_deg=smooth_deg,
             grid_spacing=grid_sp,
-            pv_anom_next=pv_n,
-            pv_dx_next=dx_n,
-            pv_dy_next=dy_n,
+            pv_anom_prev=pv_b,
+            pv_dx_prev=dx_b,
+            pv_dy_prev=dy_b,
+            interp_alpha=1,
         )
 
         if use_sig_mask:

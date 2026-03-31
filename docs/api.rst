@@ -463,22 +463,23 @@ Temporal down-scaling (bi-linear interpolation)
 
 :func:`compute_orthogonal_basis` supports **temporal down-scaling** from
 hourly ERA5 snapshots to a sub-hourly evaluation instant via built-in
-bi-linear interpolation.  When the ``pv_anom_next``, ``pv_dx_next``, and
-``pv_dy_next`` keyword arguments are supplied (the fields at hour *dh*),
-the positional fields (at hour *dh − 1*) are interpolated before basis
+bi-linear interpolation.  When the ``pv_anom_prev``, ``pv_dx_prev``, and
+``pv_dy_prev`` keyword arguments are supplied (the fields at hour *dh − 1*),
+the positional fields (at hour *dh*) are interpolated before basis
 construction:
 
 .. math::
 
-   f_{\alpha} = (1 - \alpha)\,f_{dh-1} + \alpha\,f_{dh}
+   f_{\alpha} = \alpha\,f_{dh} + (1 - \alpha)\,f_{dh-1}
 
-The default :math:`\alpha = 0.75` places the evaluation instant at
-**dh − 15 min** (¾ of the way from *dh − 1* toward *dh*), effectively
-down-scaling from 1-hour to 15-minute temporal resolution.
+The default :math:`\alpha = 1.0` uses only the current-time fields
+(no interpolation).  Set :math:`\alpha = 0.75` to place the evaluation
+instant at **dh − 15 min** (¾ of the way from *dh − 1* toward *dh*),
+effectively down-scaling from 1-hour to 15-minute temporal resolution.
 
 Because linear interpolation commutes with spatial differentiation on a
 fixed grid, the interpolated gradients satisfy
-:math:`\nabla f_{\alpha} = (1-\alpha)\,\nabla f_{dh-1} + \alpha\,\nabla f_{dh}`,
+:math:`\nabla f_{\alpha} = \alpha\,\nabla f_{dh} + (1-\alpha)\,\nabla f_{dh-1}`,
 and the cross-derivative :math:`\partial^2 q/\partial x\,\partial y`
 inherits the same property.
 
@@ -488,17 +489,17 @@ inherits the same property.
 
    * - Parameter
      - Description
-   * - ``pv_anom_next``
-     - PV anomaly :math:`q'` at *dh* (the later snapshot).
-   * - ``pv_dx_next``
-     - Zonal PV gradient :math:`\partial q/\partial x` at *dh*.
-   * - ``pv_dy_next``
-     - Meridional PV gradient :math:`\partial q/\partial y` at *dh*.
+   * - ``pv_anom_prev``
+     - PV anomaly :math:`q'` at *dh − 1* (the earlier snapshot).
+   * - ``pv_dx_prev``
+     - Zonal PV gradient :math:`\partial q/\partial x` at *dh − 1*.
+   * - ``pv_dy_prev``
+     - Meridional PV gradient :math:`\partial q/\partial y` at *dh − 1*.
    * - ``interp_alpha``
-     - Weight for the *_next* fields (default **0.75**).
-       Set to 0 to use only dh − 1, or 1 to use only dh.
+     - Weight for the positional (current-dh) fields (default **1.0**).
+       Set to 0.75 for 15-min before dh, or 0 to use only dh − 1.
 
-All three ``_next`` fields must be provided together (or none).
+All three ``_prev`` fields must be provided together (or none).
 When omitted the function falls back to the original single-snapshot
 behaviour with no interpolation.
 

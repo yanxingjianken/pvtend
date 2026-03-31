@@ -75,7 +75,7 @@ def project_field(
     basis: OrthogonalBasisFields,
     *,
     apply_smoothing: bool = False,
-    smoothing_deg: float = 6.0,
+    smoothing_deg: float = 3.0,
     smoothing_method: str = "gaussian",
     grid_spacing: float = 1.5,
 ) -> Dict[str, object]:
@@ -85,7 +85,7 @@ def project_field(
         field2d: 2D tendency field in SI units.
         basis: Orthogonal basis container.
         apply_smoothing: Smooth tendency before projection.
-        smoothing_deg: Smoothing FWHM (degrees).
+        smoothing_deg: Smoothing FWHM (degrees).  Default 3.0°.
         smoothing_method: 'gaussian' or 'fourier'.
         grid_spacing: Grid spacing in degrees.
 

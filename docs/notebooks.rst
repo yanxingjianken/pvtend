@@ -12,6 +12,8 @@ blocking-event data.
    notebooks/01_rwb_and_derivatives
    notebooks/02_helmholtz_and_qg_omega
    notebooks/03_four_basis_projection
+   notebooks/03c_four_basis_cyclone
+   notebooks/03prp_four_basis_anticyclone_timed_bases
    notebooks/03z_four_basis_projection_geopotential
    notebooks/04_single_var_composite
    notebooks/04i_single_var_isentropic_composite

@@ -128,21 +128,30 @@ def ddp(field: np.ndarray, plevs_pa: np.ndarray) -> np.ndarray:
 def ddt(field: np.ndarray, dt_s: float) -> np.ndarray:
     """Time derivative ∂f/∂t via centred differences.
 
-    Uses centred differences in the interior and one-sided differences
-    at the first and last time steps.
+    Uses centred differences in the interior (second-order accurate)
+    and second-order one-sided stencils at the first and last time
+    steps when nt >= 3, matching ``numpy.gradient`` behaviour.
+    Falls back to first-order forward/backward when nt == 2.
 
     Args:
         field: Array with time as axis 0, shape ``(nt, ...)``.
-        dt_s: Time step in seconds.
+        dt_s: Time step in seconds (assumed uniform).
 
     Returns:
         Same shape as *field*, in ``[field_units / s]``.
     """
     nt = field.shape[0]
     out = np.zeros_like(field)
-    out[1:-1] = (field[2:] - field[:-2]) / (2 * dt_s)
-    out[0] = (field[1] - field[0]) / dt_s
-    out[-1] = (field[-1] - field[-2]) / dt_s
+    if nt >= 3:
+        # Interior: centred differences — O(Δt²)
+        out[1:-1] = (field[2:] - field[:-2]) / (2 * dt_s)
+        # Boundaries: 2nd-order one-sided stencils
+        out[0] = (-3 * field[0] + 4 * field[1] - field[2]) / (2 * dt_s)
+        out[-1] = (3 * field[-1] - 4 * field[-2] + field[-3]) / (2 * dt_s)
+    elif nt == 2:
+        # Only two points — first-order is the best we can do
+        out[0] = (field[1] - field[0]) / dt_s
+        out[-1] = (field[-1] - field[-2]) / dt_s
     return out
 
 

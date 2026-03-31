@@ -55,8 +55,8 @@ class TestLerpFields:
         np.testing.assert_allclose(out["foo"], [2.0, 3.0])
 
 
-class TestBasisNextAPI:
-    """Tests for _next temporal interpolation in compute_orthogonal_basis."""
+class TestBasisPrevAPI:
+    """Tests for _prev temporal interpolation in compute_orthogonal_basis."""
 
     @staticmethod
     def _make_fields(ny=29, nx=49):
@@ -70,19 +70,19 @@ class TestBasisNextAPI:
         pv_dy = rng.normal(0, 1e-11, (ny, nx))
         return pv_anom, pv_dx, pv_dy, x_rel, y_rel
 
-    def test_next_equivalent_to_manual_lerp(self):
-        """_next API must produce identical basis to manual lerp_fields."""
+    def test_prev_equivalent_to_manual_lerp(self):
+        """_prev API must produce identical basis to manual lerp_fields."""
         prev_anom, prev_dx, prev_dy, x_rel, y_rel = self._make_fields()
         rng = np.random.default_rng(99)
-        next_anom = prev_anom + rng.normal(0, 1e-6, prev_anom.shape)
-        next_dx = prev_dx + rng.normal(0, 1e-12, prev_dx.shape)
-        next_dy = prev_dy + rng.normal(0, 1e-12, prev_dy.shape)
+        curr_anom = prev_anom + rng.normal(0, 1e-6, prev_anom.shape)
+        curr_dx = prev_dx + rng.normal(0, 1e-12, prev_dx.shape)
+        curr_dy = prev_dy + rng.normal(0, 1e-12, prev_dy.shape)
 
         # Manual lerp then basis
         alpha = 0.75
         lerped = lerp_fields(
             {"pv_anom": prev_anom, "pv_dx": prev_dx, "pv_dy": prev_dy},
-            {"pv_anom": next_anom, "pv_dx": next_dx, "pv_dy": next_dy},
+            {"pv_anom": curr_anom, "pv_dx": curr_dx, "pv_dy": curr_dy},
             alpha=alpha,
         )
         basis_manual = compute_orthogonal_basis(
@@ -90,13 +90,13 @@ class TestBasisNextAPI:
             x_rel, y_rel, apply_smoothing=False,
         )
 
-        # _next API
+        # _prev API: positional = current (dh), _prev = earlier (dh-1)
         basis_auto = compute_orthogonal_basis(
-            prev_anom, prev_dx, prev_dy, x_rel, y_rel,
+            curr_anom, curr_dx, curr_dy, x_rel, y_rel,
             apply_smoothing=False,
-            pv_anom_next=next_anom,
-            pv_dx_next=next_dx,
-            pv_dy_next=next_dy,
+            pv_anom_prev=prev_anom,
+            pv_dx_prev=prev_dx,
+            pv_dy_prev=prev_dy,
             interp_alpha=alpha,
         )
 
@@ -105,8 +105,8 @@ class TestBasisNextAPI:
         np.testing.assert_allclose(basis_auto.phi_dy, basis_manual.phi_dy, atol=1e-15)
         np.testing.assert_allclose(basis_auto.phi_def, basis_manual.phi_def, atol=1e-15)
 
-    def test_backward_compat_no_next(self):
-        """Without _next fields the result is identical to the original API."""
+    def test_backward_compat_no_prev(self):
+        """Without _prev fields the result is identical to the original API."""
         pv_anom, pv_dx, pv_dy, x_rel, y_rel = self._make_fields()
         basis = compute_orthogonal_basis(
             pv_anom, pv_dx, pv_dy, x_rel, y_rel, apply_smoothing=False,
@@ -114,17 +114,17 @@ class TestBasisNextAPI:
         assert basis.phi_int.shape == (29, 49)
         assert basis.norms["beta"] > 0
 
-    def test_partial_next_raises(self):
-        """Providing only 1 or 2 of the 3 _next fields must raise ValueError."""
+    def test_partial_prev_raises(self):
+        """Providing only 1 or 2 of the 3 _prev fields must raise ValueError."""
         pv_anom, pv_dx, pv_dy, x_rel, y_rel = self._make_fields()
         with pytest.raises(ValueError, match="all three"):
             compute_orthogonal_basis(
                 pv_anom, pv_dx, pv_dy, x_rel, y_rel,
-                pv_anom_next=pv_anom,  # only 1 of 3
+                pv_anom_prev=pv_anom,  # only 1 of 3
             )
         with pytest.raises(ValueError, match="all three"):
             compute_orthogonal_basis(
                 pv_anom, pv_dx, pv_dy, x_rel, y_rel,
-                pv_anom_next=pv_anom,
-                pv_dx_next=pv_dx,     # 2 of 3
+                pv_anom_prev=pv_anom,
+                pv_dx_prev=pv_dx,     # 2 of 3
             )

@@ -220,6 +220,8 @@ Notebooks using **real ERA5 blocking event data** from the `composite_blocking_t
 | [`01_rwb_and_derivatives`](examples/01_rwb_and_derivatives.ipynb) | Grid setup, `ddx`/`ddy`/`ddp` derivatives, RWB detection on a real event |
 | [`02_helmholtz_and_qg_omega`](examples/02_helmholtz_and_qg_omega.ipynb) | 3-D Helmholtz decomposition, QG omega (LOG20 vs SP19), moist/dry ω split |
 | [`03_four_basis_projection`](examples/03_four_basis_projection.ipynb) | Orthogonal basis (Φ₁–Φ₄), project dq'/dt → β/αx/αy/γ, lifecycle curves |
+| [`03c_four_basis_cyclone`](examples/03c_four_basis_cyclone.ipynb) | ↳ *Cyclone variant*: 4-basis projection for a 300 hPa cyclone (PV > 0), lifecycle + budget closure |
+| [`03prp_four_basis_anticyclone_timed_bases`](examples/03prp_four_basis_anticyclone_timed_bases.ipynb) | ↳ *Anticyclone variant*: 4-basis projection for a 300 hPa anticyclone (PV < 0, `mask_negative`), current-time basis |
 | [`03z_four_basis_projection_geopotential`](examples/03z_four_basis_projection_geopotential.ipynb) | ↳ *Supplement*: same 4-basis projection using **geopotential height Z** instead of PV |
 | [`04_single_var_composite`](examples/04_single_var_composite.ipynb) | Single-variable composite explorer on pressure levels using `pvtend.plotting.plot_var` |
 | [`04i_single_var_isentropic_composite`](examples/04i_single_var_isentropic_composite.ipynb) | ↳ *Supplement*: same as 04 but on **isentropic (θ) surfaces** |

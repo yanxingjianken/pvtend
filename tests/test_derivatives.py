@@ -77,10 +77,11 @@ class TestDdt:
     """Test time derivative."""
 
     def test_linear_in_time(self):
-        """ddt of linearly increasing field."""
+        """ddt of linearly increasing field — 2nd order everywhere."""
         nt = 5
         dt = 3600.0  # 1 hour
         f = np.arange(nt, dtype=float)[:, None, None] * np.ones((nt, 4, 4))
         result = ddt(f, dt)
         expected = np.ones_like(f) / dt
-        np.testing.assert_allclose(result[1:-1], expected[1:-1], rtol=1e-10)
+        # All points (including boundaries) should be exact for linear f
+        np.testing.assert_allclose(result, expected, rtol=1e-10)

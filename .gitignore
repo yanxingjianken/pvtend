@@ -41,6 +41,9 @@ examples/era5_jan2025/
 # Paper (local only, not tracked)
 paper/
 
+# Website export data (large JSON files, hosted on HF)
+website/
+
 # OS
 .DS_Store
 Thumbs.db
