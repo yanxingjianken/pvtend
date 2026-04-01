@@ -174,7 +174,7 @@ def plot_var(
     label: str | None = None,
     vmax: float | None = None,
     use_sig_mask: bool = True,
-    mask_negative: bool = True,
+    mask: str | bool | None = "< 0",
 ) -> dict:
     """Composite + bootstrap plot for any variable(s).
 
@@ -263,7 +263,7 @@ def plot_var(
 
         basis = compute_orthogonal_basis(
             pv_n, dx_n, dy_n, x_rel, y_rel,
-            mask_negative=mask_negative,
+            mask=mask,
             apply_smoothing=True,
             smoothing_deg=smooth_deg,
             grid_spacing=grid_sp,

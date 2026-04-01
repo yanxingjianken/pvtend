@@ -873,9 +873,11 @@ default, i.e. dh − 15 min) using the ``_next`` API of
    * - ``use_sig_mask``
      - If ``True`` (default), zero out non-significant grid points before
        projection; set ``False`` to project the full composite mean.
-   * - ``mask_negative``
-     - If ``True`` (default), mask negative PV lobes in basis construction;
-       set ``False`` to retain them.
+   * - ``mask``
+     - PV anomaly mask specification.  ``"< 0"`` (default) selects
+       q' < 0 (blocking composites).  ``"< -2e-7"`` for tight single-
+       event masking; ``"> 2e-7"`` for cyclones.  ``False``/``None`` to
+       disable.  A bool 2-D ``ndarray`` for custom masks.
 
 .. note::
 

@@ -17,6 +17,8 @@ Processing order:
 from __future__ import annotations
 
 import math
+import re
+import warnings
 from dataclasses import dataclass
 from typing import Dict
 
@@ -140,6 +142,74 @@ def compute_quadrupole_basis(
     return np.gradient(np.asarray(pv_dx, dtype=float), dy_deg, axis=0) / dy_m
 
 
+# ── mask parameter parser ──────────────────────────────────────────────
+_MASK_RE = re.compile(
+    r"^\s*([<>]=?)\s*([+-]?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)\s*$"
+)
+
+
+def _parse_mask_spec(
+    mask_spec: str | bool | np.ndarray | None,
+    phi_int_s: np.ndarray,
+    *,
+    _mask_negative: bool | None = None,
+    _mask_threshold: float | None = None,
+) -> np.ndarray | None:
+    """Return a boolean mask from the ``mask`` parameter.
+
+    Parameters:
+        mask_spec: New-style ``mask`` argument.
+        phi_int_s: Pre-normalized + smoothed Φ₁ field.
+        _mask_negative: Deprecated ``mask_negative`` kwarg (for shim).
+        _mask_threshold: Deprecated ``mask_threshold`` kwarg (for shim).
+
+    Returns:
+        Boolean 2-D array (True = include), or *None* for no PV masking.
+    """
+    # --- Deprecation shim: old kwargs override if mask_spec was not given ---
+    if mask_spec is None and (_mask_negative is not None or _mask_threshold is not None):
+        if _mask_threshold is not None:
+            # Explicit old-style threshold → convert to string spec
+            mask_spec = f"< {_mask_threshold}"
+        elif _mask_negative is True:
+            mask_spec = f"< {_DEFAULT_MASK_THRESHOLD}"
+        elif _mask_negative is False:
+            return None  # no masking
+        # else: _mask_negative is None and _mask_threshold is None → fall through
+
+    # --- Resolve mask_spec ---
+    if mask_spec is None or mask_spec is False:
+        return None
+
+    if mask_spec is True:
+        # Backward compat: True → "< 0"
+        mask_spec = f"< {_DEFAULT_MASK_THRESHOLD}"
+
+    if isinstance(mask_spec, np.ndarray):
+        if mask_spec.dtype == bool and mask_spec.shape == phi_int_s.shape:
+            return mask_spec
+        raise ValueError(
+            f"mask array must be bool with shape {phi_int_s.shape}, "
+            f"got dtype={mask_spec.dtype}, shape={mask_spec.shape}"
+        )
+
+    if isinstance(mask_spec, str):
+        m = _MASK_RE.match(mask_spec)
+        if not m:
+            raise ValueError(
+                f"Cannot parse mask string {mask_spec!r}. "
+                "Expected e.g. '< 0', '< -2e-7', '> 2e-7', '>= 0'."
+            )
+        op_str, val_str = m.groups()
+        thr_si = float(val_str)
+        thr_pn = thr_si * PRENORM_PHI1  # convert to pre-normalized units
+        ops = {"<": np.less, "<=": np.less_equal,
+               ">": np.greater, ">=": np.greater_equal}
+        return ops[op_str](phi_int_s, thr_pn)
+
+    raise TypeError(f"Unsupported mask type: {type(mask_spec)}")
+
+
 def compute_orthogonal_basis(
     pv_anom: np.ndarray,
     pv_dx: np.ndarray,
@@ -148,8 +218,7 @@ def compute_orthogonal_basis(
     y_rel: np.ndarray,
     *,
     geopotential: np.ndarray | None = None,
-    mask_negative: bool = True,
-    mask_threshold: float | None = None,
+    mask: str | bool | np.ndarray | None = "< 0",
     apply_smoothing: bool = True,
     smoothing_deg: float = 3.0,
     smoothing_method: str = "gaussian",
@@ -159,6 +228,9 @@ def compute_orthogonal_basis(
     pv_dx_prev: np.ndarray | None = None,
     pv_dy_prev: np.ndarray | None = None,
     interp_alpha: float = 1.0,
+    # Deprecated — retained for backward compatibility
+    mask_negative: bool | None = None,
+    mask_threshold: float | None = None,
 ) -> OrthogonalBasisFields:
     """Compute four orthogonal basis fields from composite PV fields.
 
@@ -169,11 +241,18 @@ def compute_orthogonal_basis(
         x_rel: 1D relative x-coordinates (degrees).
         y_rel: 1D relative y-coordinates (degrees).
         geopotential: Optional geopotential for overlay plots.
-        mask_negative: If True and mask_threshold is None, use MASK_PV_THRESHOLD.
-            If False, no PV-anomaly masking is applied.
-        mask_threshold: Explicit PV anomaly threshold in SI units (e.g. -0.5e-6).
-            Grid points with q' <= threshold are included. Overrides mask_negative.
-            Default (None) falls back to MASK_PV_THRESHOLD when mask_negative=True.
+        mask: PV anomaly masking specification.  Accepts:
+
+            * **str** — comparison expression applied to q', e.g.
+              ``"< 0"`` (default, blocking), ``"< -2e-7"`` (tight single-
+              event), ``"> 2e-7"`` (cyclones).
+            * **bool** — ``True`` is equivalent to ``"< 0"``,
+              ``False`` disables PV masking.
+            * **None** — no PV-anomaly masking (NaN/Inf filtering only).
+            * **np.ndarray** (bool, same shape as ``pv_anom``) — a user-
+              supplied mask; ``True`` = include in projection.
+
+            Default ``"< 0"`` selects all grid points where q' < 0 PVU.
         apply_smoothing: Apply spatial smoothing after pre-normalization.
         smoothing_deg: Smoothing FWHM (degrees).  Default 3.0°.
         smoothing_method: 'gaussian' or 'fourier'.
@@ -190,10 +269,28 @@ def compute_orthogonal_basis(
             Default 1.0 uses only the current-dh fields (no interpolation).
             Set to 0.75 for fields representative of 15 min before dh.
             Ignored when ``_prev`` fields are not provided.
+        mask_negative: *Deprecated.* Use ``mask`` instead.
+        mask_threshold: *Deprecated.* Use ``mask="< <value>"`` instead.
 
     Returns:
         OrthogonalBasisFields container.
     """
+    # ── Deprecation warnings for old kwargs ──
+    if mask_negative is not None:
+        warnings.warn(
+            "mask_negative is deprecated; use mask='< 0' or mask=False instead.",
+            DeprecationWarning, stacklevel=2,
+        )
+    if mask_threshold is not None:
+        warnings.warn(
+            "mask_threshold is deprecated; use mask='< <value>' instead.",
+            DeprecationWarning, stacklevel=2,
+        )
+    # If caller used old kwargs AND the new default hasn't been overridden,
+    # let the old kwargs take effect.
+    _mask_spec = mask
+    if (mask_negative is not None or mask_threshold is not None) and mask == "< 0":
+        _mask_spec = None  # signal _parse_mask_spec to use old kwargs
     # --- Optional temporal interpolation ---
     _prev_fields = (pv_anom_prev, pv_dx_prev, pv_dy_prev)
     _prev_given = [f is not None for f in _prev_fields]
@@ -234,18 +331,16 @@ def compute_orthogonal_basis(
     phi_int_s, phi_dx_s, phi_dy_s, phi_def_s = fields
 
     # Step 4: Mask
-    mask = np.isfinite(phi_int_s) & np.isfinite(phi_dx_s) & \
-           np.isfinite(phi_dy_s) & np.isfinite(phi_def_s)
-    # Determine effective threshold
-    if mask_threshold is not None:
-        _thr_si = mask_threshold
-    elif mask_negative:
-        _thr_si = _DEFAULT_MASK_THRESHOLD
+    finite_mask = np.isfinite(phi_int_s) & np.isfinite(phi_dx_s) & \
+                  np.isfinite(phi_dy_s) & np.isfinite(phi_def_s)
+    pv_mask = _parse_mask_spec(
+        _mask_spec, phi_int_s,
+        _mask_negative=mask_negative, _mask_threshold=mask_threshold,
+    )
+    if pv_mask is not None:
+        mask_arr = finite_mask & pv_mask
     else:
-        _thr_si = None
-    if _thr_si is not None:
-        # Convert SI threshold to pre-normalized units
-        mask &= phi_int_s <= (_thr_si * PRENORM_PHI1)
+        mask_arr = finite_mask
 
     # Step 5: Weights
     X_grid, Y_grid = np.meshgrid(x_rel, y_rel)
@@ -254,11 +349,11 @@ def compute_orthogonal_basis(
         weights = np.where(np.isfinite(weights), weights, 0.0)
     else:
         weights = np.ones_like(Y_grid)
-    weights = np.where(mask, weights, 0.0)
+    weights = np.where(mask_arr, weights, 0.0)
 
     # Step 6: Gram-Schmidt
     ortho, norms = gram_schmidt_orthogonalize(
-        [phi_int_s, phi_dx_s, phi_dy_s, phi_def_s], weights, mask)
+        [phi_int_s, phi_dx_s, phi_dy_s, phi_def_s], weights, mask_arr)
 
     prenorm_dict = {
         "beta": PRENORM_PHI1,
@@ -273,7 +368,7 @@ def compute_orthogonal_basis(
         phi_dy=np.asarray(ortho[2], dtype=float),
         phi_def=np.asarray(ortho[3], dtype=float),
         weights=weights,
-        mask=mask,
+        mask=mask_arr,
         x_rel=np.asarray(x_rel, dtype=float),
         y_rel=np.asarray(y_rel, dtype=float),
         Y_grid=Y_grid,

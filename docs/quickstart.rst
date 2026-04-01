@@ -77,7 +77,7 @@ the PV tendency, and compare the reconstruction with the original.
        pv_dy=dq_dy,
        x_rel=x_deg,
        y_rel=y_deg,
-       mask_negative=True,
+       mask="< 0",
        apply_smoothing=True,
        smoothing_deg=3.0,
        grid_spacing=grid_sp,
