@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Dict
 
 import numpy as np
+from scipy.ndimage import label as _ndimage_label
 
 from .smoothing import gaussian_smooth_nan, fourier_lowpass_nan
 
@@ -210,6 +211,60 @@ def _parse_mask_spec(
     raise TypeError(f"Unsupported mask type: {type(mask_spec)}")
 
 
+def _select_central_blob(
+    pv_mask: np.ndarray,
+    x_rel: np.ndarray,
+    y_rel: np.ndarray,
+) -> np.ndarray:
+    """Keep only the single connected component enclosing the patch center.
+
+    After threshold masking, multiple disconnected blobs may survive.
+    This selects the one that contains the centre pixel (0, 0 in
+    relative coordinates).  If the centre pixel is not inside any
+    blob (common in Eulerian mode at large ``|dh|``), the blob whose
+    nearest boundary pixel is closest to the patch centre is chosen.
+
+    Boundary-touching blobs are handled naturally — they are one
+    connected component even if the contour exits the domain.
+
+    Parameters:
+        pv_mask: 2-D boolean array (True = inside threshold).
+        x_rel: 1-D relative x-coordinates (degrees).
+        y_rel: 1-D relative y-coordinates (degrees).
+
+    Returns:
+        Boolean 2-D mask with only the selected blob set to True.
+    """
+    labeled, n_features = _ndimage_label(pv_mask)
+    if n_features <= 1:
+        return pv_mask  # 0 or 1 blob — nothing to filter
+
+    # Centre pixel indices (0,0 in relative coords → middle of grid)
+    ny, nx = pv_mask.shape
+    ci = np.argmin(np.abs(y_rel))
+    cj = np.argmin(np.abs(x_rel))
+
+    centre_label = labeled[ci, cj]
+    if centre_label > 0:
+        # Centre is inside a blob — keep that one
+        return labeled == centre_label
+
+    # Centre not inside any blob → pick the one whose nearest pixel
+    # is closest to (0, 0) in relative-degree space.
+    Y2d, X2d = np.meshgrid(y_rel, x_rel, indexing="ij")
+    dist2_field = X2d ** 2 + Y2d ** 2  # squared distance from centre
+    best_label = 1
+    best_dist = np.inf
+    for lbl in range(1, n_features + 1):
+        blob = labeled == lbl
+        min_d2 = float(np.min(dist2_field[blob]))
+        if min_d2 < best_dist:
+            best_dist = min_d2
+            best_label = lbl
+
+    return labeled == best_label
+
+
 def compute_orthogonal_basis(
     pv_anom: np.ndarray,
     pv_dx: np.ndarray,
@@ -338,6 +393,9 @@ def compute_orthogonal_basis(
         _mask_negative=mask_negative, _mask_threshold=mask_threshold,
     )
     if pv_mask is not None:
+        # Keep only the single connected blob enclosing (or nearest to)
+        # the patch centre so that distant secondary anomalies are excluded.
+        pv_mask = _select_central_blob(pv_mask, x_rel, y_rel)
         mask_arr = finite_mask & pv_mask
     else:
         mask_arr = finite_mask

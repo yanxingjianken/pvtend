@@ -458,6 +458,16 @@ weakening:
 The projection coefficients :math:`c_i(t)` quantify each term's
 contribution to the blocking lifecycle at each timestep.
 
+Single-blob selection
+^^^^^^^^^^^^^^^^^^^^^
+
+When the ``mask`` threshold produces multiple disconnected regions
+(common at large Eulerian displacement), :func:`compute_orthogonal_basis`
+automatically retains only the single connected component that encloses
+the patch centre.  If the centre falls outside all blobs, the blob whose
+nearest boundary pixel is closest to the centre is selected.  This uses
+``scipy.ndimage.label`` for connected-component analysis.
+
 Temporal down-scaling (bi-linear interpolation)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
