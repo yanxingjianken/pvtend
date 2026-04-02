@@ -186,7 +186,7 @@ class CompositeResult:
         """Reduce a 3-D composite to 2-D.
 
         ``level_mode=None|"all"|"3d"`` → return full 3-D array.
-        ``level_mode="wavg"`` → ``exp(-z/H)`` weighted average.
+        ``level_mode="wavg"`` → ``exp(−z/H)`` weighted average over 300, 250, 200 hPa.
         ``level_mode=300`` → nearest pressure level slice.
         """
         arr3d = self.mean_3d(field, stage, dh, variant=variant)
@@ -197,13 +197,23 @@ class CompositeResult:
         if isinstance(level_mode, str) and level_mode.lower() in {
             "wavg", "w-avg", "weighted",
         }:
+            # exp(−z/H) weighted average over 300, 250, 200 hPa
+            # (matches tendency.py vwm — canonical pvtend recipe)
+            from .constants import WAVG_LEVELS as _WL, H_SCALE as _HS, G0 as _G0
+            wavg_hpa = np.asarray(_WL, dtype=float)
+            levels_arr = np.asarray(self.levels, dtype=float)
+            indices = [int(np.nanargmin(np.abs(levels_arr - lv)))
+                       for lv in wavg_hpa]
+            slices = arr3d[indices]  # (3, NY, NX)
             z_name = "z_3d" if "z_3d" in self.fields_3d else "z"
             z3d = self.mean_3d(z_name, stage, dh, variant=variant)
-            if z3d is None or self.h_scale is None:
-                raise ValueError("Need z_3d + H_SCALE for wavg")
-            w = np.exp(-z3d / float(self.h_scale))
-            num = np.nansum(w * arr3d, axis=0)
-            den = np.nansum(w, axis=0)
+            if z3d is None:
+                raise ValueError("Need z_3d for wavg")
+            z_m = z3d[indices] / _G0  # geopotential → metres
+            h = float(self.h_scale) if self.h_scale is not None else _HS
+            wt = np.exp(-z_m / h)
+            num = np.nansum(slices * wt, axis=0)
+            den = np.nansum(wt, axis=0)
             out = np.full(num.shape, np.nan, dtype=np.float64)
             m = den > 0
             out[m] = num[m] / den[m]
