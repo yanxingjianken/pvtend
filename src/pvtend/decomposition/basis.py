@@ -1,15 +1,17 @@
-"""Orthogonal four-basis construction for PV tendency decomposition.
+"""Orthogonal six-basis construction for PV tendency decomposition.
 
-The four basis fields:
-    Φ₁ = q'          (PV anomaly — intensification)
-    Φ₂ = ∂q/∂x       (zonal gradient — zonal propagation)
-    Φ₃ = ∂q/∂y       (meridional gradient — meridional propagation)
-    Φ₄ = ∂²q/∂x∂y    (cross-derivative — deformation/quadrupole)
+The six basis fields:
+    Φ₁ = q'                      (PV anomaly — intensification)
+    Φ₂ = ∂q/∂x                   (zonal gradient — zonal propagation)
+    Φ₃ = ∂q/∂y                   (meridional gradient — meridional propagation)
+    Φ₄ = ∂²q/∂x∂y                (cross-derivative — shear deformation)
+    Φ₅ = ∂²q/∂x² − ∂²q/∂y²      (normal strain deformation)
+    Φ₆ = ∂²q/∂x² + ∂²q/∂y²      (Laplacian — diffusion)
 
 Processing order:
     1. Load raw fields in SI units
-    2. Compute cross-derivative Φ₄ from ∂q/∂x
-    3. Apply FIXED pre-normalization constants
+    2. Compute second-order derivatives (Φ₄, Φ₅, Φ₆)
+    3. Apply per-event auto pre-normalization to O(1)
     4. Apply smoothing
     5. Gram-Schmidt orthogonalization
 """
@@ -30,24 +32,28 @@ from .smoothing import gaussian_smooth_nan, fourier_lowpass_nan
 # Default mask threshold for q' region (SI units, PVU)
 from ..constants import MASK_PV_THRESHOLD as _DEFAULT_MASK_THRESHOLD
 
-# Fixed pre-normalization constants (scale SI fields to O(1))
+# Fixed pre-normalization constants (legacy — kept for backward compat)
 PRENORM_PHI1: float = 1e6   # q' (PVU)
 PRENORM_PHI2: float = 1e12  # ∂q/∂x (PVU/m)
 PRENORM_PHI3: float = 1e12  # ∂q/∂y (PVU/m)
 PRENORM_PHI4: float = 1e18  # ∂²q/∂x∂y (PVU/m²)
+PRENORM_PHI5: float = 1e18  # ∂²q/∂x²−∂²q/∂y² (PVU/m²)
+PRENORM_PHI6: float = 1e18  # ∂²q/∂x²+∂²q/∂y² (PVU/m²)
 
 R_EARTH = 6.371e6  # m
 
 
 @dataclass(frozen=True)
 class OrthogonalBasisFields:
-    """Container for the four orthogonal basis fields.
+    """Container for the six orthogonal basis fields.
 
     Attributes:
         phi_int: Intensification basis (Φ₁).
         phi_dx: Zonal propagation basis (Φ₂).
         phi_dy: Meridional propagation basis (Φ₃).
-        phi_def: Deformation/quadrupole basis (Φ₄).
+        phi_def: Shear deformation basis (Φ₄ = ∂²q/∂x∂y).
+        phi_strain: Normal strain basis (Φ₅ = ∂²q/∂x² − ∂²q/∂y²).
+        phi_lap: Laplacian/diffusion basis (Φ₆ = ∂²q/∂x² + ∂²q/∂y²).
         weights: 2D weighting array.
         mask: Boolean mask for valid grid points.
         x_rel: 1D relative x coordinates.
@@ -58,6 +64,8 @@ class OrthogonalBasisFields:
         raw_phi_dx: Raw Φ₂.
         raw_phi_dy: Raw Φ₃.
         raw_phi_def: Raw Φ₄.
+        raw_phi_strain: Raw Φ₅.
+        raw_phi_lap: Raw Φ₆.
         norms: Dict of squared norms for each basis.
         scale_factors: PRENORM constants for rescaling.
     """
@@ -65,6 +73,8 @@ class OrthogonalBasisFields:
     phi_dx: np.ndarray
     phi_dy: np.ndarray
     phi_def: np.ndarray
+    phi_strain: np.ndarray
+    phi_lap: np.ndarray
     weights: np.ndarray
     mask: np.ndarray
     x_rel: np.ndarray
@@ -75,12 +85,19 @@ class OrthogonalBasisFields:
     raw_phi_dx: np.ndarray | None = None
     raw_phi_dy: np.ndarray | None = None
     raw_phi_def: np.ndarray | None = None
+    raw_phi_strain: np.ndarray | None = None
+    raw_phi_lap: np.ndarray | None = None
     norms: Dict[str, float] | None = None
     scale_factors: Dict[str, float] | None = None
 
     @property
     def grid_shape(self) -> tuple[int, int]:
         return self.phi_int.shape
+
+    @property
+    def n_bases(self) -> int:
+        """Number of basis fields (always 6)."""
+        return 6
 
 
 def weighted_inner_product(
@@ -141,6 +158,67 @@ def compute_quadrupole_basis(
     dy_deg = y_rel[1] - y_rel[0] if len(y_rel) > 1 else 1.5
     dy_m = 2 * np.pi * R_EARTH / 360
     return np.gradient(np.asarray(pv_dx, dtype=float), dy_deg, axis=0) / dy_m
+
+
+def compute_strain_basis(
+    pv_dx_dx: np.ndarray, pv_dy_dy: np.ndarray,
+) -> np.ndarray:
+    """Compute normal strain deformation basis: ∂²q/∂x² − ∂²q/∂y².
+
+    Parameters:
+        pv_dx_dx: ∂²q/∂x² in SI units (PVU/m²).
+        pv_dy_dy: ∂²q/∂y² in SI units (PVU/m²).
+
+    Returns:
+        Normal strain (PVU/m²).
+    """
+    return np.asarray(pv_dx_dx, dtype=float) - np.asarray(pv_dy_dy, dtype=float)
+
+
+def compute_laplacian_basis(
+    pv_dx_dx: np.ndarray, pv_dy_dy: np.ndarray,
+) -> np.ndarray:
+    """Compute Laplacian (diffusion) basis: ∂²q/∂x² + ∂²q/∂y².
+
+    Parameters:
+        pv_dx_dx: ∂²q/∂x² in SI units (PVU/m²).
+        pv_dy_dy: ∂²q/∂y² in SI units (PVU/m²).
+
+    Returns:
+        Laplacian (PVU/m²).
+    """
+    return np.asarray(pv_dx_dx, dtype=float) + np.asarray(pv_dy_dy, dtype=float)
+
+
+def auto_prenorm(
+    fields: list[np.ndarray],
+    mask: np.ndarray | None = None,
+) -> list[float]:
+    """Compute per-event pre-normalization constants.
+
+    Each constant is 1 / median(|field|) over the masked region,
+    so that the pre-normalized field has O(1) magnitude.
+
+    Parameters:
+        fields: List of raw SI-unit basis fields.
+        mask: Optional boolean mask (True = include).
+
+    Returns:
+        List of scale factors, one per field.
+    """
+    scales = []
+    for f in fields:
+        arr = np.asarray(f, dtype=float)
+        if mask is not None:
+            valid = mask & np.isfinite(arr) & (arr != 0.0)
+        else:
+            valid = np.isfinite(arr) & (arr != 0.0)
+        if not valid.any():
+            scales.append(1.0)
+            continue
+        med = float(np.median(np.abs(arr[valid])))
+        scales.append(1.0 / med if med > 1e-30 else 1.0)
+    return scales
 
 
 # ── mask parameter parser ──────────────────────────────────────────────
@@ -272,6 +350,9 @@ def compute_orthogonal_basis(
     x_rel: np.ndarray,
     y_rel: np.ndarray,
     *,
+    pv_dx_dy: np.ndarray | None = None,
+    pv_dx_dx: np.ndarray | None = None,
+    pv_dy_dy: np.ndarray | None = None,
     geopotential: np.ndarray | None = None,
     mask: str | bool | np.ndarray | None = "< 0",
     apply_smoothing: bool = True,
@@ -279,6 +360,7 @@ def compute_orthogonal_basis(
     smoothing_method: str = "gaussian",
     grid_spacing: float = 1.5,
     apply_lat_weighting: bool = False,
+    prenorm_mode: str = "auto",
     pv_anom_prev: np.ndarray | None = None,
     pv_dx_prev: np.ndarray | None = None,
     pv_dy_prev: np.ndarray | None = None,
@@ -287,7 +369,7 @@ def compute_orthogonal_basis(
     mask_negative: bool | None = None,
     mask_threshold: float | None = None,
 ) -> OrthogonalBasisFields:
-    """Compute four orthogonal basis fields from composite PV fields.
+    """Compute six orthogonal basis fields from composite PV fields.
 
     Parameters:
         pv_anom: PV anomaly q' in SI units.
@@ -295,6 +377,9 @@ def compute_orthogonal_basis(
         pv_dy: Meridional PV gradient ∂q/∂y in SI.
         x_rel: 1D relative x-coordinates (degrees).
         y_rel: 1D relative y-coordinates (degrees).
+        pv_dx_dy: Pre-computed ∂²q/∂x∂y. Falls back to np.gradient if None.
+        pv_dx_dx: Pre-computed ∂²q/∂x². Falls back to np.gradient if None.
+        pv_dy_dy: Pre-computed ∂²q/∂y². Falls back to np.gradient if None.
         geopotential: Optional geopotential for overlay plots.
         mask: PV anomaly masking specification.  Accepts:
 
@@ -313,17 +398,14 @@ def compute_orthogonal_basis(
         smoothing_method: 'gaussian' or 'fourier'.
         grid_spacing: Grid spacing in degrees.
         apply_lat_weighting: Use cos(lat) weighting.
+        prenorm_mode: ``"auto"`` (default) for per-event runtime
+            normalization, or ``"fixed"`` for legacy PRENORM constants.
         pv_anom_prev: PV anomaly q' at dh−1 (the earlier snapshot). If provided,
-            ``pv_dx_prev`` and ``pv_dy_prev`` must also be given. The three
-            positional fields (``pv_anom``, ``pv_dx``, ``pv_dy``) are treated
-            as the current snapshot (dh) and linearly interpolated with the
-            ``_prev`` fields before basis construction.
+            ``pv_dx_prev`` and ``pv_dy_prev`` must also be given.
         pv_dx_prev: Zonal PV gradient at dh−1.
         pv_dy_prev: Meridional PV gradient at dh−1.
         interp_alpha: Interpolation weight for the positional (current-dh) fields.
             Default 1.0 uses only the current-dh fields (no interpolation).
-            Set to 0.75 for fields representative of 15 min before dh.
-            Ignored when ``_prev`` fields are not provided.
         mask_negative: *Deprecated.* Use ``mask`` instead.
         mask_threshold: *Deprecated.* Use ``mask="< <value>"`` instead.
 
@@ -341,11 +423,10 @@ def compute_orthogonal_basis(
             "mask_threshold is deprecated; use mask='< <value>' instead.",
             DeprecationWarning, stacklevel=2,
         )
-    # If caller used old kwargs AND the new default hasn't been overridden,
-    # let the old kwargs take effect.
     _mask_spec = mask
     if (mask_negative is not None or mask_threshold is not None) and mask == "< 0":
-        _mask_spec = None  # signal _parse_mask_spec to use old kwargs
+        _mask_spec = None
+
     # --- Optional temporal interpolation ---
     _prev_fields = (pv_anom_prev, pv_dx_prev, pv_dy_prev)
     _prev_given = [f is not None for f in _prev_fields]
@@ -363,17 +444,51 @@ def compute_orthogonal_basis(
         pv_dy = a * np.asarray(pv_dy, dtype=np.float64) + \
                 (1.0 - a) * np.asarray(pv_dy_prev, dtype=np.float64)
 
-    # Step 1: Compute cross-derivative (before pre-normalization)
-    raw_phi_def = compute_quadrupole_basis(pv_dx, y_rel)
+    # Step 1: Compute second-order derivative fields (with fallbacks)
+    dx_deg = x_rel[1] - x_rel[0] if len(x_rel) > 1 else 1.5
+    dy_deg = y_rel[1] - y_rel[0] if len(y_rel) > 1 else 1.5
+    dx_m = np.deg2rad(abs(dx_deg)) * R_EARTH
+    dy_m = np.deg2rad(abs(dy_deg)) * R_EARTH
+
+    if pv_dx_dy is not None:
+        raw_phi_def = np.asarray(pv_dx_dy, dtype=float)
+    else:
+        raw_phi_def = compute_quadrupole_basis(pv_dx, y_rel)
+
+    if pv_dx_dx is not None:
+        _pv_dx_dx = np.asarray(pv_dx_dx, dtype=float)
+    else:
+        _pv_dx_dx = np.gradient(np.asarray(pv_dx, dtype=float), dx_deg, axis=1) / dx_m
+
+    if pv_dy_dy is not None:
+        _pv_dy_dy = np.asarray(pv_dy_dy, dtype=float)
+    else:
+        _pv_dy_dy = np.gradient(np.asarray(pv_dy, dtype=float), dy_deg, axis=0) / dy_m
+
+    raw_phi_strain = compute_strain_basis(_pv_dx_dx, _pv_dy_dy)
+    raw_phi_lap = compute_laplacian_basis(_pv_dx_dx, _pv_dy_dy)
 
     # Step 2: Pre-normalize
-    phi_int = pv_anom * PRENORM_PHI1
-    phi_dx_pn = pv_dx * PRENORM_PHI2
-    phi_dy_pn = pv_dy * PRENORM_PHI3
-    phi_def = raw_phi_def * PRENORM_PHI4
+    raw_fields = [pv_anom, pv_dx, pv_dy, raw_phi_def, raw_phi_strain, raw_phi_lap]
+    if prenorm_mode == "auto":
+        # Compute scales before masking (use finite mask only)
+        _finite_pre = np.isfinite(pv_anom)
+        pn = auto_prenorm(raw_fields, _finite_pre)
+    elif prenorm_mode == "fixed":
+        pn = [PRENORM_PHI1, PRENORM_PHI2, PRENORM_PHI3,
+              PRENORM_PHI4, PRENORM_PHI5, PRENORM_PHI6]
+    else:
+        raise ValueError(f"Unknown prenorm_mode: {prenorm_mode!r}")
+
+    phi_int = pv_anom * pn[0]
+    phi_dx_pn = pv_dx * pn[1]
+    phi_dy_pn = pv_dy * pn[2]
+    phi_def = raw_phi_def * pn[3]
+    phi_strain = raw_phi_strain * pn[4]
+    phi_lap = raw_phi_lap * pn[5]
 
     # Step 3: Smooth
-    fields = [phi_int, phi_dx_pn, phi_dy_pn, phi_def]
+    fields = [phi_int, phi_dx_pn, phi_dy_pn, phi_def, phi_strain, phi_lap]
     if apply_smoothing:
         if smoothing_method == "gaussian":
             fields = [gaussian_smooth_nan(f, smoothing_deg, grid_spacing) for f in fields]
@@ -383,18 +498,17 @@ def compute_orthogonal_basis(
             fields = [fourier_lowpass_nan(f, smoothing_deg, x_ext, y_ext) for f in fields]
         else:
             raise ValueError(f"Unknown smoothing_method: {smoothing_method}")
-    phi_int_s, phi_dx_s, phi_dy_s, phi_def_s = fields
+    phi_int_s, phi_dx_s, phi_dy_s, phi_def_s, phi_strain_s, phi_lap_s = fields
 
     # Step 4: Mask
-    finite_mask = np.isfinite(phi_int_s) & np.isfinite(phi_dx_s) & \
-                  np.isfinite(phi_dy_s) & np.isfinite(phi_def_s)
+    finite_mask = (np.isfinite(phi_int_s) & np.isfinite(phi_dx_s) &
+                   np.isfinite(phi_dy_s) & np.isfinite(phi_def_s) &
+                   np.isfinite(phi_strain_s) & np.isfinite(phi_lap_s))
     pv_mask = _parse_mask_spec(
         _mask_spec, phi_int_s,
         _mask_negative=mask_negative, _mask_threshold=mask_threshold,
     )
     if pv_mask is not None:
-        # Keep only the single connected blob enclosing (or nearest to)
-        # the patch centre so that distant secondary anomalies are excluded.
         pv_mask = _select_central_blob(pv_mask, x_rel, y_rel)
         mask_arr = finite_mask & pv_mask
     else:
@@ -409,15 +523,18 @@ def compute_orthogonal_basis(
         weights = np.ones_like(Y_grid)
     weights = np.where(mask_arr, weights, 0.0)
 
-    # Step 6: Gram-Schmidt
+    # Step 6: Gram-Schmidt on all 6 bases
     ortho, norms = gram_schmidt_orthogonalize(
-        [phi_int_s, phi_dx_s, phi_dy_s, phi_def_s], weights, mask_arr)
+        [phi_int_s, phi_dx_s, phi_dy_s, phi_def_s, phi_strain_s, phi_lap_s],
+        weights, mask_arr)
 
     prenorm_dict = {
-        "beta": PRENORM_PHI1,
-        "ax": PRENORM_PHI2,
-        "ay": PRENORM_PHI3,
-        "gamma": PRENORM_PHI4,
+        "beta": pn[0],
+        "ax": pn[1],
+        "ay": pn[2],
+        "gamma1": pn[3],
+        "gamma2": pn[4],
+        "sigma": pn[5],
     }
 
     return OrthogonalBasisFields(
@@ -425,6 +542,8 @@ def compute_orthogonal_basis(
         phi_dx=np.asarray(ortho[1], dtype=float),
         phi_dy=np.asarray(ortho[2], dtype=float),
         phi_def=np.asarray(ortho[3], dtype=float),
+        phi_strain=np.asarray(ortho[4], dtype=float),
+        phi_lap=np.asarray(ortho[5], dtype=float),
         weights=weights,
         mask=mask_arr,
         x_rel=np.asarray(x_rel, dtype=float),
@@ -435,6 +554,11 @@ def compute_orthogonal_basis(
         raw_phi_dx=pv_dx,
         raw_phi_dy=pv_dy,
         raw_phi_def=raw_phi_def,
-        norms={"beta": norms[0], "ax": norms[1], "ay": norms[2], "gamma": norms[3]},
+        raw_phi_strain=raw_phi_strain,
+        raw_phi_lap=raw_phi_lap,
+        norms={
+            "beta": norms[0], "ax": norms[1], "ay": norms[2],
+            "gamma1": norms[3], "gamma2": norms[4], "sigma": norms[5],
+        },
         scale_factors=prenorm_dict,
     )

@@ -1,33 +1,34 @@
-"""Moist/dry omega decomposition and divergent wind recovery.
+"""Adiabatic/diabatic omega decomposition and divergent wind recovery.
 
-Decomposes total vertical velocity (omega) into dry and moist components:
+Decomposes total vertical velocity (omega) into adiabatic and diabatic
+components:
 
-    ω_total  = ω_dry + ω_moist
-    ω_dry    = QG omega (from solve_qg_omega)
-    ω_moist  = ω_total − ω_dry
+    ω_total     = ω_adiabatic + ω_diabatic
+    ω_adiabatic = QG omega (from solve_qg_omega)
+    ω_diabatic  = ω_total − ω_adiabatic
 
-Each divergent wind component (moist, dry, qg-moist) is recovered
-**independently** via its own Poisson inversion:
+Each divergent wind component (diabatic, adiabatic, qg-diabatic) is
+recovered **independently** via its own Poisson inversion:
 
     ∇²χ_X = −∂ω_X/∂p
     (u_div_X, v_div_X) = ∇χ_X
 
-where X ∈ {moist, dry, qg_moist}.
+where X ∈ {diabatic, adiabatic, qg_diabatic}.
 
 Total-field approximation
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 The QG omega solve and Poisson inversion are performed on **total
 fields** (ω, not ω'), exploiting |ω'| >> |ω̄| in midlatitude synoptic
 systems.  Because the climatological mean vertical velocity is
-negligibly small compared with the anomaly, the total-field moist
-omega closely approximates the anomaly moist omega:
+negligibly small compared with the anomaly, the total-field diabatic
+omega closely approximates the anomaly diabatic omega:
 
-    ω_moist ≈ ω'_moist
+    ω_diabatic ≈ ω'_diabatic
 
 The same linear approximation propagates through the Poisson inversion
 to the horizontal divergent wind:
 
-    u_div_moist ≈ u'_div_moist
+    u_div_diabatic ≈ u'_div_diabatic
 """
 
 from __future__ import annotations
@@ -121,19 +122,19 @@ solve_chi_moist = solve_chi_from_omega
 
 def decompose_omega(
     omega_total: np.ndarray,
-    omega_dry: np.ndarray,
+    omega_adiabatic: np.ndarray,
     lat: np.ndarray,
     lon: np.ndarray,
     plevs_pa: np.ndarray,
     u_div: np.ndarray | None = None,
     v_div: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
-    """Full moist/dry omega decomposition with divergent wind recovery.
+    """Full adiabatic/diabatic omega decomposition with divergent wind recovery.
 
-    Given total omega and its QG (dry) component, this function:
+    Given total omega and its QG (adiabatic) component, this function:
 
-    1. Computes the moist residual: ``ω_moist = ω_total − ω_dry``.
-    2. Solves independently for **both** moist and dry velocity
+    1. Computes the diabatic residual: ``ω_diabatic = ω_total − ω_adiabatic``.
+    2. Solves independently for **both** diabatic and adiabatic velocity
        potentials via Poisson equation on each pressure level.
     3. Recovers the divergent wind for each component as the
        gradient of its respective velocity potential.
@@ -141,68 +142,68 @@ def decompose_omega(
     Args:
         omega_total: Total vertical velocity [Pa/s],
             shape ``(nlev, nlat, nlon)``.
-        omega_dry: QG omega (dry component) [Pa/s],
+        omega_adiabatic: QG omega (adiabatic component) [Pa/s],
             shape ``(nlev, nlat, nlon)``.
         lat: Latitude [degrees], ascending, shape ``(nlat,)``.
         lon: Longitude [degrees], shape ``(nlon,)``.
         plevs_pa: Pressure levels [Pa], ascending, shape ``(nlev,)``.
         u_div: Total divergent u-component [m/s] (optional),
-            shape ``(nlev, nlat, nlon)``.  No longer used for dry
+            shape ``(nlev, nlat, nlon)``.  No longer used for adiabatic
             residual computation but accepted for API compatibility.
         v_div: Total divergent v-component [m/s] (optional),
-            shape ``(nlev, nlat, nlon)``.  No longer used for dry
+            shape ``(nlev, nlat, nlon)``.  No longer used for adiabatic
             residual computation but accepted for API compatibility.
 
     Returns:
         Dictionary containing:
 
-        - ``"omega_moist"``: Moist omega residual.
-        - ``"chi_moist"``: Moist velocity potential.
-        - ``"u_div_moist"``: Moist divergent u-component.
-        - ``"v_div_moist"``: Moist divergent v-component.
-        - ``"chi_dry"``: Dry velocity potential.
-        - ``"u_div_dry"``: Dry divergent u-component.
-        - ``"v_div_dry"``: Dry divergent v-component.
+        - ``"omega_diabatic"``: Diabatic omega residual.
+        - ``"chi_diabatic"``: Diabatic velocity potential.
+        - ``"u_div_diabatic"``: Diabatic divergent u-component.
+        - ``"v_div_diabatic"``: Diabatic divergent v-component.
+        - ``"chi_adiabatic"``: Adiabatic velocity potential.
+        - ``"u_div_adiabatic"``: Adiabatic divergent u-component.
+        - ``"v_div_adiabatic"``: Adiabatic divergent v-component.
     """
-    omega_moist = omega_total - omega_dry
+    omega_diabatic = omega_total - omega_adiabatic
 
     chi_m, u_div_m, v_div_m = solve_chi_from_omega(
-        omega_moist, lat, lon, plevs_pa
+        omega_diabatic, lat, lon, plevs_pa
     )
     chi_d, u_div_d, v_div_d = solve_chi_from_omega(
-        omega_dry, lat, lon, plevs_pa
+        omega_adiabatic, lat, lon, plevs_pa
     )
 
     return {
-        "omega_moist": omega_moist,
-        "chi_moist": chi_m,
-        "u_div_moist": u_div_m,
-        "v_div_moist": v_div_m,
-        "chi_dry": chi_d,
-        "u_div_dry": u_div_d,
-        "v_div_dry": v_div_d,
+        "omega_diabatic": omega_diabatic,
+        "chi_diabatic": chi_m,
+        "u_div_diabatic": u_div_m,
+        "v_div_diabatic": v_div_m,
+        "chi_adiabatic": chi_d,
+        "u_div_adiabatic": u_div_d,
+        "v_div_adiabatic": v_div_d,
     }
 
 
 def verify_div_additivity(
     u_div: np.ndarray,
-    u_div_dry: np.ndarray,
-    u_div_moist: np.ndarray,
+    u_div_adiabatic: np.ndarray,
+    u_div_diabatic: np.ndarray,
 ) -> float:
     """Verify additive consistency of divergent wind decomposition.
 
-    Checks that the independently Poisson-inverted dry and moist
+    Checks that the independently Poisson-inverted adiabatic and diabatic
     divergent winds sum to the total divergent wind to machine
     precision:
 
-        max |u_div_dry + u_div_moist − u_div|
+        max |u_div_adiabatic + u_div_diabatic − u_div|
 
     Args:
         u_div: Total divergent component, any shape.
-        u_div_dry: Dry divergent component, same shape.
-        u_div_moist: Moist divergent component, same shape.
+        u_div_adiabatic: Adiabatic divergent component, same shape.
+        u_div_diabatic: Diabatic divergent component, same shape.
 
     Returns:
         Maximum absolute error of the additive split.
     """
-    return float(np.max(np.abs(u_div_dry + u_div_moist - u_div)))
+    return float(np.max(np.abs(u_div_adiabatic + u_div_diabatic - u_div)))

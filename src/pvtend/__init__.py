@@ -5,7 +5,7 @@ This package provides a complete pipeline for:
 1. Loading ERA5 pressure-level data
 2. Computing PV tendencies (advection, stretching, diabatic, residual)
 3. QG omega and Helmholtz decomposition
-4. Moist/dry omega partitioning
+4. Adiabatic/diabatic omega partitioning
 5. Orthogonal basis decomposition of PV tendency
 6. Rossby wave breaking detection and classification
 7. Composite lifecycle analysis
@@ -48,6 +48,9 @@ from pvtend.moist_dry import decompose_omega, solve_chi_from_omega, verify_div_a
 from pvtend.decomposition import (
     OrthogonalBasisFields,
     compute_orthogonal_basis,
+    compute_strain_basis,
+    compute_laplacian_basis,
+    auto_prenorm,
     project_field,
     collect_term_fields,
     lerp_fields,
@@ -107,6 +110,7 @@ __all__ = [
     "decompose_omega", "solve_chi_from_omega", "verify_div_additivity",
     # Decomposition
     "OrthogonalBasisFields", "compute_orthogonal_basis",
+    "compute_strain_basis", "compute_laplacian_basis", "auto_prenorm",
     "project_field", "collect_term_fields",
     "lerp_fields",
     # RWB

@@ -38,6 +38,10 @@ docs/generated/
 # Downloaded data (large)
 examples/era5_jan2025/
 
+# Scratch/archive notebooks
+examples/archive/
+examples/08_rwb_tilt/
+
 # Paper (local only, not tracked)
 paper/
 

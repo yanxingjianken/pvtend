@@ -445,18 +445,48 @@ horizontal divergent wind.
 Orthogonal Basis Decomposition
 ------------------------------
 
-Projects PV tendency fields onto a set of four **quadrupole** basis
+Projects PV tendency fields onto a set of six orthogonal basis
 functions constructed via Gram-Schmidt orthogonalisation.  Each basis
 captures a distinct dynamical mode of blocking intensification /
 weakening:
 
-1. :math:`\Phi_1` — Monopole (uniform PV tendency)
-2. :math:`\Phi_2` — Dipole N-S (meridional shift)
-3. :math:`\Phi_3` — Dipole E-W (zonal propagation)
-4. :math:`\Phi_4` — Quadrupole (intensification / weakening)
+1. :math:`\Phi_1 = q'` — PV anomaly (intensification / weakening)
+2. :math:`\Phi_2 = \partial q/\partial x` — Zonal gradient (zonal propagation)
+3. :math:`\Phi_3 = \partial q/\partial y` — Meridional gradient (meridional propagation)
+4. :math:`\Phi_4 = \partial^2 q/\partial x\,\partial y` — Shear deformation (:math:`\gamma_1`)
+5. :math:`\Phi_5 = \partial^2 q/\partial x^2 - \partial^2 q/\partial y^2` — Normal-strain deformation (:math:`\gamma_2`)
+6. :math:`\Phi_6 = \partial^2 q/\partial x^2 + \partial^2 q/\partial y^2` — Laplacian dispersion (:math:`\sigma`)
 
-The projection coefficients :math:`c_i(t)` quantify each term's
-contribution to the blocking lifecycle at each timestep.
+The projection coefficients :math:`\beta, a_x, a_y, \gamma_1, \gamma_2, \sigma`
+quantify each term's contribution to the blocking lifecycle at each timestep.
+
+Pre-normalization
+^^^^^^^^^^^^^^^^^
+
+Because the raw basis fields span many orders of magnitude (PVU,
+PVU m\ :sup:`-1`, PVU m\ :sup:`-2`), each is scaled to :math:`O(1)` before
+orthogonalisation.  The default constants are:
+
+.. list-table:: Pre-normalization constants
+   :widths: 20 20 40
+   :header-rows: 1
+
+   * - Basis
+     - Constant
+     - Typical magnitude
+   * - :math:`\Phi_1` (PV anomaly)
+     - :math:`10^{6}`
+     - :math:`\sim 10^{-6}` K m\ :sup:`2` s\ :sup:`-1` kg\ :sup:`-1`
+   * - :math:`\Phi_2, \Phi_3` (gradients)
+     - :math:`10^{12}`
+     - :math:`\sim 10^{-12}` K m s\ :sup:`-1` kg\ :sup:`-1`
+   * - :math:`\Phi_4, \Phi_5, \Phi_6` (2nd derivatives)
+     - :math:`10^{18}`
+     - :math:`\sim 10^{-18}` K s\ :sup:`-1` kg\ :sup:`-1`
+
+Alternatively, :func:`auto_prenorm` computes per-event normalization as
+:math:`1/\mathrm{median}(|f|)` over the finite masked region, activated
+via ``prenorm_mode="auto"``.
 
 Single-blob selection
 ^^^^^^^^^^^^^^^^^^^^^
@@ -473,10 +503,11 @@ Temporal down-scaling (bi-linear interpolation)
 
 :func:`compute_orthogonal_basis` supports **temporal down-scaling** from
 hourly ERA5 snapshots to a sub-hourly evaluation instant via built-in
-bi-linear interpolation.  When the ``pv_anom_prev``, ``pv_dx_prev``, and
-``pv_dy_prev`` keyword arguments are supplied (the fields at hour *dh − 1*),
-the positional fields (at hour *dh*) are interpolated before basis
-construction:
+bi-linear interpolation.  When the ``pv_anom_prev``, ``pv_dx_prev``,
+``pv_dy_prev``, and (optionally) ``pv_dx_dy_prev``, ``pv_dx_dx_prev``,
+``pv_dy_dy_prev`` keyword arguments are supplied (the fields at hour
+*dh − 1*), the positional fields (at hour *dh*) are interpolated before
+basis construction:
 
 .. math::
 
@@ -505,6 +536,12 @@ inherits the same property.
      - Zonal PV gradient :math:`\partial q/\partial x` at *dh − 1*.
    * - ``pv_dy_prev``
      - Meridional PV gradient :math:`\partial q/\partial y` at *dh − 1*.
+   * - ``pv_dx_dy_prev``
+     - Cross derivative :math:`\partial^2 q/\partial x\,\partial y` at *dh − 1*.
+   * - ``pv_dx_dx_prev``
+     - :math:`\partial^2 q/\partial x^2` at *dh − 1*.
+   * - ``pv_dy_dy_prev``
+     - :math:`\partial^2 q/\partial y^2` at *dh − 1*.
    * - ``interp_alpha``
      - Weight for the positional (current-dh) fields (default **1.0**).
        Set to 0.75 for 15-min before dh, or 0 to use only dh − 1.
@@ -526,6 +563,9 @@ basis pipeline:
 
    OrthogonalBasisFields
    compute_orthogonal_basis
+   compute_strain_basis
+   compute_laplacian_basis
+   auto_prenorm
    project_field
    collect_term_fields
 

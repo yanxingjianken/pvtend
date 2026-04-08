@@ -1,18 +1,23 @@
-"""Orthogonal four-basis decomposition for PV tendency analysis.
+"""Orthogonal six-basis decomposition for PV tendency analysis.
 
 Submodules:
     smoothing: Gaussian and Fourier smoothing methods
-    basis: Quadrupole basis construction and Gram-Schmidt orthogonalization
+    basis: Six-basis construction and Gram-Schmidt orthogonalization
     projection: Project tendency fields onto orthogonal basis
 """
 
 from .basis import (
     OrthogonalBasisFields,
     compute_orthogonal_basis,
+    compute_strain_basis,
+    compute_laplacian_basis,
+    auto_prenorm,
     PRENORM_PHI1,
     PRENORM_PHI2,
     PRENORM_PHI3,
     PRENORM_PHI4,
+    PRENORM_PHI5,
+    PRENORM_PHI6,
 )
 from ..constants import MASK_PV_THRESHOLD
 from .projection import project_field, collect_term_fields
@@ -22,6 +27,9 @@ from .interpolation import lerp_fields
 __all__ = [
     "OrthogonalBasisFields",
     "compute_orthogonal_basis",
+    "compute_strain_basis",
+    "compute_laplacian_basis",
+    "auto_prenorm",
     "project_field",
     "collect_term_fields",
     "gaussian_smooth_nan",
@@ -31,5 +39,7 @@ __all__ = [
     "PRENORM_PHI2",
     "PRENORM_PHI3",
     "PRENORM_PHI4",
+    "PRENORM_PHI5",
+    "PRENORM_PHI6",
     "MASK_PV_THRESHOLD",
 ]

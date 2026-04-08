@@ -119,20 +119,20 @@ EXPECTED_CROSS_TERM_KEYS = {
     "v_anom_div_pv_bar_dy", "v_anom_div_pv_anom_dy",
     "v_rot_bar_pv_bar_dy", "v_rot_bar_pv_anom_dy",
     "v_div_bar_pv_bar_dy", "v_div_bar_pv_anom_dy",
-    # 16 divergent dry/moist horizontal
-    "u_div_moist_pv_bar_dx", "u_div_moist_pv_anom_dx",
-    "u_div_dry_pv_bar_dx", "u_div_dry_pv_anom_dx",
-    "v_div_moist_pv_bar_dy", "v_div_moist_pv_anom_dy",
-    "v_div_dry_pv_bar_dy", "v_div_dry_pv_anom_dy",
-    "u_div_qg_moist_pv_bar_dx", "u_div_qg_moist_pv_anom_dx",
-    "v_div_qg_moist_pv_bar_dy", "v_div_qg_moist_pv_anom_dy",
-    "u_div_emanuel_moist_pv_bar_dx", "u_div_emanuel_moist_pv_anom_dx",
-    "v_div_emanuel_moist_pv_bar_dy", "v_div_emanuel_moist_pv_anom_dy",
+    # 16 divergent adiabatic/diabatic horizontal
+    "u_div_diabatic_pv_bar_dx", "u_div_diabatic_pv_anom_dx",
+    "u_div_adiabatic_pv_bar_dx", "u_div_adiabatic_pv_anom_dx",
+    "v_div_diabatic_pv_bar_dy", "v_div_diabatic_pv_anom_dy",
+    "v_div_adiabatic_pv_bar_dy", "v_div_adiabatic_pv_anom_dy",
+    "u_div_qg_diabatic_pv_bar_dx", "u_div_qg_diabatic_pv_anom_dx",
+    "v_div_qg_diabatic_pv_bar_dy", "v_div_qg_diabatic_pv_anom_dy",
+    "u_div_lhr_moist_pv_bar_dx", "u_div_lhr_moist_pv_anom_dx",
+    "v_div_lhr_moist_pv_bar_dy", "v_div_lhr_moist_pv_anom_dy",
     # 8 alt vertical
-    "w_dry_pv_bar_dp", "w_dry_pv_anom_dp",
-    "w_moist_pv_bar_dp", "w_moist_pv_anom_dp",
-    "w_qg_moist_pv_bar_dp", "w_qg_moist_pv_anom_dp",
-    "w_emanuel_moist_pv_bar_dp", "w_emanuel_moist_pv_anom_dp",
+    "w_adiabatic_pv_bar_dp", "w_adiabatic_pv_anom_dp",
+    "w_diabatic_pv_bar_dp", "w_diabatic_pv_anom_dp",
+    "w_qg_diabatic_pv_bar_dp", "w_qg_diabatic_pv_anom_dp",
+    "w_lhr_moist_pv_bar_dp", "w_lhr_moist_pv_anom_dp",
 }
 
 

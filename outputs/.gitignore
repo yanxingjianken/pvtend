@@ -1,0 +1,8 @@
+# Ignore all NPZ, PKL, and composite outputs (large data files)
+*.npz
+*.pkl
+*.pickle
+*.json.gz
+
+# Keep the directory structure
+!.gitignore
