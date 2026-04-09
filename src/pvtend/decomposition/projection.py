@@ -109,12 +109,10 @@ def project_field(
         ax, ay, gamma1, gamma2 are negated relative to the raw inner
         product: ``coeff = -<A, Phi> / <Phi, Phi>``.  This makes
         positive ax → eastward propagation, positive gamma1 → AWB
-        tendency.  The returned ``def`` field is ``gamma1*Phi4 +
-        gamma2*Phi5`` (coefficient-weighted), so the deformation
-        torque ``tau = sum(x'y' * def)`` directly gives
-        ``omega = tau / I_pv`` without additional negation.
-        The reconstruction uses ``-def1 - def2`` to recover the
-        correct projection identity.
+        tendency.  Each returned component field (int, prop, def1,
+        def2, lap) represents its additive contribution to dq/dt.
+        The reconstruction is the sum of all five:
+        ``recon = int + prop + def1 + def2 + lap``.
     """
     arr = np.asarray(field2d, dtype=float)
     if arr.shape != basis.grid_shape:
@@ -171,10 +169,10 @@ def project_field(
 
     inten = beta_raw * basis.phi_int
     prop = -ax_raw * basis.phi_dx - ay_raw * basis.phi_dy
-    def1 = gamma1_raw * basis.phi_def
-    def2 = gamma2_raw * basis.phi_strain
+    def1 = -gamma1_raw * basis.phi_def
+    def2 = -gamma2_raw * basis.phi_strain
     lap = sigma_raw * basis.phi_lap
-    recon = inten + prop - def1 - def2 + lap
+    recon = inten + prop + def1 + def2 + lap
     resid = np.where(basis.mask, arr - recon, np.nan)
 
     rmse = math.sqrt(np.nanmean((arr[valid] - recon[valid]) ** 2))
