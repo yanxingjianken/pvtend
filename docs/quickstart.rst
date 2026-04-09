@@ -6,8 +6,9 @@ Basic usage — load data & compute derivatives
 
 ``pvtend`` ships with an idealized Gaussian PV anomaly that undergoes
 simultaneous propagation, intensification, and deformation over one
-hour.  Let's load it, compute all the spatial/temporal derivatives, and
-visualise them.
+hour.  Let's load it, compute all the spatial/temporal derivatives
+(including the second-order terms needed for the six-basis
+decomposition), and visualise them.
 
 .. code-block:: python
 
@@ -24,43 +25,53 @@ visualise them.
 
    print(f"Grid shape: {q0.shape},  Δx = {float(d['dx_m'])/1e3:.0f} km,  Δt = {dt:.0f} s")
 
-   # ── 2. Derivatives ───────────────────────────────────────────────
+   # ── 2. First-order derivatives ───────────────────────────────────
    dq_dx = pvtend.ddx(q0, dx_arr, periodic=False)  # ∂q/∂x  [PVU/m]
    dq_dy = pvtend.ddy(q0, dy_m)                     # ∂q/∂y  [PVU/m]
-   dq_dxdy = pvtend.ddy(dq_dx, dy_m)                # ∂²q/∂x∂y [PVU/m²]
    dq_dt = (q1 - q0) / dt                           # Δq/Δt  [PVU/s]
 
-   # ── 3. Visualise (2 rows × 3 columns) ────────────────────────────
+   # ── 3. Second-order derivatives (for the six-basis fields) ───────
+   dq_dxdy = pvtend.ddy(dq_dx, dy_m)                              # ∂²q/∂x∂y  (Φ₄ shear)
+   dq_dx2  = pvtend.ddx(dq_dx, dx_arr, periodic=False)            # ∂²q/∂x²
+   dq_dy2  = pvtend.ddy(dq_dy, dy_m)                              # ∂²q/∂y²
+   strain  = dq_dx2 - dq_dy2                                      # ∂²q/∂x²−∂²q/∂y² (Φ₅ normal strain)
+   laplacian = dq_dx2 + dq_dy2                                    # ∂²q/∂x²+∂²q/∂y² (Φ₆ Laplacian)
+
+   # ── 4. Visualise (3 rows × 3 columns) ────────────────────────────
    panels = [
-       (q0,      r"$q_0$"),
-       (q1,      r"$q_1$"),
-       (dq_dt,   r"$\Delta q / \Delta t$"),
-       (dq_dx,   r"$\partial q / \partial x$"),
-       (dq_dy,   r"$\partial q / \partial y$"),
-       (dq_dxdy, r"$\partial^2 q / \partial x \partial y$"),
+       (q0,        r"$q_0$"),
+       (q1,        r"$q_1$"),
+       (dq_dt,     r"$\Delta q / \Delta t$"),
+       (dq_dx,     r"$\partial q / \partial x$"),
+       (dq_dy,     r"$\partial q / \partial y$"),
+       (dq_dxdy,   r"$\partial^2 q / \partial x \partial y$  (shear)"),
+       (strain,    r"$\partial^2 q/\partial x^2 - \partial^2 q/\partial y^2$  (strain)"),
+       (laplacian, r"$\nabla^2 q$  (Laplacian)"),
+       (dq_dx2,    r"$\partial^2 q / \partial x^2$"),
    ]
 
-   fig, axes = plt.subplots(2, 3, figsize=(15, 8), constrained_layout=True)
+   fig, axes = plt.subplots(3, 3, figsize=(15, 12), constrained_layout=True)
    for ax, (fld, title) in zip(axes.ravel(), panels):
        vm = np.nanmax(np.abs(fld)) or 1.0
        im = ax.contourf(x_km, y_km, fld, 21, vmin=-vm, vmax=vm, cmap="RdBu_r")
-       ax.set_title(title, fontsize=12)
+       ax.set_title(title, fontsize=11)
        ax.set_aspect("equal")
        plt.colorbar(im, ax=ax, shrink=0.75)
-   fig.suptitle("Idealized PV evolution and spatial derivatives", fontsize=14)
+   fig.suptitle("Idealized PV evolution, 1st- and 2nd-order spatial derivatives", fontsize=14)
    plt.show()
 
 .. image:: _static/quickstart_derivatives.png
-   :alt: PV fields and spatial derivatives (2×3 panel)
+   :alt: PV fields and spatial derivatives (3×3 panel)
    :width: 100%
 
 
 Orthogonal basis decomposition
 ------------------------------
 
-Using the derivatives from above, build the four orthogonal bases
-(intensification / propagation / deformation) via Gram-Schmidt, project
-the PV tendency, and compare the reconstruction with the original.
+Using the derivatives from above, build the **six** orthogonal bases
+(Φ₁ intensification / Φ₂–Φ₃ propagation / Φ₄–Φ₅ deformation /
+Φ₆ Laplacian) via Gram-Schmidt, project the PV tendency, and compare
+the reconstruction with the original.
 
 .. code-block:: python
 
@@ -86,34 +97,39 @@ the PV tendency, and compare the reconstruction with the original.
    # ── 2. Project tendency onto basis ───────────────────────────────
    result = project_field(dq_dt, basis)
 
-   print(f"β  (intensification) = {result['beta']:.3e} s⁻¹")
-   print(f"αx (zonal prop.)     = {result['ax']:.1f} m/s")
-   print(f"αy (merid. prop.)    = {result['ay']:.1f} m/s")
-   print(f"γ  (deformation)     = {result['gamma']:.3e} m² s⁻¹")
-   print(f"RMSE                 = {result['rmse']:.3e}")
+   print(f"β  (intensification)     = {result['beta']:.3e} s⁻¹")
+   print(f"αx (zonal propagation)   = {result['ax']:.1f} m/s")
+   print(f"αy (merid. propagation)  = {result['ay']:.1f} m/s")
+   print(f"γ₁ (shear deformation)   = {result['gamma1']:.3e} m² s⁻¹")
+   print(f"γ₂ (normal strain)       = {result['gamma2']:.3e} m² s⁻¹")
+   print(f"σ  (Laplacian/diffusion) = {result['sigma']:.3e} m² s⁻¹")
+   print(f"RMSE                     = {result['rmse']:.3e}")
 
-   # ── 3. Visualise (2 rows × 3 columns) ────────────────────────────
+   # ── 3. Visualise (3 rows × 3 columns) ────────────────────────────
    panels2 = [
        (result["int"],   rf"INT ($\beta$={result['beta']:.2e} s$^{{-1}}$)"),
        (result["prop"],  rf"PRP ($\alpha_x$={result['ax']:.1f}, $\alpha_y$={result['ay']:.1f} m/s)"),
-       (result["def"],   rf"DEF ($\gamma$={result['gamma']:.2e} m$^2$ s$^{{-1}}$)"),
+       (result["def1"],  rf"DEF$_1$ shear ($\gamma_1$={result['gamma1']:.2e} m$^2$/s)"),
+       (result["def2"],  rf"DEF$_2$ strain ($\gamma_2$={result['gamma2']:.2e} m$^2$/s)"),
+       (result["lap"],   rf"LAP ($\sigma$={result['sigma']:.2e} m$^2$/s)"),
+       (result["def"],   r"DEF$_1$+DEF$_2$ combined"),
        (dq_dt,           r"Original $\Delta q / \Delta t$"),
        (result["recon"], r"Reconstructed $\hat{F}$"),
        (result["resid"], "Residual (error)"),
    ]
 
-   fig, axes = plt.subplots(2, 3, figsize=(15, 8), constrained_layout=True)
+   fig, axes = plt.subplots(3, 3, figsize=(15, 12), constrained_layout=True)
    for ax, (fld, title) in zip(axes.ravel(), panels2):
        vm = np.nanmax(np.abs(fld)) or 1.0
        im = ax.contourf(x_km, y_km, fld, 21, vmin=-vm, vmax=vm, cmap="RdBu_r")
        ax.set_title(title, fontsize=11)
        ax.set_aspect("equal")
        plt.colorbar(im, ax=ax, shrink=0.75)
-   fig.suptitle("Basis decomposition — smoothed + Gram-Schmidt", fontsize=14)
+   fig.suptitle("Six-basis decomposition — smoothed + Gram-Schmidt", fontsize=14)
    plt.show()
 
 .. image:: _static/quickstart_decomposition.png
-   :alt: Orthogonal basis decomposition and reconstruction (2×3 panel)
+   :alt: Orthogonal six-basis decomposition and reconstruction (3×3 panel)
    :width: 100%
 
 
