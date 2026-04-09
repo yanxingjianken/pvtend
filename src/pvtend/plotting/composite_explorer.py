@@ -206,7 +206,7 @@ def plot_var(
     Returns:
         Result dict with key ``"vmax"`` (the colour-range used) and,
         when ``projection=True``, all projection keys
-        (``beta``, ``ax``, ``ay``, ``gamma``, etc.).
+        (``beta``, ``ax``, ``ay``, ``gamma1``, ``gamma2``, ``sigma``, etc.).
     """
     _smooth = lambda f: gaussian_smooth_nan(
         f, smoothing_deg=smooth_deg, grid_spacing=grid_sp
@@ -282,11 +282,11 @@ def plot_var(
         print(
             f"  Projection (sig-only): "
             f"β={proj['beta']:.3e}  αx={proj['ax']:.3f}  "
-            f"αy={proj['ay']:.3f}  γ={proj['gamma']:.3e}"
+            f"αy={proj['ay']:.3f}  γ₁={proj['gamma1']:.3e}  γ₂={proj['gamma2']:.3e}  σ={proj['sigma']:.3e}"
         )
 
     # ── 4. Plot ──
-    n_rows = 3 if projection else 1
+    n_rows = 4 if projection else 1
     fig = plt.figure(
         figsize=(14 * figsize_scale, 5 * n_rows * figsize_scale),
     )
@@ -341,7 +341,9 @@ def plot_var(
         panels = [
             ("INT (β · Φ₁)", proj["int"]),
             ("PRP (αx·Φ₂ + αy·Φ₃)", proj["prop"]),
-            ("DEF (γ · Φ₄)", proj["def"]),
+            ("DEF₁ (γ₁ · Φ₄)", proj["def1"]),
+            ("DEF₂ (γ₂ · Φ₅)", proj["def2"]),
+            ("LAP (σ · Φ₆)", proj["lap"]),
             ("Residual", proj["resid"]),
         ]
         all_abs = np.concatenate([
@@ -355,7 +357,7 @@ def plot_var(
             f"β={proj['beta']:.3e} s⁻¹   "
             f"αx={proj['ax']:.3f} m/s   "
             f"αy={proj['ay']:.3f} m/s   "
-            f"γ={proj['gamma']:.3e} s⁻¹   "
+            f"γ₁={proj['gamma1']:.3e}  γ₂={proj['gamma2']:.3e}  σ={proj['sigma']:.3e} km²/s   "
             f"RMSE/max={proj['rmse']/(np.nanmax(np.abs(mean_fld))+1e-30):.3f}"
         )
 

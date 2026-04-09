@@ -29,7 +29,10 @@ from pvtend.constants import (
 )
 
 # Derivatives and climatology
-from pvtend.derivatives import ddx, ddy, ddp, ddt, d_dlambda, d_dphi, div_spherical
+from pvtend.derivatives import (
+    ddx, ddy, ddp, ddt, d_dlambda, d_dphi, div_spherical,
+    compute_dx_arr, compute_dy, ddx_dx, ddy_dy, ddx_dy,
+)
 from pvtend.climatology import (
     compute_climatology, load_climatology,
     compute_helmholtz_climatology, load_helmholtz_climatology,

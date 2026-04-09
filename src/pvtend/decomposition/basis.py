@@ -28,6 +28,7 @@ import numpy as np
 from scipy.ndimage import label as _ndimage_label
 
 from .smoothing import gaussian_smooth_nan, fourier_lowpass_nan
+from ..derivatives import ddx as _ddx, ddy as _ddy
 
 # Default mask threshold for q' region (SI units, PVU)
 from ..constants import MASK_PV_THRESHOLD as _DEFAULT_MASK_THRESHOLD
@@ -145,19 +146,27 @@ def gram_schmidt_orthogonalize(
 
 def compute_quadrupole_basis(
     pv_dx: np.ndarray, y_rel: np.ndarray,
+    *,
+    center_lat: float = 60.0,
 ) -> np.ndarray:
     """Compute quadrupole basis as cross-derivative ∂²q/∂x∂y.
+
+    Uses :func:`pvtend.derivatives.ddy` with cos(lat)-independent
+    meridional metric (latitude spacing is constant on a lat-lon grid).
 
     Parameters:
         pv_dx: Zonal PV gradient ∂q/∂x in SI units (PVU/m).
         y_rel: Relative latitude degrees.
+        center_lat: Patch centre latitude (degrees N).  Unused for the
+            meridional derivative (dy is latitude-independent), but
+            kept for API symmetry.
 
     Returns:
         Cross-derivative ∂²q/∂x∂y (PVU/m²).
     """
     dy_deg = y_rel[1] - y_rel[0] if len(y_rel) > 1 else 1.5
-    dy_m = 2 * np.pi * R_EARTH / 360
-    return np.gradient(np.asarray(pv_dx, dtype=float), dy_deg, axis=0) / dy_m
+    dy_m = np.deg2rad(abs(dy_deg)) * R_EARTH
+    return _ddy(np.asarray(pv_dx, dtype=float), dy_m)
 
 
 def compute_strain_basis(
@@ -359,11 +368,15 @@ def compute_orthogonal_basis(
     smoothing_deg: float = 3.0,
     smoothing_method: str = "gaussian",
     grid_spacing: float = 1.5,
+    center_lat: float = 60.0,
     apply_lat_weighting: bool = False,
     prenorm_mode: str = "auto",
     pv_anom_prev: np.ndarray | None = None,
     pv_dx_prev: np.ndarray | None = None,
     pv_dy_prev: np.ndarray | None = None,
+    pv_dx_dy_prev: np.ndarray | None = None,
+    pv_dx_dx_prev: np.ndarray | None = None,
+    pv_dy_dy_prev: np.ndarray | None = None,
     interp_alpha: float = 1.0,
     # Deprecated — retained for backward compatibility
     mask_negative: bool | None = None,
@@ -397,6 +410,11 @@ def compute_orthogonal_basis(
         smoothing_deg: Smoothing FWHM (degrees).  Default 3.0°.
         smoothing_method: 'gaussian' or 'fourier'.
         grid_spacing: Grid spacing in degrees.
+        center_lat: Approximate latitude of the patch centre (degrees N).
+            Used to compute cos(lat)-corrected zonal metric for the
+            second-order derivative fallbacks (``∂²q/∂x²``).  Defaults
+            to 60.0°N (typical blocking latitude).  Set to 0.0 to
+            recover the old equatorial-metric behaviour.
         apply_lat_weighting: Use cos(lat) weighting.
         prenorm_mode: ``"auto"`` (default) for per-event runtime
             normalization, or ``"fixed"`` for legacy PRENORM constants.
@@ -404,6 +422,13 @@ def compute_orthogonal_basis(
             ``pv_dx_prev`` and ``pv_dy_prev`` must also be given.
         pv_dx_prev: Zonal PV gradient at dh−1.
         pv_dy_prev: Meridional PV gradient at dh−1.
+        pv_dx_dy_prev: Pre-computed ∂²q/∂x∂y at dh−1.  Optional; when
+            given together with ``pv_dx_dx_prev`` and ``pv_dy_dy_prev``,
+            the second-order derivatives are also interpolated.  When
+            omitted the interpolated first-order gradients are used to
+            recompute them via finite differences (less accurate).
+        pv_dx_dx_prev: Pre-computed ∂²q/∂x² at dh−1.
+        pv_dy_dy_prev: Pre-computed ∂²q/∂y² at dh−1.
         interp_alpha: Interpolation weight for the positional (current-dh) fields.
             Default 1.0 uses only the current-dh fields (no interpolation).
         mask_negative: *Deprecated.* Use ``mask`` instead.
@@ -444,11 +469,45 @@ def compute_orthogonal_basis(
         pv_dy = a * np.asarray(pv_dy, dtype=np.float64) + \
                 (1.0 - a) * np.asarray(pv_dy_prev, dtype=np.float64)
 
+        # Interpolate pre-computed 2nd-order derivatives when available
+        _prev_d2 = (pv_dx_dy_prev, pv_dx_dx_prev, pv_dy_dy_prev)
+        _prev_d2_given = [f is not None for f in _prev_d2]
+        if any(_prev_d2_given):
+            if not all(_prev_d2_given):
+                raise ValueError(
+                    "Provide all three of pv_dx_dy_prev, pv_dx_dx_prev, "
+                    "pv_dy_dy_prev, or none of them."
+                )
+            if pv_dx_dy is not None:
+                pv_dx_dy = a * np.asarray(pv_dx_dy, dtype=np.float64) + \
+                           (1.0 - a) * np.asarray(pv_dx_dy_prev, dtype=np.float64)
+            if pv_dx_dx is not None:
+                pv_dx_dx = a * np.asarray(pv_dx_dx, dtype=np.float64) + \
+                           (1.0 - a) * np.asarray(pv_dx_dx_prev, dtype=np.float64)
+            if pv_dy_dy is not None:
+                pv_dy_dy = a * np.asarray(pv_dy_dy, dtype=np.float64) + \
+                           (1.0 - a) * np.asarray(pv_dy_dy_prev, dtype=np.float64)
+
     # Step 1: Compute second-order derivative fields (with fallbacks)
-    dx_deg = x_rel[1] - x_rel[0] if len(x_rel) > 1 else 1.5
-    dy_deg = y_rel[1] - y_rel[0] if len(y_rel) > 1 else 1.5
-    dx_m = np.deg2rad(abs(dx_deg)) * R_EARTH
+    dx_deg = x_rel[1] - x_rel[0] if len(x_rel) > 1 else grid_spacing
+    dy_deg = y_rel[1] - y_rel[0] if len(y_rel) > 1 else grid_spacing
+
+    # Meridional metric: dy is latitude-independent
     dy_m = np.deg2rad(abs(dy_deg)) * R_EARTH
+
+    # Zonal metric: dx depends on cos(latitude) at each row
+    actual_lats = float(center_lat) + np.asarray(y_rel, dtype=float)
+    dx_arr = np.deg2rad(abs(dx_deg)) * R_EARTH * np.cos(np.deg2rad(actual_lats))
+
+    # Diagnostic — shown once per unique call site
+    _center_dx_km = float(dx_arr[len(dx_arr) // 2]) / 1e3
+    warnings.warn(
+        f"compute_orthogonal_basis: grid_spacing={grid_spacing}°, "
+        f"center_lat={center_lat}°N → "
+        f"dx(center)={_center_dx_km:.1f} km, "
+        f"dy={dy_m/1e3:.1f} km",
+        stacklevel=2,
+    )
 
     if pv_dx_dy is not None:
         raw_phi_def = np.asarray(pv_dx_dy, dtype=float)
@@ -458,12 +517,13 @@ def compute_orthogonal_basis(
     if pv_dx_dx is not None:
         _pv_dx_dx = np.asarray(pv_dx_dx, dtype=float)
     else:
-        _pv_dx_dx = np.gradient(np.asarray(pv_dx, dtype=float), dx_deg, axis=1) / dx_m
+        # Per-latitude centred differences with cos(lat)-corrected dx
+        _pv_dx_dx = _ddx(np.asarray(pv_dx, dtype=float), dx_arr, periodic=False)
 
     if pv_dy_dy is not None:
         _pv_dy_dy = np.asarray(pv_dy_dy, dtype=float)
     else:
-        _pv_dy_dy = np.gradient(np.asarray(pv_dy, dtype=float), dy_deg, axis=0) / dy_m
+        _pv_dy_dy = _ddy(np.asarray(pv_dy, dtype=float), dy_m)
 
     raw_phi_strain = compute_strain_basis(_pv_dx_dx, _pv_dy_dy)
     raw_phi_lap = compute_laplacian_basis(_pv_dx_dx, _pv_dy_dy)

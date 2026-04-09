@@ -3,6 +3,12 @@
 The projection coefficient formula:
     c_i = <f, Φ̂_i> / <Φ̂_i, Φ̂_i>
 
+For the propagation (αx, αy) and deformation (γ₁, γ₂) coefficients,
+a sign convention is applied so that:
+    - Positive αx/αy → eastward/poleward propagation
+    - Positive γ₁ → AWB (anticyclonic) tilt tendency
+    - Negative γ₁ → CWB (cyclonic) tilt tendency
+
 Physical unit recovery:
     coef_physical = coef_raw × PRENORM
 
@@ -10,7 +16,7 @@ Coefficients:
     β (beta): Intensification rate [s⁻¹]
     αx (ax): Zonal propagation speed [m/s]
     αy (ay): Meridional propagation speed [m/s]
-    γ₁ (gamma1): Shear deformation rate [m² s⁻¹]
+    γ₁ (gamma1): Shear deformation rate [m² s⁻¹] (>0 = AWB, <0 = CWB)
     γ₂ (gamma2): Normal strain rate [m² s⁻¹]
     σ (sigma): Laplacian/diffusion rate [m² s⁻¹]
 """
@@ -98,6 +104,17 @@ def project_field(
         Dict with coefficients (beta, ax, ay, gamma1, gamma2, sigma) in
         physical units, raw coefficients, component fields
         (int, prop, def1, def2, lap), residual, reconstruction, and RMSE.
+
+    Sign convention:
+        ax, ay, gamma1, gamma2 are negated relative to the raw inner
+        product: ``coeff = -<A, Phi> / <Phi, Phi>``.  This makes
+        positive ax → eastward propagation, positive gamma1 → AWB
+        tendency.  The returned ``def`` field is ``gamma1*Phi4 +
+        gamma2*Phi5`` (coefficient-weighted), so the deformation
+        torque ``tau = sum(x'y' * def)`` directly gives
+        ``omega = tau / I_pv`` without additional negation.
+        The reconstruction uses ``-def1 - def2`` to recover the
+        correct projection identity.
     """
     arr = np.asarray(field2d, dtype=float)
     if arr.shape != basis.grid_shape:
@@ -141,8 +158,8 @@ def project_field(
     beta_raw = inner_int / norm_int if norm_int > 1e-30 else 0.0
     ax_raw = -inner_dx / norm_dx if norm_dx > 1e-30 else 0.0
     ay_raw = -inner_dy / norm_dy if norm_dy > 1e-30 else 0.0
-    gamma1_raw = inner_def / norm_def if norm_def > 1e-30 else 0.0
-    gamma2_raw = inner_strain / norm_strain if norm_strain > 1e-30 else 0.0
+    gamma1_raw = -inner_def / norm_def if norm_def > 1e-30 else 0.0
+    gamma2_raw = -inner_strain / norm_strain if norm_strain > 1e-30 else 0.0
     sigma_raw = inner_lap / norm_lap if norm_lap > 1e-30 else 0.0
 
     beta = beta_raw * sf_int
@@ -157,7 +174,7 @@ def project_field(
     def1 = gamma1_raw * basis.phi_def
     def2 = gamma2_raw * basis.phi_strain
     lap = sigma_raw * basis.phi_lap
-    recon = inten + prop + def1 + def2 + lap
+    recon = inten + prop - def1 - def2 + lap
     resid = np.where(basis.mask, arr - recon, np.nan)
 
     rmse = math.sqrt(np.nanmean((arr[valid] - recon[valid]) ** 2))

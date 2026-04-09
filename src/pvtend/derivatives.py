@@ -176,6 +176,107 @@ def gradient_periodic(
 
 
 # ═══════════════════════════════════════════════════════════════
+#  Grid-spacing helpers
+# ═══════════════════════════════════════════════════════════════
+
+
+def compute_dx_arr(
+    grid_spacing_deg: float,
+    center_lat: float,
+    y_rel: np.ndarray,
+) -> np.ndarray:
+    """Build a cos(lat)-corrected zonal grid-spacing array.
+
+    Args:
+        grid_spacing_deg: Zonal grid spacing in degrees.
+        center_lat: Latitude of the patch centre (degrees N).
+        y_rel: 1-D array of relative y-coordinates (degrees),
+            running from south to north within the patch.
+
+    Returns:
+        1-D array of zonal grid spacing in metres, shape ``(len(y_rel),)``.
+    """
+    actual_lats = float(center_lat) + np.asarray(y_rel, dtype=float)
+    return np.abs(np.deg2rad(grid_spacing_deg)) * R_EARTH * np.cos(
+        np.deg2rad(actual_lats)
+    )
+
+
+def compute_dy(grid_spacing_deg: float) -> float:
+    """Meridional grid spacing in metres (latitude-independent).
+
+    Args:
+        grid_spacing_deg: Meridional grid spacing in degrees.
+
+    Returns:
+        Grid spacing in metres.
+    """
+    return np.abs(np.deg2rad(grid_spacing_deg)) * R_EARTH
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Second-order derivative operators
+# ═══════════════════════════════════════════════════════════════
+
+
+def ddx_dx(
+    field: np.ndarray,
+    dx_arr: np.ndarray,
+    periodic: bool = True,
+) -> np.ndarray:
+    r"""Second zonal derivative :math:`\partial^2 f / \partial x^2`.
+
+    Computed by applying :func:`ddx` twice.
+
+    Args:
+        field: 2-D ``(nlat, nlon)`` or 3-D ``(nlev, nlat, nlon)``.
+        dx_arr: Zonal spacing per latitude [m], shape ``(nlat,)``.
+        periodic: Wrap zonally.
+
+    Returns:
+        Same shape as *field*, in ``[field_units / m²]``.
+    """
+    return ddx(ddx(field, dx_arr, periodic), dx_arr, periodic)
+
+
+def ddy_dy(field: np.ndarray, dy: float) -> np.ndarray:
+    r"""Second meridional derivative :math:`\partial^2 f / \partial y^2`.
+
+    Computed by applying :func:`ddy` twice.
+
+    Args:
+        field: 2-D ``(nlat, nlon)`` or 3-D ``(nlev, nlat, nlon)``.
+        dy: Meridional spacing [m].
+
+    Returns:
+        Same shape as *field*, in ``[field_units / m²]``.
+    """
+    return ddy(ddy(field, dy), dy)
+
+
+def ddx_dy(
+    field: np.ndarray,
+    dx_arr: np.ndarray,
+    dy: float,
+    periodic: bool = True,
+) -> np.ndarray:
+    r"""Mixed second derivative :math:`\partial^2 f / \partial x \partial y`.
+
+    Computed as ``ddy(ddx(field))``.
+
+    Args:
+        field: 2-D ``(nlat, nlon)`` or 3-D ``(nlev, nlat, nlon)``.
+        dx_arr: Zonal spacing per latitude [m], shape ``(nlat,)``.
+        dy: Meridional spacing [m].
+        periodic: Wrap zonally for the :func:`ddx` step.
+
+    Returns:
+        Same shape as *field*, in ``[field_units / m²]``.
+    """
+    return ddy(ddx(field, dx_arr, periodic), dy)
+
+
+# ═══════════════════════════════════════════════════════════════
 #  Angular-coordinate derivative operators (matching LOG20)
 # ═══════════════════════════════════════════════════════════════
 

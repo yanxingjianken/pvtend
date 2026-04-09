@@ -1,6 +1,6 @@
 """Time series and lifecycle plots of decomposition coefficients.
 
-Plots β(t), αx(t), αy(t), γ(t) curves for onset/peak/decay stages.
+Plots β(t), αx(t), αy(t), γ₁(t), γ₂(t), σ(t) curves for onset/peak/decay stages.
 """
 
 from __future__ import annotations
@@ -16,17 +16,17 @@ def plot_coefficient_curves(
     *,
     labels: Dict[str, str] | None = None,
     colors: Dict[str, str] | None = None,
-    title: str = "Four-Basis Decomposition Coefficients",
-    figsize: tuple[float, float] = (14, 10),
+    title: str = "Six-Basis Decomposition Coefficients",
+    figsize: tuple[float, float] = (16, 10),
     xlabel: str = "Hours relative to event",
     zero_line: bool = True,
 ) -> plt.Figure:
-    """Plot coefficient time series in a 2×2 panel.
+    """Plot coefficient time series in a 2×3 panel.
 
     Parameters:
         dh_values: Hour offsets (x-axis).
-        coefficients: Dict with keys 'beta', 'ax', 'ay', 'gamma',
-            each an array of length len(dh_values).
+        coefficients: Dict with keys 'beta', 'ax', 'ay', 'gamma1',
+            'gamma2', 'sigma', each an array of length len(dh_values).
         labels: Custom axis labels for each coefficient.
         colors: Custom colors for each coefficient.
         title: Figure title.
@@ -41,19 +41,23 @@ def plot_coefficient_curves(
         "beta": r"$\beta$ (intensification) [s$^{-1}$]",
         "ax": r"$\alpha_x$ (zonal propagation) [m/s]",
         "ay": r"$\alpha_y$ (meridional propagation) [m/s]",
-        "gamma": r"$\gamma$ (deformation) [m^2s$^{-1}$]",
+        "gamma1": r"$\gamma_1$ (shear deformation) [km$^2$/s]",
+        "gamma2": r"$\gamma_2$ (strain deformation) [km$^2$/s]",
+        "sigma": r"$\sigma$ (Laplacian diffusion) [km$^2$/s]",
     }
     default_colors = {
         "beta": "C0",
         "ax": "C1",
         "ay": "C2",
-        "gamma": "C3",
+        "gamma1": "C3",
+        "gamma2": "C4",
+        "sigma": "C5",
     }
     labels = labels or default_labels
     colors = colors or default_colors
 
-    fig, axes = plt.subplots(2, 2, figsize=figsize, sharex=True)
-    keys = ["beta", "ax", "ay", "gamma"]
+    fig, axes = plt.subplots(2, 3, figsize=figsize, sharex=True)
+    keys = ["beta", "ax", "ay", "gamma1", "gamma2", "sigma"]
 
     for ax, key in zip(axes.flat, keys):
         if key not in coefficients:
@@ -94,9 +98,10 @@ def plot_multi_variant_curves(
     Returns:
         Matplotlib Figure.
     """
-    fig, axes = plt.subplots(2, 2, figsize=figsize, sharex=True)
-    keys = ["beta", "ax", "ay", "gamma"]
-    ylabels = [r"$\beta$", r"$\alpha_x$", r"$\alpha_y$", r"$\gamma$"]
+    fig, axes = plt.subplots(2, 3, figsize=figsize, sharex=True)
+    keys = ["beta", "ax", "ay", "gamma1", "gamma2", "sigma"]
+    ylabels = [r"$\beta$", r"$\alpha_x$", r"$\alpha_y$",
+               r"$\gamma_1$", r"$\gamma_2$", r"$\sigma$"]
 
     for ax, key, ylabel in zip(axes.flat, keys, ylabels):
         for vname, coeffs in variant_coefficients.items():

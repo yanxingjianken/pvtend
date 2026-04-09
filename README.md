@@ -33,7 +33,7 @@ The analysis is done on a weighted average surface across 300, 250, 200 hPa leve
 <em>Geopotential-height (Z500) variant of the six-basis decomposition
 (track 425) — animated lifecycle showing Z anomaly from the 1990–2020
 hourly climatology, with adaptive prenorm and blockid contour overlay.
-See notebook <code>03z_four_basis_projection_geopotential</code>.</em>
+See notebook <code>03z_six_basis_projection_geopotential</code>.</em>
 </td>
 </tr>
 </table>
@@ -216,15 +216,14 @@ Notebooks using **real ERA5 blocking event data** from the `composite_blocking_t
 
 | Notebook | Description |
 |----------|-------------|
-| [`00_idealized_pvtend_decomp`](examples/00_idealized_pvtend_decomp.ipynb) | Idealized Gaussian PV anomaly: prescribed β/αx/αy/γ₁/γ₂/σ at two timesteps, 6-basis visualisation, Gram-Schmidt, projection & reconstruction |
-| [`00b_stretching_deformation_basis`](examples/00b_stretching_deformation_basis.ipynb) | Demonstrates the three second-derivative bases (Φ₄ shear, Φ₅ normal-strain, Φ₆ Laplacian) on idealized PV fields |
+| [`00_idealized_6basis`](examples/00_idealized_6basis.ipynb) | Idealized Gaussian PV anomaly: prescribed β/αx/αy/γ₁/γ₂/σ at two timesteps, 6-basis visualisation, Gram-Schmidt, projection & reconstruction |
 | [`01_rwb_and_derivatives`](examples/01_rwb_and_derivatives.ipynb) | Grid setup, `ddx`/`ddy`/`ddp` derivatives, RWB detection on a real event |
 | [`02_helmholtz_and_qg_omega`](examples/02_helmholtz_and_qg_omega.ipynb) | 3-D Helmholtz decomposition, QG omega (LOG20 vs SP19), moist/dry ω split |
-| [`03_four_basis_projection`](examples/03_four_basis_projection.ipynb) | Orthogonal 6-basis (Φ₁–Φ₆), project dq'/dt → β/αx/αy/γ₁/γ₂/σ, lifecycle curves |
-| [`03_four_basis_projection_composite`](examples/03_four_basis_projection_composite.ipynb) | ↳ *Composite variant*: 6-basis projection averaged across multiple events |
-| [`03c_four_basis_cyclone`](examples/03c_four_basis_cyclone.ipynb) | ↳ *Cyclone variant*: 6-basis projection for a 300 hPa cyclone (PV > 0), lifecycle + budget closure |
-| [`03prp_four_basis_anticyclone_timed_bases`](examples/03prp_four_basis_anticyclone_timed_bases.ipynb) | ↳ *Anticyclone variant*: 6-basis projection for a 300 hPa anticyclone (PV < 0, `mask="< -2e-7"`), current-time basis |
-| [`03z_four_basis_projection_geopotential`](examples/03z_four_basis_projection_geopotential.ipynb) | ↳ *Supplement*: same 6-basis projection using **geopotential height Z** instead of PV |
+| [`03_six_basis_projection`](examples/03_six_basis_projection.ipynb) | Orthogonal 6-basis (Φ₁–Φ₆), project dq'/dt → β/αx/αy/γ₁/γ₂/σ, lifecycle curves |
+| [`03_six_basis_projection_composite`](examples/03_six_basis_projection_composite.ipynb) | ↳ *Composite variant*: 6-basis projection averaged across multiple events |
+| [`03c_six_basis_cyclone`](examples/03c_six_basis_cyclone.ipynb) | ↳ *Cyclone variant*: 6-basis projection for a 300 hPa cyclone (PV > 0), lifecycle + budget closure |
+| [`03prp_six_basis_anticyclone_timed_bases`](examples/03prp_six_basis_anticyclone_timed_bases.ipynb) | ↳ *Anticyclone variant*: 6-basis projection for a 300 hPa anticyclone (PV < 0, `mask="< -2e-7"`), current-time basis |
+| [`03z_six_basis_projection_geopotential`](examples/03z_six_basis_projection_geopotential.ipynb) | ↳ *Supplement*: same 6-basis projection using **geopotential height Z** instead of PV |
 | [`04_single_var_composite`](examples/04_single_var_composite.ipynb) | Single-variable composite explorer on pressure levels using `pvtend.plotting.plot_var` |
 | [`04i_single_var_isentropic_composite`](examples/04i_single_var_isentropic_composite.ipynb) | ↳ *Supplement*: same as 04 but on **isentropic (θ) surfaces** |
 | [`05_stacked_bar_beta`](examples/05_stacked_bar_beta.ipynb) | Stacked-bar β decomposition by PV-tendency term across lifecycle hours |
