@@ -205,7 +205,7 @@ def auto_prenorm(
 ) -> list[float]:
     """Compute per-event pre-normalization constants.
 
-    Each constant is 1 / median(|field|) over the masked region,
+    Each constant is 1 / P95(|field|) over the masked region,
     so that the pre-normalized field has O(1) magnitude.
 
     Parameters:
@@ -225,8 +225,8 @@ def auto_prenorm(
         if not valid.any():
             scales.append(1.0)
             continue
-        med = float(np.median(np.abs(arr[valid])))
-        scales.append(1.0 / med if med > 1e-30 else 1.0)
+        p95 = float(np.percentile(np.abs(arr[valid]), 95))
+        scales.append(1.0 / p95 if p95 > 1e-30 else 1.0)
     return scales
 
 
@@ -378,6 +378,7 @@ def compute_orthogonal_basis(
     pv_dx_dx_prev: np.ndarray | None = None,
     pv_dy_dy_prev: np.ndarray | None = None,
     interp_alpha: float = 1.0,
+    include_lap: bool = True,
     # Deprecated — retained for backward compatibility
     mask_negative: bool | None = None,
     mask_threshold: float | None = None,
@@ -431,6 +432,10 @@ def compute_orthogonal_basis(
         pv_dy_dy_prev: Pre-computed ∂²q/∂y² at dh−1.
         interp_alpha: Interpolation weight for the positional (current-dh) fields.
             Default 1.0 uses only the current-dh fields (no interpolation).
+        include_lap: Whether to include the Laplacian (Φ₆) basis.
+            When False, the Laplacian field is zeroed before prenorm
+            so that Gram-Schmidt produces a zero-norm 6th basis.
+            Default True.
         mask_negative: *Deprecated.* Use ``mask`` instead.
         mask_threshold: *Deprecated.* Use ``mask="< <value>"`` instead.
 
@@ -527,6 +532,10 @@ def compute_orthogonal_basis(
 
     raw_phi_strain = compute_strain_basis(_pv_dx_dx, _pv_dy_dy)
     raw_phi_lap = compute_laplacian_basis(_pv_dx_dx, _pv_dy_dy)
+
+    # Optional: zero out LAP if not requested
+    if not include_lap:
+        raw_phi_lap = np.zeros_like(raw_phi_lap)
 
     # Step 2: Pre-normalize
     raw_fields = [pv_anom, pv_dx, pv_dy, raw_phi_def, raw_phi_strain, raw_phi_lap]
