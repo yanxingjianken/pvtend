@@ -536,9 +536,8 @@ def helmholtz_decomposition(
         ``divergence`` — each ``(nlat, nlon)``.
     """
     if method in ("spectral", "sh", "spherical-harmonics"):
-        try:
-            from .sh_ops import helmholtz_sh
-        except ImportError:
+        from .sh_ops import helmholtz_sh, _SPHARM_AVAILABLE
+        if not _SPHARM_AVAILABLE:
             import warnings
             warnings.warn(
                 "pyspharm/windspharm not installed; falling back to "

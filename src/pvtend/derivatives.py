@@ -305,9 +305,8 @@ def second_derivs(
         Tuple ``(f_xx, f_xy, f_yy)`` with the same shape as *field*.
     """
     if method in ("spectral", "sh"):
-        try:
-            from .sh_ops import second_derivs_sh
-        except ImportError:
+        from .sh_ops import second_derivs_sh, _SPHARM_AVAILABLE
+        if not _SPHARM_AVAILABLE:
             import warnings
             warnings.warn(
                 "pyspharm not installed; falling back to method='fd' for "

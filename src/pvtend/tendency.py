@@ -432,9 +432,8 @@ def _solve_chi_nh(
     rhs = -ddp(omega_nh, plevs_pa)
 
     if method in ("spectral", "sh"):
-        try:
-            from .sh_ops import invert_laplacian_sh, gradient_sh
-        except ImportError:
+        from .sh_ops import invert_laplacian_sh, gradient_sh, _SPHARM_AVAILABLE
+        if not _SPHARM_AVAILABLE:
             import warnings
             warnings.warn(
                 "pyspharm not installed; falling back to FD for "
