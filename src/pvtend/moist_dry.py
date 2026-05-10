@@ -45,16 +45,18 @@ def solve_chi_from_omega(
     lat: np.ndarray,
     lon: np.ndarray,
     plevs_pa: np.ndarray,
+    method: str = "spectral",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Solve ∇²χ = -∂ω/∂p at each level (spherical Laplacian).
+    """Solve ∇²χ = -∂ω/∂p at each level.
 
     Computes the velocity potential of the divergent wind associated
-    with *omega* by solving a Poisson equation on each pressure level
-    using the full spherical Laplacian (conservative form).
+    with *omega* by solving a Poisson equation on each pressure level.
 
-    The area-weighted mean of the RHS is removed on each level before
-    solving to ensure compatibility with the Dirichlet boundary
-    conditions (Fredholm solvability).
+    By default (``method="spectral"``) the solve uses spherical
+    harmonics via :func:`pvtend.sh_ops.invert_laplacian_sh`, which is
+    pole-closed and supports auto NH→global parity mirroring (scalar
+    parity for χ). Pass ``method="fd"`` to fall back to the legacy
+    conservative-form spherical-FFT Poisson solver.
 
     Args:
         omega: Vertical velocity component [Pa/s],
@@ -62,6 +64,7 @@ def solve_chi_from_omega(
         lat: Latitude [degrees], ascending, shape ``(nlat,)``.
         lon: Longitude [degrees], shape ``(nlon,)``.
         plevs_pa: Pressure levels [Pa], ascending, shape ``(nlev,)``.
+        method: ``"spectral"`` (default) or ``"fd"``.
 
     Returns:
         Tuple of ``(chi, u_div, v_div)``, each with
@@ -75,7 +78,43 @@ def solve_chi_from_omega(
             f"omega must be 3-D (nlev, nlat, nlon), got {omega.ndim}-D"
         )
 
-    nlev, nlat, nlon = omega.shape
+    nlev, _, _ = omega.shape
+
+    # ── Compute ∂ω/∂p using centred finite differences ──
+    domega_dp = ddp(omega, plevs_pa)
+    # RHS of Poisson equation: -∂ω/∂p
+    rhs_poisson = -domega_dp
+
+    if method in ("spectral", "sh"):
+        from .sh_ops import invert_laplacian_sh, gradient_sh
+
+        chi_out = np.zeros_like(omega)
+        u_div_out = np.zeros_like(omega)
+        v_div_out = np.zeros_like(omega)
+        for k in range(nlev):
+            chi_k = invert_laplacian_sh(
+                rhs_poisson[k], lat, lon, R_earth=R_EARTH, parity="scalar",
+            )
+            chi_out[k] = chi_k
+            dchi_dx, dchi_dy = gradient_sh(chi_k, lat, lon, R_earth=R_EARTH)
+            u_div_out[k] = dchi_dx
+            v_div_out[k] = dchi_dy
+        return chi_out, u_div_out, v_div_out
+
+    # ── Legacy FD path ──
+    return _solve_chi_from_omega_fd(rhs_poisson, lat, lon)
+
+
+def _solve_chi_from_omega_fd(
+    rhs_poisson: np.ndarray,
+    lat: np.ndarray,
+    lon: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Legacy spherical-FFT Poisson path (Dirichlet BCs).
+
+    Kept for regression testing against the pre-SH baseline.
+    """
+    nlev, nlat, nlon = rhs_poisson.shape
     lat_rad = np.deg2rad(lat)
     dlat = np.abs(lat[1] - lat[0]) if nlat > 1 else 1.5
     dlon = np.abs(lon[1] - lon[0]) if nlon > 1 else 1.5
@@ -84,29 +123,20 @@ def solve_chi_from_omega(
     dx_arr = np.maximum(dx_arr, dy * 0.1)  # guard near poles
     dlon_rad = np.deg2rad(dlon)
 
-    chi_out = np.zeros_like(omega)
-    u_div_out = np.zeros_like(omega)
-    v_div_out = np.zeros_like(omega)
+    chi_out = np.zeros_like(rhs_poisson)
+    u_div_out = np.zeros_like(rhs_poisson)
+    v_div_out = np.zeros_like(rhs_poisson)
 
-    # ── Compute ∂ω/∂p using centred finite differences ──
-    domega_dp = ddp(omega, plevs_pa)
-
-    # RHS of Poisson equation: -∂ω/∂p
-    rhs_poisson = -domega_dp
-
-    # ── Area-weighted mean removal for RHS compatibility ──
-    cos_phi = np.cos(lat_rad)  # (nlat,)
-    area_weights = cos_phi / cos_phi.sum()  # normalised weights
+    rhs = rhs_poisson.copy()
+    cos_phi = np.cos(lat_rad)
+    area_weights = cos_phi / cos_phi.sum()
     for k in range(nlev):
-        weighted_mean = np.sum(
-            area_weights[:, None] * rhs_poisson[k]
-        ) / nlon
-        rhs_poisson[k] -= weighted_mean
+        weighted_mean = np.sum(area_weights[:, None] * rhs[k]) / nlon
+        rhs[k] -= weighted_mean
 
-    # ── Solve level-by-level with spherical Laplacian ──
     for k in range(nlev):
         chi_k = solve_poisson_spherical_fft(
-            rhs_poisson[k], lat, dy, dlon_rad, R_earth=R_EARTH
+            rhs[k], lat, dy, dlon_rad, R_earth=R_EARTH
         )
         chi_out[k] = chi_k
         dchi_dx, dchi_dy = gradient(chi_k, dx_arr, dy)

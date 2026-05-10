@@ -418,14 +418,34 @@ def _solve_chi_nh(
     lat_nh: np.ndarray,
     lon_nh: np.ndarray,
     plevs_pa: np.ndarray,
+    method: str = "spectral",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Solve ∇²χ = -∂ω/∂p on full NH, return u/v divergent wind.
 
-    Uses the spherical Laplacian (conservative form) with area-weighted
-    RHS mean removal.  The full NH domain with periodic zonal BCs gives
-    a much better-conditioned inversion than the local patch.
+    Default uses the spherical-harmonic Poisson inverse via
+    :func:`pvtend.sh_ops.invert_laplacian_sh` with NH→global parity
+    mirroring (scalar parity for χ), giving pole-closed χ at 90°N.
+    Pass ``method="fd"`` to fall back to the legacy spherical-FFT
+    Poisson solver.
     """
-    nlev, nlat, nlon = omega_nh.shape
+    nlev, _, _ = omega_nh.shape
+    rhs = -ddp(omega_nh, plevs_pa)
+
+    if method in ("spectral", "sh"):
+        from .sh_ops import invert_laplacian_sh, gradient_sh
+
+        u_div_nh = np.zeros_like(omega_nh)
+        v_div_nh = np.zeros_like(omega_nh)
+        for k in range(nlev):
+            chi_k = invert_laplacian_sh(
+                rhs[k], lat_nh, lon_nh, R_earth=R_EARTH, parity="scalar",
+            )
+            dchi_dx, dchi_dy = gradient_sh(chi_k, lat_nh, lon_nh, R_earth=R_EARTH)
+            u_div_nh[k] = dchi_dx
+            v_div_nh[k] = dchi_dy
+        return u_div_nh, v_div_nh
+
+    # ── Legacy FD path (preserved for regression) ──
     lat_rad = np.deg2rad(lat_nh)
     dlat = float(np.abs(np.diff(lat_nh).mean()))
     dlon = float(np.abs(np.diff(lon_nh).mean()))
@@ -434,18 +454,15 @@ def _solve_chi_nh(
     dx_arr = np.maximum(dx_arr, dy * 0.1)
     dlon_rad = np.deg2rad(dlon)
 
-    rhs = -ddp(omega_nh, plevs_pa)
-
-    # Area-weighted mean removal
     cos_phi = np.cos(lat_rad)
     area_weights = cos_phi / cos_phi.sum()
+    nlon = omega_nh.shape[2]
     for k in range(nlev):
         weighted_mean = np.sum(area_weights[:, None] * rhs[k]) / nlon
         rhs[k] -= weighted_mean
 
     u_div_nh = np.zeros_like(omega_nh)
     v_div_nh = np.zeros_like(omega_nh)
-
     for k in range(nlev):
         chi_k = solve_poisson_spherical_fft(
             rhs[k], lat_nh, dy, dlon_rad, R_earth=R_EARTH

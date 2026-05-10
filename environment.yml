@@ -11,6 +11,8 @@ dependencies:
   - tqdm
   - matplotlib
   - cartopy
+  - windspharm
+  - pyspharm
   - pytest
   - sphinx
   - sphinx_rtd_theme

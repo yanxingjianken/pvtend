@@ -276,6 +276,63 @@ def ddx_dy(
     return ddy(ddx(field, dx_arr, periodic), dy)
 
 
+def second_derivs(
+    field: np.ndarray,
+    lat: np.ndarray,
+    lon: np.ndarray,
+    method: str = "spectral",
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    r"""Second-order horizontal derivatives ``(f_xx, f_xy, f_yy)``.
+
+    Default backend is spectral (spherical harmonics via
+    :func:`pvtend.sh_ops.second_derivs_sh`), which closes cleanly at the
+    poles and auto-mirrors NH-only inputs with scalar parity. The
+    ``method="fd"`` path falls back to repeated finite-difference
+    application of :func:`ddx` / :func:`ddy` on a uniform lat-lon grid.
+
+    The output triple is what downstream basis projections (six-basis
+    decomposition, gamma/tilt diagnostics) consume, and is now stored
+    alongside the primary diagnostic in event NPZs.
+
+    Args:
+        field: Scalar field, shape ``(nlat, nlon)`` or
+            ``(nlev, nlat, nlon)``.
+        lat: Latitudes in degrees, ascending.
+        lon: Longitudes in degrees in [0, 360).
+        method: ``"spectral"`` (default) or ``"fd"``.
+
+    Returns:
+        Tuple ``(f_xx, f_xy, f_yy)`` with the same shape as *field*.
+    """
+    if method in ("spectral", "sh"):
+        from .sh_ops import second_derivs_sh
+
+        if field.ndim == 3:
+            fxx = np.empty_like(field, dtype=np.float64)
+            fxy = np.empty_like(field, dtype=np.float64)
+            fyy = np.empty_like(field, dtype=np.float64)
+            for k in range(field.shape[0]):
+                fxx[k], fxy[k], fyy[k] = second_derivs_sh(field[k], lat, lon)
+            return fxx, fxy, fyy
+        return second_derivs_sh(field, lat, lon)
+
+    if method != "fd":
+        raise ValueError(f"Unknown method {method!r}; use 'spectral' or 'fd'.")
+
+    # ── FD fallback ──
+    lat = np.asarray(lat, dtype=float).ravel()
+    lon = np.asarray(lon, dtype=float).ravel()
+    dlat = np.abs(lat[1] - lat[0]) if lat.size > 1 else 1.5
+    dlon = np.abs(lon[1] - lon[0]) if lon.size > 1 else 1.5
+    dy = np.deg2rad(dlat) * R_EARTH
+    dx_arr = np.abs(np.deg2rad(dlon)) * R_EARTH * np.cos(np.deg2rad(lat))
+    dx_arr = np.maximum(dx_arr, dy * 0.1)
+    fxx = ddx_dx(field, dx_arr)
+    fxy = ddx_dy(field, dx_arr, dy)
+    fyy = ddy_dy(field, dy)
+    return fxx, fxy, fyy
+
+
 # ═══════════════════════════════════════════════════════════════
 #  Angular-coordinate derivative operators (matching LOG20)
 # ═══════════════════════════════════════════════════════════════

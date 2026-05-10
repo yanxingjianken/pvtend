@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pvtend"
-version = "2.9.1"
+version = "2.10.0"
 authors = [
     { name = "Xingjian Yan" },
     { name = "Talia Tamarin-Brodsky" },
@@ -29,6 +29,8 @@ dependencies = [
     "matplotlib",
     "scikit-image",
     "cdsapi",
+    "pyspharm",
+    "windspharm",
 ]
 
 [project.optional-dependencies]

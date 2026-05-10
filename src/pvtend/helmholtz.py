@@ -506,15 +506,18 @@ def helmholtz_decomposition(
     lat: np.ndarray,
     lon: np.ndarray,
     R_earth: float = R_EARTH,
-    method: str = "spherical",
+    method: str = "spectral",
     solver_kw: Optional[dict] = None,
 ) -> dict[str, np.ndarray]:
-    """Helmholtz decomposition on a lat-lon grid (spherical Laplacian).
+    """Helmholtz decomposition on a lat-lon grid.
 
-    Computes vorticity ζ and divergence δ from (u, v), removes the
-    area-weighted (cosφ) mean from each before solving the Poisson
-    equations ∇²ψ = ζ and ∇²χ = δ using the full spherical Laplacian
-    (conservative form, following xinvert/MiniUFO).
+    By default (``method="spectral"``), dispatches to
+    :func:`pvtend.sh_ops.helmholtz_sh`, which uses pyspharm /
+    windspharm to compute ζ, δ, ψ, χ via spherical harmonics.
+    NH-only inputs are auto-detected and parity-mirrored (u even,
+    v odd) onto the full sphere before transforming. The legacy
+    finite-difference + spherical-FFT-Poisson path remains available
+    via ``method="fd"``.
 
     Args:
         u: Zonal wind [m s⁻¹], shape ``(nlat, nlon)``.
@@ -522,16 +525,46 @@ def helmholtz_decomposition(
         lat: Latitude in degrees (ascending), shape ``(nlat,)``.
         lon: Longitude in degrees, shape ``(nlon,)``.
         R_earth: Earth radius [m].
-        method: Ignored (kept for API compat). Always uses spherical.
-        solver_kw: Ignored (kept for API compat).
+        method: ``"spectral"`` (default, recommended) or ``"fd"``
+            (legacy conservative-form spherical-FFT solver).
+        solver_kw: Reserved for future spectral options (e.g.
+            ``ntrunc``, ``sanity_tol``).
 
     Returns:
         Dictionary with keys ``u_rot``, ``v_rot``, ``u_div``, ``v_div``,
         ``u_har``, ``v_har``, ``chi``, ``psi``, ``vorticity``,
         ``divergence`` — each ``(nlat, nlon)``.
+    """
+    if method in ("spectral", "sh", "spherical-harmonics"):
+        from .sh_ops import helmholtz_sh
+        kw = dict(solver_kw or {})
+        return helmholtz_sh(u, v, lat, lon, R_earth=R_earth, **kw)
 
-    References:
-        MiniUFO/xinvert — conservative-form spherical Laplacian.
+    if method not in ("fd", "spherical", "spherical-fft", "fft"):
+        raise ValueError(
+            f"Unknown helmholtz method {method!r}; use 'spectral' or 'fd'."
+        )
+
+    return _helmholtz_decomposition_fd(u, v, lat, lon, R_earth=R_earth)
+
+
+def _helmholtz_decomposition_fd(
+    u: np.ndarray,
+    v: np.ndarray,
+    lat: np.ndarray,
+    lon: np.ndarray,
+    R_earth: float = R_EARTH,
+) -> dict[str, np.ndarray]:
+    """Legacy finite-difference + spherical-FFT Helmholtz decomposition.
+
+    Computes vorticity ζ and divergence δ from (u, v), removes the
+    area-weighted (cosφ) mean from each before solving the Poisson
+    equations ∇²ψ = ζ and ∇²χ = δ using the conservative-form spherical
+    Laplacian (Neumann BCs).
+
+    Retained for backward compatibility with callers that pass
+    ``method="fd"``. The default ``method="spectral"`` path in
+    :func:`helmholtz_decomposition` is recommended for production use.
     """
     nan_mask = np.isnan(u) | np.isnan(v)
     u_work = np.where(nan_mask, 0.0, u) if nan_mask.any() else u.copy()
@@ -608,12 +641,12 @@ def helmholtz_decomposition_3d(
     lat: np.ndarray,
     lon: np.ndarray,
     R_earth: float = R_EARTH,
-    method: str = "spherical",
+    method: str = "spectral",
 ) -> dict[str, np.ndarray]:
     """Helmholtz decomposition for each vertical level.
 
     Applies :func:`helmholtz_decomposition` independently to every
-    level along axis 0, using the spherical Laplacian solver.
+    level along axis 0.
 
     Args:
         u_3d: Zonal wind [m s⁻¹], shape ``(nlevels, nlat, nlon)``.
@@ -621,7 +654,7 @@ def helmholtz_decomposition_3d(
         lat: Latitude in degrees (ascending), shape ``(nlat,)``.
         lon: Longitude in degrees, shape ``(nlon,)``.
         R_earth: Earth radius [m].
-        method: Ignored (always spherical).
+        method: ``"spectral"`` (default) or ``"fd"``.
 
     Returns:
         Dictionary with the same keys as :func:`helmholtz_decomposition`,
@@ -648,6 +681,7 @@ def helmholtz_decomposition_3d(
             lat,
             lon,
             R_earth=R_earth,
+            method=method,
         )
         for k in keys:
             out[k][lev] = res[k]
