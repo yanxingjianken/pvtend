@@ -937,9 +937,13 @@ def with_derivs_for_window(
             if flip_lat:
                 u2d = u2d[::-1]
                 v2d = v2d[::-1]
+            # method="spectral" → SH inversion via pyspharm/windspharm with
+            # NH→global parity mirroring (u even, v odd), giving pole-closed
+            # ψ/χ at 90 °N.  Falls back to the conservative-form spherical-FFT
+            # solver if pyspharm is not installed (warning emitted).
             helm = helmholtz_decomposition(
                 u2d, v2d, lat_asc, lon_nh,
-                R_earth=R_EARTH, method="spherical")
+                R_earth=R_EARTH, method="spectral")
             if flip_lat:
                 for key in ("u_rot", "u_div", "u_har",
                             "v_rot", "v_div", "v_har"):

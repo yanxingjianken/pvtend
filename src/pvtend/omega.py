@@ -956,15 +956,21 @@ def solve_qg_omega_sip(
     f2_0 = f0 ** 2
 
     # --- 3. Build 7-point stencil coefficients ---
-    #   σ-in-Laplacian form (matching LOG20 SIP_inversion.m):
-    #     AW = σ(k,j,i-1) / (r²cos²φ Δλ²)     ← σ at WEST neighbor
-    #     AE = σ(k,j,i+1) / (r²cos²φ Δλ²)     ← σ at EAST neighbor
-    #     AS = (1/(r²Δφ²) + tanφ/(2r²Δφ)) σ(k,j-1,i)  ← σ at SOUTH
-    #     AN = (1/(r²Δφ²) - tanφ/(2r²Δφ)) σ(k,j+1,i)  ← σ at NORTH
-    #     AB = 2 f₀² / (Δp₁ (Δp₁+Δp₂))        ← NO σ
-    #     AT = 2 f₀² / (Δp₂ (Δp₁+Δp₂))        ← NO σ
-    #     AP = -2σ(k,j,i)/(r²cos²φΔλ²) - 2σ(k,j,i)/(r²Δφ²)
+    #   σ-in-Laplacian, **conservative meridional form** (xinvert/Lynch 1989):
+    #     AW = σ(k,j,i-1) / (r²cos²φ Δλ²)                       ← σ at WEST
+    #     AE = σ(k,j,i+1) / (r²cos²φ Δλ²)                       ← σ at EAST
+    #     AS = σ(k,j-1,i) · cos(φ_{j-½}) / (r²cosφ_j Δφ²)       ← σ at SOUTH
+    #     AN = σ(k,j+1,i) · cos(φ_{j+½}) / (r²cosφ_j Δφ²)       ← σ at NORTH
+    #     AB = 2 f₀² / (Δp₁ (Δp₁+Δp₂))                          ← NO σ
+    #     AT = 2 f₀² / (Δp₂ (Δp₁+Δp₂))                          ← NO σ
+    #     AP = -2σ_c/(r²cos²φ_j Δλ²)
+    #          - σ_c · (cos(φ_{j-½}) + cos(φ_{j+½})) / (r²cosφ_j Δφ²)
     #          - 2f₀²/(Δp₁ Δp₂)
+    #
+    # The conservative cos-half form makes the meridional flux vanish
+    # at the pole (cos(φ_{j+½})→0 as φ→90°) so the operator is well-
+    # conditioned right up to the polar boundary row, matching the
+    # Helmholtz spherical-FFT solver in :mod:`pvtend.helmholtz`.
     AP = np.zeros((nlev, nlat, nlon))
     AE = np.zeros((nlev, nlat, nlon))
     AW = np.zeros((nlev, nlat, nlon))
@@ -973,8 +979,13 @@ def solve_qg_omega_sip(
     AT = np.zeros((nlev, nlat, nlon))
     AB = np.zeros((nlev, nlat, nlon))
 
-    cos2_phi = np.cos(phi) ** 2
-    tan_phi = np.tan(phi)
+    cos_phi = np.cos(phi)
+    cos2_phi = cos_phi ** 2
+    # Half-grid cosines: cos(φ_{j+½}) at j ∈ [0, nlat-2]
+    cos_half = np.cos(0.5 * (phi[:-1] + phi[1:]))
+    # Floor cosφ to avoid /0 at exactly φ=±90°; with conservative form,
+    # cos_half→0 ensures AN/AS vanish naturally at the polar row.
+    cos_phi_safe = np.maximum(cos_phi, 1e-7)
 
     # Pre-compute shifted σ arrays for neighbor access
     sigma_west = np.roll(sigma_3d, 1, axis=2)   # σ(k, j, i-1)
@@ -986,17 +997,21 @@ def solve_qg_omega_sip(
 
         for j in range(1, nlat - 1):
             c2 = cos2_phi[j]
-            tp = tan_phi[j]
+            cj = cos_phi_safe[j]
+            # Half-grid cos at j-½ and j+½
+            csm = cos_half[j - 1]
+            csp = cos_half[j]
 
             ew = 1.0 / (r ** 2 * c2 * dlambda ** 2)
-            ns_base = 1.0 / (r ** 2 * dphi ** 2)
-            ns_tan  = tp / (2.0 * r ** 2 * dphi)
+            # Conservative meridional coefficients (no tan φ blow-up):
+            ms = csm / (r ** 2 * cj * dphi ** 2)
+            mn = csp / (r ** 2 * cj * dphi ** 2)
 
             # Horizontal coefficients — σ at NEIGHBOR (σ-in-Laplacian)
             AW[k, j, :] = ew * sigma_west[k, j, :]
             AE[k, j, :] = ew * sigma_east[k, j, :]
-            AS[k, j, :] = (ns_base + ns_tan) * sigma_3d[k, j - 1, :]
-            AN[k, j, :] = (ns_base - ns_tan) * sigma_3d[k, j + 1, :]
+            AS[k, j, :] = ms * sigma_3d[k, j - 1, :]
+            AN[k, j, :] = mn * sigma_3d[k, j + 1, :]
 
             # Vertical coefficients — NO σ (LOG20 SIP_inversion.m)
             AB[k, j, :] = 2.0 * f2_0 / (dp1 * (dp1 + dp2))
@@ -1006,7 +1021,7 @@ def solve_qg_omega_sip(
             s_c = sigma_3d[k, j, :]
             AP[k, j, :] = (
                 -2.0 * ew * s_c
-                - 2.0 * ns_base * s_c
+                - (ms + mn) * s_c
                 - 2.0 * f2_0 / (dp1 * dp2)
             )
 
@@ -1030,6 +1045,25 @@ def solve_qg_omega_sip(
     if not periodic_lon and lat_src is not None:
         T_sol[:, :, 0]  = lat_src[:, :, 0]
         T_sol[:, :, -1] = lat_src[:, :, -1]
+
+    # ── Polar zonal-mean cap (full-NH ring only) ─────────────────────
+    # The polar boundary row sits at φ = ±90°, where only the
+    # m = 0 (zonal-mean) spectral mode is geometrically well defined
+    # — any m ≠ 0 component on a single physical point is unphysical.
+    # When the SIP grid spans the full longitude ring we replace the
+    # full 2-D polar Dirichlet by its zonal mean so that high-m forcing
+    # at the pole does not contaminate the interior solution.  This
+    # matches the Helmholtz spherical-FFT solver, where high-m modes
+    # vanish at the pole through the cos⁻²φ eigenvalue scaling, and the
+    # SH-based ``_solve_chi_nh`` divergent-wind inversion which uses
+    # NH→global parity mirroring with a closed pole.
+    if periodic_lon and lat_src is not None:
+        north_polar = (np.abs(lat[-1])  >= 89.0)
+        south_polar = (np.abs(lat[0])   >= 89.0)
+        if north_polar:
+            T_sol[:, -1, :] = np.nanmean(lat_src[:, -1, :], axis=-1, keepdims=True)
+        if south_polar:
+            T_sol[:,  0, :] = np.nanmean(lat_src[:,  0, :], axis=-1, keepdims=True)
 
     # --- 5. Solve with SIP core ---
     n_iters, final_res = _sip_core(
