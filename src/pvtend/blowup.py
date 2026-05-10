@@ -55,6 +55,18 @@ import pandas as pd
 import xarray as xr
 
 
+def _drop_expver(ds: xr.Dataset) -> xr.Dataset:
+    """Drop ERA5/ERA5T ``expver`` coord which is inconsistent across files.
+
+    Some ERA5 monthly files (the recent ERA5T overlap window) carry an
+    ``expver`` scalar coordinate that older files lack.  Without
+    dropping it, ``xr.open_mfdataset(..., combine="by_coords")`` raises
+    ``ValueError: coordinate 'expver' not present in all datasets``.
+    """
+    drop = [c for c in ("expver", "number") if c in ds.coords]
+    return ds.drop_vars(drop) if drop else ds
+
+
 def _open_w_lazy(era5_w_glob: str) -> xr.Dataset:
     """Open ERA5 ω files lazily as a single dask-backed dataset."""
     files = sorted(glob.glob(era5_w_glob))
@@ -65,6 +77,9 @@ def _open_w_lazy(era5_w_glob: str) -> xr.Dataset:
         combine="by_coords",
         chunks={"valid_time": 50},
         engine="netcdf4",
+        preprocess=_drop_expver,
+        compat="override",
+        coords="minimal",
     )
 
 
