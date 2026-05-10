@@ -226,8 +226,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Pressure level in hPa (default 300).",
     )
     blowup.add_argument(
-        "--threshold", type=float, default=5.0,
-        help="σ multiplier (default 5).",
+        "--threshold", type=float, default=10.0,
+        help=("Hard cutoff abs(omega) in Pa/s (default 10.0).  "
+              "Synoptic 300 hPa omega rarely exceeds 2-3 Pa/s; "
+              "|omega|>10 Pa/s in derived omega_dry/omega_moist/omega_lhr "
+              "is essentially always solver blowup."),
     )
     blowup.add_argument(
         "--out", required=True, type=Path,

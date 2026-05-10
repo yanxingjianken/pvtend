@@ -59,7 +59,7 @@ The CSVs are the inputs for `pvtend-pipeline compute`, which extracts event-cent
 - **RWB detection**: Two classification methods — **bay** (path-order, recommended with circumpolar-cropped contours) and **tilt** (centerline slope ±0.15 dead zone). Circumpolar-first contour extraction for robust NH analysis.
 - **Composite lifecycle**: Multi-stage ensemble averaging with onset/peak/decay staging
 - **NaN-safe throughout**: All grid, derivative, solver, bootstrap, and plotting routines use `nanmean`/`nanpercentile` to handle partial-NaN edge events without corrupting composites or flipping projection signs
-- **ω blowup detection** (v2.10.1): Post-hoc CSV scan flagging ERA5 timestamps whose `|ω|` at 300 hPa exceeds a fixed Pa s⁻¹ hard cutoff (canonical ±5 Pa/s). Replaces the silent in-solver clip used in pvtend ≤ 2.9, which was corrupting the affected events.
+- **ω blowup detection** (v2.10.1): Post-hoc CSV scan flagging ERA5 timestamps whose `|ω|` at 300 hPa exceeds a fixed Pa s⁻¹ hard cutoff (default **10 Pa/s** — synoptic 300 hPa ω rarely exceeds 2–3 Pa/s, so |ω|>10 Pa/s in the derived `ω_dry`/`ω_moist`/`ω_LHR` is essentially always solver blowup; configurable via `--threshold`). Replaces the silent in-solver clip used in pvtend ≤ 2.9, which was corrupting the affected events.
 - **CLI pipeline**: End-to-end processing via `pvtend-pipeline` command (`compute`, `clim-helmholtz`, `classify`, `composite`, `decompose`, `blowup-scan`)
 
 ## Installation
