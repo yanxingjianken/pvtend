@@ -29,8 +29,10 @@ jobs:
           python -m pip install --upgrade pip
           # --no-build-isolation means pip uses the *current* env to build
           # pyspharm's sdist, so setuptools/wheel/numpy/Cython must already
-          # be installed. pyspharm's setup.py imports numpy at build time.
-          pip install "setuptools>=64" wheel "numpy>=1.22" "Cython>=0.29"
+          # be installed. pyspharm 1.0.9 setup.py uses numpy.distutils,
+          # which was removed in NumPy 2.0 — pin numpy<2 for the BUILD,
+          # then upgrade afterwards if pvtend's deps want a newer numpy.
+          pip install "setuptools>=64,<74" wheel "numpy<2" "Cython>=0.29"
           pip install --no-build-isolation pyspharm windspharm
           pip install .[test]
 
