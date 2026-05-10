@@ -128,13 +128,22 @@ Two solver methods
 ~~~~~~~~~~~~~~~~~~
 
 1. **log20** *(default)* — Strongly Implicit Procedure (SIP, Stone 1968)
-   with a full 3-D spherical finite-difference stencil including the
-   :math:`\tan\varphi` metric term.  Closest analogue to
+   with a full 3-D spherical finite-difference stencil in
+   **conservative cos(φ\ :sub:`j±½`) flux-divergence form**
+   (Lynch 1989; cf. ``xinvert``).  This replaces the previous
+   ``tan φ`` coefficient form (v ≤ 2.10) which was ill-conditioned at
+   high latitudes; the polar metric now vanishes naturally as
+   cos(φ\ :sub:`j±½`) → 0.  Closest analogue to
    Li & O'Gorman (2020).  Numba-accelerated (``nogil=True``) when
    available (~3–6 s per event); falls back to pure-Python if ``numba``
    is not installed.  Always solved on the **full Northern Hemisphere**
    grid (periodic in longitude, Neumann at equatorial and polar faces)
-   and the event patch is extracted afterward.
+   and the event patch is extracted afterward.  At φ = ±90° the polar
+   Dirichlet row is replaced by the **zonal-mean** of ``omega_b`` so
+   that only the geometrically well-defined :math:`m=0` mode survives at
+   the geometric pole — matching the Helmholtz spherical-FFT and SH
+   solvers, where high-:math:`m` modes vanish through the
+   :math:`\cos^{-2}\varphi` eigenvalue scaling.
 
 2. **sp19** — Steinfeld & Pfahl (2019) empirical scaling.
    Sets :math:`\omega_\text{dry} = \frac{1}{3}\,\omega_\text{total}`.

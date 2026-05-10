@@ -823,7 +823,21 @@ def solve_qg_omega_sip(
 
     The SIP stencil uses local σ(k,j,i) at **neighbor** points in the
     horizontal coefficients (AW, AE, AS, AN), and no σ in the vertical
-    coefficients (AB, AT).
+    coefficients (AB, AT).  The meridional coefficients (AS, AN) are
+    discretised in **conservative cos(φ_{j±½}) flux-divergence form**
+    (Lynch 1989; cf. ``xinvert``), replacing the previous
+    ``tan φ / Δφ`` coefficient form which was ill-conditioned at high
+    latitudes.  The polar metric vanishes naturally as
+    cos(φ_{j±½}) → 0 at φ → ±90°.
+
+    **Polar boundary handling** (full-NH ring, ``periodic_lon=True``):
+    when the lateral boundary row sits at φ = ±90°, only the m = 0
+    (zonal-mean) spectral mode is geometrically well defined, so the
+    polar Dirichlet row is replaced by the longitudinal mean of
+    ``omega_b`` (or ``bc_lateral``).  This matches the spherical-FFT
+    Helmholtz solver (where m ≠ 0 modes vanish at the pole through the
+    cos⁻²φ eigenvalue scaling) and the SH-based ``_solve_chi_nh``
+    divergent-wind inversion (NH→global parity mirror with closed pole).
 
     **Boundary conditions**: Faces can be individually controlled:
 
