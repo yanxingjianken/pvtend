@@ -357,7 +357,7 @@ def compute_helmholtz_climatology(
                         v2d = v2d[::-1]
                     helm = helmholtz_decomposition(
                         u2d, v2d, lat_asc, lon,
-                        R_earth=R_EARTH, method="spherical",
+                        R_earth=R_EARTH, method="spectral",
                     )
                     if flip_lat:
                         u_rot_bar[di, ti, li] = helm["u_rot"][::-1]
