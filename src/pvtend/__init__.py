@@ -40,6 +40,7 @@ from pvtend.climatology import (
 
 # Solvers
 from pvtend.omega import solve_qg_omega_sip
+from pvtend.blowup import scan_omega_blowup
 from pvtend.helmholtz import (
     helmholtz_decomposition,
     helmholtz_decomposition_3d,
@@ -108,6 +109,7 @@ __all__ = [
     "compute_helmholtz_climatology", "load_helmholtz_climatology",
     # Solvers
     "solve_qg_omega_sip",
+    "scan_omega_blowup",
     "helmholtz_decomposition", "helmholtz_decomposition_3d",
     "laplacian_spherical_fft",
     "decompose_omega", "solve_chi_from_omega", "verify_div_additivity",

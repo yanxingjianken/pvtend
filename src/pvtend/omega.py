@@ -804,7 +804,7 @@ def solve_qg_omega_sip(
     maxit: int = 300,
     alpha: float = 0.93,
     resmax: float = 1e-14,
-    w_physical_max: float | None = 5.0,
+    w_physical_max: float | None = None,
 ) -> tuple[np.ndarray, dict]:
     """Solve the QG omega equation using the SIP (Strongly Implicit Procedure).
 
@@ -862,12 +862,16 @@ def solve_qg_omega_sip(
         maxit: Max SIP iterations (default 300).
         alpha: SIP relaxation parameter (default 0.93).
         resmax: Convergence threshold (default 1e-14).
-        w_physical_max: Physical upper bound on |ω| [Pa s⁻¹] checked
-            **at the 300 hPa level only**.  Any cells exceeding this value
-            trigger a ``RuntimeWarning`` and are automatically clipped to
-            ``±w_physical_max`` in-place.  Matches the hard-cutoff used in
-            ``sensitivity_test/plots/source_blowups/*_exclude_hard.csv``
-            (5 Pa/s at 300 hPa).  Set to ``None`` to disable the check.
+        w_physical_max: Optional hard clip on ``abs(omega)`` at the
+            **300 hPa** level in [Pa s⁻¹].  When ``None`` (the default),
+            no clipping is applied inside the solver; instead, blowup
+            timestamps are **flagged post-hoc** by
+            :func:`pvtend.blowup.scan_omega_blowup`, which applies the
+            canonical ±5 Pa/s hard cutoff at 300 hPa and emits a CSV
+            of offending timestamps for downstream exclusion.  Earlier
+            versions of pvtend silently clipped ω here at ±5 Pa/s,
+            which corrupted the affected events; pass an explicit
+            float only for legacy reproducibility.
 
     Returns:
         ``(omega, info)`` where *omega* is ``(nlev, nlat, nlon)``
@@ -1050,10 +1054,12 @@ def solve_qg_omega_sip(
     # --- 8. Clean NaN / inf ---
     omega_out = np.nan_to_num(omega_out, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # --- 9. Physical bounds check at 300 hPa ---
-    # Only the 300 hPa level is checked; matches the hard cutoff threshold
-    # from sensitivity-test *_exclude_hard.csv (|w_*| > 5 Pa/s at 300 hPa).
-    # Exceeding cells are clipped to ±w_physical_max and a warning is issued.
+    # --- 9. Optional in-solver clip at 300 hPa (legacy; OFF by default) ---
+    # Outlier detection is now performed post-hoc by
+    # pvtend.blowup.scan_omega_blowup, which applies the canonical
+    # ±5 Pa/s hard cutoff at 300 hPa and emits a CSV of flagged
+    # timestamps.  The previous in-solver clip silently corrupted
+    # affected events and is disabled by default.
     if w_physical_max is not None:
         target_pa = 30000.0  # 300 hPa in Pa
         k300 = int(np.argmin(np.abs(plevs_pa - target_pa)))

@@ -104,8 +104,10 @@ Features
   vertical advection, and approximated diabatic heating terms.
 - **QG omega solver** — Hoskins Q-vector formulation with FFT+Thomas (default)
   and 3-D direct/iterative (BiCGSTAB+ILU) backends.
-- **Helmholtz decomposition** — 4 backends (direct, FFT, DCT, SOR) for
-  limited-area domains.
+- **Helmholtz decomposition** — spherical-harmonic backend (default,
+  via ``pyspharm``) plus a legacy spherical-FFT solver, with a
+  parity-mirror trick that lifts NH-only fields onto the global sphere
+  for a near-zero harmonic residual.
 - **Moist/dry omega splitting** — decomposes vertical motion into moist and dry
   contributions.
 - **Isentropic diagnostics** — PV-tendency analysis on isentropic surfaces.
@@ -116,6 +118,10 @@ Features
 - **RWB detection** — anticyclonic/cyclonic Rossby wave breaking classification.
 - **Composite lifecycle** — multi-stage ensemble averaging with onset/peak/decay
   staging.
+- **ω blowup detection** — post-hoc CSV scan flagging ERA5 timestamps
+  whose 300 hPa absolute ω exceeds a fixed Pa s⁻¹ hard cutoff
+  (canonical ±5 Pa/s); replaces the silent in-solver clip used in
+  pvtend ≤ 2.9.
 - **CLI pipeline** — end-to-end processing via ``pvtend-pipeline``.
 
 .. toctree::

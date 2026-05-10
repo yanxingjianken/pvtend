@@ -211,6 +211,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Gaussian smoothing sigma (degrees).",
     )
 
+    # ── blowup-scan ──────────────────────────────────────────────
+    blowup = sub.add_parser(
+        "blowup-scan",
+        help=("Detect ±Nσ ω blowup timestamps from ERA5 (data-driven; "
+              "replaces the obsolete hard-coded ±5 Pa/s clip)."),
+    )
+    blowup.add_argument(
+        "--era5", required=True, type=str,
+        help="Glob expression for ERA5 ω files (e.g. /…/era5_w_*.nc).",
+    )
+    blowup.add_argument(
+        "--level", type=float, default=300.0,
+        help="Pressure level in hPa (default 300).",
+    )
+    blowup.add_argument(
+        "--threshold", type=float, default=5.0,
+        help="σ multiplier (default 5).",
+    )
+    blowup.add_argument(
+        "--out", required=True, type=Path,
+        help="Output CSV path.",
+    )
+
     return parser
 
 
@@ -473,6 +496,22 @@ def _cmd_decompose(args: argparse.Namespace) -> None:
     print("[pvtend] Decomposition complete.")
 
 
+def _cmd_blowup_scan(args: argparse.Namespace) -> None:
+    """Execute the ``blowup-scan`` subcommand."""
+    from pvtend.blowup import scan_omega_blowup
+
+    level_pa = float(args.level) * 100.0
+    print(f"[pvtend] Scanning ω blowups at {args.level:.0f} hPa, "
+          f"|ω| > {args.threshold:.2f} Pa/s ...")
+    df = scan_omega_blowup(
+        era5_w_glob=args.era5,
+        level_pa=level_pa,
+        threshold=args.threshold,
+        out_csv=args.out,
+    )
+    print(f"[pvtend] {len(df)} blowup timestamps written to {args.out}")
+
+
 # =====================================================================
 # Main entry point
 # =====================================================================
@@ -505,6 +544,7 @@ def main(argv: list[str] | None = None) -> int:
         "classify": _cmd_classify,
         "composite": _cmd_composite,
         "decompose": _cmd_decompose,
+        "blowup-scan": _cmd_blowup_scan,
     }
 
     try:

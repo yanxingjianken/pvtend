@@ -53,6 +53,39 @@ boundaries.
    div_spherical
 
 
+Spherical-harmonic operators
+----------------------------
+
+Since v2.10, ``pvtend`` ships a **spherical-harmonic backend**
+(``pvtend.sh_ops``) built on `pyspharm
+<https://github.com/jswhit/pyspharm>`_ that is the new default for the
+Helmholtz decomposition, the QG ω velocity-potential inversion, and
+mixed second derivatives.  All public operators accept Northern-
+Hemisphere arrays ``(nlat_nh, nlon)`` (``lat = 0…90°``) and internally
+mirror them to the global sphere via :func:`~pvtend.sh_ops.parity_mirror`
+(scalars and ``u`` use even reflection, ``v`` uses odd) before the SH
+projection — this avoids the polar singularities of pure finite
+differences and yields machine-precision round-trip Helmholtz
+identities on band-limited inputs.
+
+.. currentmodule:: pvtend.sh_ops
+
+.. autosummary::
+   :toctree: generated/
+
+   gradient_sh
+   laplacian_sh
+   invert_laplacian_sh
+   vortdiv_sh
+   helmholtz_sh
+   second_derivs_sh
+   parity_mirror
+   restrict_to_nh
+   is_nh_grid
+
+.. currentmodule:: pvtend
+
+
 Climatology
 -----------
 
@@ -207,6 +240,38 @@ Steinfeld D, Pfahl S (2019) *Clim. Dyn.* 53, 6159–6180.
    solve_qg_omega_sip
 
 
+.. _blowup:
+
+ω blowup detection
+------------------
+
+ERA5 occasionally exhibits unphysically large vertical velocities at
+upper levels (typically thunderstorm artefacts in the 4D-Var increment)
+that contaminate downstream tendency budgets.  ``pvtend`` flags such
+timestamps with a **fixed Pa s⁻¹ hard cutoff** at the chosen pressure
+level — the canonical rule is :math:`|\omega| > 5\,\text{Pa s}^{-1}`
+at 300 hPa.
+
+Earlier versions of pvtend silently *clipped* ω at ±5 Pa/s inside
+:func:`solve_qg_omega_sip`, which corrupted the affected events; that
+behaviour is **OFF by default** in v2.10+.  Detection is now performed
+**post-hoc** by :func:`scan_omega_blowup`, which emits a CSV of
+offending timestamps for downstream exclusion by the event-NPZ
+builders, RWB classifier, and composite stage.
+
+.. autosummary::
+   :toctree: generated/
+
+   scan_omega_blowup
+
+CLI::
+
+   pvtend blowup-scan \
+       --era5 '/net/flood/data2/users/x_yan/era/era5_w_*.nc' \
+       --level 300 --threshold 5.0 \
+       --out outputs/blowup_scan/omega_300hPa_5pa.csv
+
+
 .. _helmholtz:
 
 Helmholtz Decomposition
@@ -314,6 +379,35 @@ The **meridional** derivative retains centred finite differences (the
 
    helmholtz_decomposition
    helmholtz_decomposition_3d
+
+Solver backends
+~~~~~~~~~~~~~~~
+
+Both :func:`helmholtz_decomposition` and
+:func:`helmholtz_decomposition_3d` accept a ``method`` keyword that
+selects the underlying numerical backend:
+
+================  ============================================================
+``method``        Description
+================  ============================================================
+``"spectral"``    *Default* — spherical-harmonic transform via
+                  :mod:`pvtend.sh_ops` (pyspharm).  NH arrays are
+                  parity-mirrored to the global sphere before the SH
+                  projection.  Machine-precision round-trip identities,
+                  no FD truncation error, no polar metric residual.
+``"sh"``          Synonym for ``"spectral"``.
+``"fft"``         Spherical-FFT Poisson solver
+                  (``pvtend.helmholtz._helmholtz_decomposition_fd``)
+                  used in pvtend ≤ 2.9; combines an FFT in longitude
+                  with a tridiagonal solve in latitude.  Retained for
+                  legacy reproducibility.
+``"fd"``          Synonym for ``"fft"``.
+================  ============================================================
+
+The ``method="spectral"`` (SH) path is the recommended default — it
+produces a harmonic residual ≲ 1 % of :math:`\|\mathbf{u}\|` on
+band-limited NH inputs and reduces the previous 5 % residual of the
+FFT path.
 
 **Low-level Poisson helpers** (importable from ``pvtend.helmholtz``):
 
