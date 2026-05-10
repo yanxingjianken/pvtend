@@ -804,6 +804,7 @@ def solve_qg_omega_sip(
     maxit: int = 300,
     alpha: float = 0.93,
     resmax: float = 1e-14,
+    w_physical_max: float | None = 5.0,
 ) -> tuple[np.ndarray, dict]:
     """Solve the QG omega equation using the SIP (Strongly Implicit Procedure).
 
@@ -861,6 +862,12 @@ def solve_qg_omega_sip(
         maxit: Max SIP iterations (default 300).
         alpha: SIP relaxation parameter (default 0.93).
         resmax: Convergence threshold (default 1e-14).
+        w_physical_max: Physical upper bound on |ω| [Pa s⁻¹] checked
+            **at the 300 hPa level only**.  Any cells exceeding this value
+            trigger a ``RuntimeWarning`` and are automatically clipped to
+            ``±w_physical_max`` in-place.  Matches the hard-cutoff used in
+            ``sensitivity_test/plots/source_blowups/*_exclude_hard.csv``
+            (5 Pa/s at 300 hPa).  Set to ``None`` to disable the check.
 
     Returns:
         ``(omega, info)`` where *omega* is ``(nlev, nlat, nlon)``
@@ -1042,6 +1049,31 @@ def solve_qg_omega_sip(
 
     # --- 8. Clean NaN / inf ---
     omega_out = np.nan_to_num(omega_out, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # --- 9. Physical bounds check at 300 hPa ---
+    # Only the 300 hPa level is checked; matches the hard cutoff threshold
+    # from sensitivity-test *_exclude_hard.csv (|w_*| > 5 Pa/s at 300 hPa).
+    # Exceeding cells are clipped to ±w_physical_max and a warning is issued.
+    if w_physical_max is not None:
+        target_pa = 30000.0  # 300 hPa in Pa
+        k300 = int(np.argmin(np.abs(plevs_pa - target_pa)))
+        slice_300 = omega_out[k300, :, :]
+        abs_300 = np.abs(slice_300)
+        n_exceed = int(np.sum(abs_300 > w_physical_max))
+        if n_exceed > 0:
+            import warnings
+            peak_abs = float(abs_300.max())
+            warnings.warn(
+                f"solve_qg_omega_sip: {n_exceed} grid cell(s) at "
+                f"~300 hPa (level index {k300}, "
+                f"{plevs_pa[k300]/100:.0f} hPa) have "
+                f"|ω| > {w_physical_max:.1f} Pa s⁻¹ "
+                f"(peak |ω| = {peak_abs:.3f} Pa s⁻¹). "
+                f"Clipping to ±{w_physical_max:.1f} Pa s⁻¹.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            omega_out[k300, :, :] = np.clip(slice_300, -w_physical_max, w_physical_max)
 
     elapsed = _time.perf_counter() - t0_wall
     info = {

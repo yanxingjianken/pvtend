@@ -40,7 +40,21 @@ examples/era5_jan2025/
 
 # Scratch/archive notebooks
 examples/archive/
+examples/archive_2/
 examples/08_rwb_tilt/
+examples/rwb_test/
+examples/00_idealized_5basis_beta_alpha_only.ipynb
+examples/08a_tilt_angle_proof.ipynb
+examples/08c_lifecycle_gamma_tilt.ipynb
+examples/08cc_lifecycle_gamma_tilt.ipynb
+examples/08d_onset_gamma_tilt.ipynb
+examples/08dd_onset_gamma_tilt.ipynb
+
+# Pipeline scratch / outputs (artifacts large; produced by CLI)
+scripts/
+outputs/
+run_pipeline.sh
+test_fields.py
 
 # Paper (local only, not tracked)
 paper/

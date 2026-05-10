@@ -161,9 +161,57 @@ graph TD
     L1 --> L1a[rwb_variant_tracksets.pkl]
     K & L1a --> L2[pvtend.composite_builder — Pass 2]
     L2 --> L2a[composite.pkl]
+    L2a --> W1[website/export_composite_web.py]
+    L2a --> W2[website/build_and_export_clusters.py]
+    W1 --> W3[blocking_export and prp_export JSON.gz]
+    W2 --> W3
+    W3 --> W4[blocking-plots viewer with contour and arrow overlays]
     L2a --> M[pvtend.decomposition — Orthogonal basis]
     M --> N[β, αx, αy, γ coefficients]
     N --> O[pvtend.plotting — Publication figures]
+```
+
+## Website Export
+
+The repository also contains a lightweight website export pipeline for the blocking/PRP composite viewer. The JSON exports under `website/blocking_export/` and `website/prp_export/` are built from the saved composite pickles and include grouped field metadata, basis payloads, and vector-overlay definitions so the viewer can switch between scalar contours and wind-arrow overlays.
+
+```mermaid
+graph TD
+    A[composite_blocking.pkl or composite_prp.pkl] --> B[website/export_composite_web.py]
+    C[composite_blocking_clusters.pkl or composite_prp_clusters.pkl] --> D[website/build_and_export_clusters.py]
+    B --> E[Parent-category JSON.gz exports]
+    D --> F[Cluster and subcluster JSON.gz exports]
+    E --> G[Hugging Face dataset blocking-composites]
+    F --> G
+    G --> H[blocking-plots viewer]
+```
+
+## Publication Figures
+
+The `paper/generals_paper_1/scripts/` directory contains the current paper Figure 5-8 generation workflow. Shared budget definitions live in `_paper_budget.py`, which centralizes the Eq. 11 term mapping, the pressure-weighted `wavg` level, the `q'<0` projection basis, p99.9 track-exclusion lists, and the Figure 7 bootstrap cache location.
+
+- `fig5_beta_closure_qg_onset_wavg.py` renders the blocking-onset raw PV-tendency closure and corresponding `beta*Phi_1` projections in two four-column blocks. The stationary-flow and baroclinic advection terms are split into separate columns, with term subtitles, panel-specific colorbars, a shared range for the six process-projection colorbars, total-PV contours on the LHS panel, and wind arrows on the other raw-term panels.
+- `fig6_beta_stacked_qg_wavg.py` renders the wavg-only onset lifecycle stacked-bar budget for `beta`, with the direct `partial q / partial t` projection overlaid as a black step curve and colors matched to `examples/05_stacked_bar_beta.ipynb` cell 14.
+- `fig7_ax_bootstrap_blocking_vs_prp_qg_wavg.py` renders peak-stage blocking versus propagating-anticyclone `alpha_x` bootstrap bars from event NPZs after excluding p99.9 blowup tracks. Projections use the full event fields without a pre-projection significance mask, the `pv_dt` bars include simple mean-value labels, and repeated runs reuse `paper/generals_paper_1/scripts/cache/` when the inventory and settings match.
+- `fig8_gamma_rwb_awb_cwb_onset_wavg.py` renders AWB/CWB onset raw maps and `-gamma_1*Phi_4 - gamma_2*Phi_5` deformation projections for four selected Eq. 11 terms. It uses QG-diabatic paper definitions, one colorbar per panel, and Figure-2-style stretch/compression arrows.
+
+All four scripts write PNG and PDF files into `paper/generals_paper_1/figures/`, and `paper/generals_paper_1/main.tex` includes the generated PNGs.
+
+```mermaid
+graph TD
+    A[outputs/blocking/composite_blocking.pkl] --> B[_paper_budget.py]
+    B --> C[fig5_beta_closure_qg_onset_wavg.py]
+    B --> D[fig6_beta_stacked_qg_wavg.py]
+    B --> M[fig8_gamma_rwb_awb_cwb_onset_wavg.py]
+    E[outputs/blocking and outputs/prp event NPZs] --> B
+    F[p99.9 exclude CSVs] --> B
+    B --> G[fig7_ax_bootstrap_blocking_vs_prp_qg_wavg.py]
+    G --> H[scripts/cache/bootstrap NPZ]
+    C --> I[figures/fig5_beta_closure_qg_onset_wavg PNG/PDF]
+    D --> J[figures/fig6_beta_stacked_qg_wavg PNG/PDF]
+    G --> K[figures/fig7_ax_bootstrap_blocking_vs_prp_qg_wavg PNG/PDF]
+    M --> N[figures/fig8_gamma_rwb_awb_cwb_onset_wavg PNG/PDF]
+    I & J & K & N --> L[paper/generals_paper_1/main.tex]
 ```
 
 ## Package Structure
@@ -208,6 +256,14 @@ src/pvtend/
     ├── era5.py
     ├── npz.py
     └── pkl.py
+
+website/
+├── export_composite_web.py   # JSON.gz export for the blocking/PRP web viewer
+├── build_and_export_clusters.py # Cluster-aware export and diagnostics generation
+├── upload_to_hf.py           # Sync local website exports to Hugging Face
+├── blocking_export/          # Exported blocking viewer payloads
+├── prp_export/               # Exported PRP viewer payloads
+└── cluster_diagnostics/      # Cluster composite diagnostics used for QA
 ```
 
 ## Example Notebooks
