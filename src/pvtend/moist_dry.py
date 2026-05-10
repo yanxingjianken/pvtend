@@ -86,7 +86,17 @@ def solve_chi_from_omega(
     rhs_poisson = -domega_dp
 
     if method in ("spectral", "sh"):
-        from .sh_ops import invert_laplacian_sh, gradient_sh
+        try:
+            from .sh_ops import invert_laplacian_sh, gradient_sh
+        except ImportError:
+            import warnings
+            warnings.warn(
+                "pyspharm not installed; falling back to FD for "
+                "solve_chi_from_omega. Install via `pip install pvtend[sh]`.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return _solve_chi_from_omega_fd(rhs_poisson, lat, lon)
 
         chi_out = np.zeros_like(omega)
         u_div_out = np.zeros_like(omega)

@@ -432,18 +432,28 @@ def _solve_chi_nh(
     rhs = -ddp(omega_nh, plevs_pa)
 
     if method in ("spectral", "sh"):
-        from .sh_ops import invert_laplacian_sh, gradient_sh
-
-        u_div_nh = np.zeros_like(omega_nh)
-        v_div_nh = np.zeros_like(omega_nh)
-        for k in range(nlev):
-            chi_k = invert_laplacian_sh(
-                rhs[k], lat_nh, lon_nh, R_earth=R_EARTH, parity="scalar",
+        try:
+            from .sh_ops import invert_laplacian_sh, gradient_sh
+        except ImportError:
+            import warnings
+            warnings.warn(
+                "pyspharm not installed; falling back to FD for "
+                "u_div_from_omega. Install via `pip install pvtend[sh]`.",
+                RuntimeWarning,
+                stacklevel=2,
             )
-            dchi_dx, dchi_dy = gradient_sh(chi_k, lat_nh, lon_nh, R_earth=R_EARTH)
-            u_div_nh[k] = dchi_dx
-            v_div_nh[k] = dchi_dy
-        return u_div_nh, v_div_nh
+            method = "fd"
+        else:
+            u_div_nh = np.zeros_like(omega_nh)
+            v_div_nh = np.zeros_like(omega_nh)
+            for k in range(nlev):
+                chi_k = invert_laplacian_sh(
+                    rhs[k], lat_nh, lon_nh, R_earth=R_EARTH, parity="scalar",
+                )
+                dchi_dx, dchi_dy = gradient_sh(chi_k, lat_nh, lon_nh, R_earth=R_EARTH)
+                u_div_nh[k] = dchi_dx
+                v_div_nh[k] = dchi_dy
+            return u_div_nh, v_div_nh
 
     # ── Legacy FD path (preserved for regression) ──
     lat_rad = np.deg2rad(lat_nh)

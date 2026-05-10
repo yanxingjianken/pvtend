@@ -305,16 +305,26 @@ def second_derivs(
         Tuple ``(f_xx, f_xy, f_yy)`` with the same shape as *field*.
     """
     if method in ("spectral", "sh"):
-        from .sh_ops import second_derivs_sh
-
-        if field.ndim == 3:
-            fxx = np.empty_like(field, dtype=np.float64)
-            fxy = np.empty_like(field, dtype=np.float64)
-            fyy = np.empty_like(field, dtype=np.float64)
-            for k in range(field.shape[0]):
-                fxx[k], fxy[k], fyy[k] = second_derivs_sh(field[k], lat, lon)
-            return fxx, fxy, fyy
-        return second_derivs_sh(field, lat, lon)
+        try:
+            from .sh_ops import second_derivs_sh
+        except ImportError:
+            import warnings
+            warnings.warn(
+                "pyspharm not installed; falling back to method='fd' for "
+                "second_derivs. Install via `pip install pvtend[sh]`.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            method = "fd"
+        else:
+            if field.ndim == 3:
+                fxx = np.empty_like(field, dtype=np.float64)
+                fxy = np.empty_like(field, dtype=np.float64)
+                fyy = np.empty_like(field, dtype=np.float64)
+                for k in range(field.shape[0]):
+                    fxx[k], fxy[k], fyy[k] = second_derivs_sh(field[k], lat, lon)
+                return fxx, fxy, fyy
+            return second_derivs_sh(field, lat, lon)
 
     if method != "fd":
         raise ValueError(f"Unknown method {method!r}; use 'spectral' or 'fd'.")
