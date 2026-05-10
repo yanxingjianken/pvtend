@@ -53,13 +53,14 @@ The CSVs are the inputs for `pvtend-pipeline compute`, which extracts event-cent
 - **53 cross-term PV tendency budget**: 20 primary + 16 alt-vertical + 16 div dry/moist horizontal + Q_LHR, all written per-timestep to NPZ
 - **PV tendency computation**: RHS has zonal advection, baroclinic counter propagation, vertical advection, and approximated diabatic heating terms.
 - **QG omega solver**: Hoskins Q-vector formulation with **two methods**: LOG20/SIP (default, Numba-accelerated 3-D elliptic, Li & O'Gorman 2020) and SP19 (Steinfeld & Pfahl 2019 empirical 1/3 scaling). Optional `center_lat` for dynamic f₀.
-- **Helmholtz decomposition**: Spherical vorticity/divergence (with tan φ/a metric), conservative spherical Poisson solver (FFT in lon + tridiagonal in lat), spectral gradient for wind recovery — all on the full NH grid
+- **Helmholtz decomposition**: Spherical vorticity/divergence (with tan φ/a metric), conservative spherical Poisson solver (FFT in lon + tridiagonal in lat), spectral gradient for wind recovery — all on the full NH grid. Since v2.10 a **spherical-harmonic backend** (`pvtend.sh_ops`, via `pyspharm`) is the default (`method="spectral"`); legacy FFT path remains as `method="fft"`. NH inputs are parity-mirrored to the global sphere, giving a near-zero harmonic residual.
 - **Four-way omega decomposition**: ω_dry (QG A+B), ω_qg_moist (term C via ∂T/∂t), ω_emanuel_moist (Emanuel LHR), ω_moist (full residual), with corresponding divergent winds recovered by **independent** spherical Poisson inversion (verified linear to machine precision)
 - **Orthogonal basis decomposition**: Projects PV tendency onto intensification (β), propagation (αx, αy), and deformation (γ) modes. Built-in **temporal down-scaling** (bi-linear interpolation, α = 0.75 by default) from hourly to 15-minute evaluation instants via `_next` keyword arguments. **Single-blob selection**: when the threshold mask produces multiple disconnected regions, only the connected component enclosing (or nearest to) the patch centre is retained
 - **RWB detection**: Two classification methods — **bay** (path-order, recommended with circumpolar-cropped contours) and **tilt** (centerline slope ±0.15 dead zone). Circumpolar-first contour extraction for robust NH analysis.
 - **Composite lifecycle**: Multi-stage ensemble averaging with onset/peak/decay staging
 - **NaN-safe throughout**: All grid, derivative, solver, bootstrap, and plotting routines use `nanmean`/`nanpercentile` to handle partial-NaN edge events without corrupting composites or flipping projection signs
-- **CLI pipeline**: End-to-end processing via `pvtend-pipeline` command
+- **ω blowup detection** (v2.10.1): Post-hoc CSV scan flagging ERA5 timestamps whose `|ω|` at 300 hPa exceeds a fixed Pa s⁻¹ hard cutoff (canonical ±5 Pa/s). Replaces the silent in-solver clip used in pvtend ≤ 2.9, which was corrupting the affected events.
+- **CLI pipeline**: End-to-end processing via `pvtend-pipeline` command (`compute`, `clim-helmholtz`, `classify`, `composite`, `decompose`, `blowup-scan`)
 
 ## Installation
 
@@ -80,6 +81,26 @@ micromamba create -f environment.yml
 micromamba activate pvtend_env
 pip install -e ".[dev]"
 ```
+
+### Spherical-harmonic backend (recommended)
+
+The Helmholtz / QG-ω velocity-potential / mixed-second-derivative
+operators default to a spherical-harmonic backend
+(`pvtend.sh_ops`, built on `pyspharm` / `windspharm`).  These two
+packages compile Fortran code at install time, so they are kept as an
+**optional extra**:
+
+```bash
+# conda-forge ships pre-built wheels (recommended)
+micromamba install -c conda-forge windspharm pyspharm
+
+# Or via pip with numpy already installed and a Fortran compiler:
+pip install --no-build-isolation pyspharm windspharm
+```
+
+With these installed, ``method="spectral"`` (the default) is used.
+Without them, callers fall back to the legacy FFT path or raise a clear
+error directing the user to install the SH extras.
 
 ## Quick Start
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pvtend"
-version = "2.10.1"
+version = "2.10.2"
 authors = [
     { name = "Xingjian Yan" },
     { name = "Talia Tamarin-Brodsky" },
@@ -29,16 +29,15 @@ dependencies = [
     "matplotlib",
     "scikit-image",
     "cdsapi",
-    "pyspharm",
-    "windspharm",
 ]
 
 [project.optional-dependencies]
 maps = ["cartopy"]
 sip = ["numba"]
+sh = ["pyspharm", "windspharm"]
 test = ["pytest", "dask"]
 docs = ["sphinx", "sphinx-rtd-theme", "nbsphinx", "ipykernel"]
-dev = ["pvtend[test,docs,sip]", "pre-commit", "ruff"]
+dev = ["pvtend[test,docs,sip,sh]", "pre-commit", "ruff"]
 
 [project.urls]
 Documentation = "https://pvtend.readthedocs.io/"

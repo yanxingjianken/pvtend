@@ -27,6 +27,18 @@ autosummary_generate = True
 napoleon_google_docstring = True
 napoleon_numpy_docstring = False
 
+# pyspharm / windspharm require Fortran compilation; mock on RTD where
+# only the Python source is needed for autodoc.
+autodoc_mock_imports = [
+    "spharm",
+    "windspharm",
+    "numba",
+    "cdsapi",
+    "netCDF4",
+    "skimage",
+    "scikit_image",
+]
+
 templates_path = ["_templates"]
 exclude_patterns = ["_build", "**.ipynb_checkpoints"]
 
