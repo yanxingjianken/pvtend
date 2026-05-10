@@ -1379,6 +1379,8 @@ class TendencyComputer:
             # ────────────────────────────────────────────
             out_fp.parent.mkdir(parents=True, exist_ok=True)
             _log(f"  Writing {out_fp} ...")
+            # 300-hPa level index for QG-omega blowup watch (Phase 7 v2)
+            _lvl300 = int(np.argmin(np.abs(np.asarray(levels) - 300)))
             with tempfile.NamedTemporaryFile(
                 dir=out_fp.parent, prefix=out_fp.stem + ".",
                 suffix=".npz", delete=False,
@@ -1460,6 +1462,21 @@ class TendencyComputer:
                     u_div_qg_diabatic=vw(cube3d["u_div_qg_diabatic"]),
                     v_div_qg_diabatic=vw(cube3d["v_div_qg_diabatic"]),
                     w_lhr_moist=vw(cube3d["w_lhr_moist"]),
+                    # ── QG-omega solver blowup watch (Phase 7 v2) ──
+                    # Patch max |ω| at 300 hPa for each solver-derived ω.
+                    # Empirical raw-ERA5 envelope at 300 hPa over
+                    # 1990-2020 hourly: max=22.4 Pa/s, 99.9th=19.9 Pa/s.
+                    # We flag QG/Emanuel solver output > 25 Pa/s as
+                    # solver pathology (raw ω essentially never exceeds
+                    # this; 25 Pa/s = raw_max + ~10 % headroom).
+                    max_abs_w_adiabatic_300=np.float32(
+                        np.nanmax(np.abs(cube3d["w_adiabatic"][_lvl300]))),
+                    max_abs_w_diabatic_300=np.float32(
+                        np.nanmax(np.abs(cube3d["w_diabatic"][_lvl300]))),
+                    max_abs_w_qg_diabatic_300=np.float32(
+                        np.nanmax(np.abs(cube3d["w_qg_diabatic"][_lvl300]))),
+                    max_abs_w_lhr_moist_300=np.float32(
+                        np.nanmax(np.abs(cube3d["w_lhr_moist"][_lvl300]))),
                     u_div_lhr_moist=vw(cube3d["u_div_lhr_moist"]),
                     v_div_lhr_moist=vw(cube3d["v_div_lhr_moist"]),
                     q=vw(cube3d["q"]),

@@ -1,4 +1,4 @@
-"""Hard-threshold ω-blowup detection (±10 Pa/s at 300 hPa by default).
+"""Hard-threshold ω-blowup detection (±25 Pa/s at 300 hPa by default).
 
 Background
 ----------
@@ -12,17 +12,22 @@ fields by ill-conditioned spectral inversions.  The fix has two parts:
 1. The QG-ω solver's default ``w_physical_max`` is now ``None`` — no
    in-solver clipping.
 2. This module performs a **post-hoc scan**: any timestamp whose
-   max absolute ω at 300 hPa exceeds the ±10 Pa/s hard threshold (or
+   max absolute ω at 300 hPa exceeds the ±25 Pa/s hard threshold (or
    any user-supplied cutoff) is recorded in a CSV for exclusion by
    the event-NPZ builders, RWB classifier, and composite stage.
 
-The threshold is a fixed physical cutoff (Pa s⁻¹), **not** a data-driven
-μ+Nσ rule.  Default is 10 Pa/s — synoptic 300 hPa ω rarely exceeds
-2–3 Pa/s, so anything above 10 Pa/s in the *derived* moist/dry/LHR
-omegas is essentially always a solver blowup, while still keeping
-legitimate strong tropical convection / WCB ascent (1–4 Pa/s).
-A stricter 5 Pa/s cutoff is also reasonable when only the most
-egregious contaminators are of interest.
+The threshold is a fixed physical cutoff (Pa s⁻¹), calibrated against
+the empirical raw-ERA5 envelope at 300 hPa over 1990-2020 hourly
+(max=22.4 Pa/s, 99.9th=19.9 Pa/s).  Default 25 Pa/s = raw_max + ~10 %
+headroom, so values above it in the *derived* QG-solver fields
+(ω_dry / ω_moist / ω_LHR / ω_qg-moist) are essentially always solver
+pathology, never observable atmospheric vertical motion.
+
+**Note (v2.10.8+):** The recommended path is now per-event NPZ scanning
+via :mod:`scripts.aggregate_qg_blowup`, which reads the
+``max_abs_w_*_300`` scalars embedded by :class:`pvtend.tendency.TendencyComputer`
+in every NPZ.  This module is retained for back-compat scans of raw
+ERA5 ω globs.
 
 Usage
 -----
@@ -33,7 +38,7 @@ Programmatic::
     df = scan_omega_blowup(
         era5_w_glob="/net/flood/data2/users/x_yan/era/era5_w_*.nc",
         level_pa=30000.0,
-        threshold=10.0,
+        threshold=25.0,
         out_csv="outputs/blowup_scan/omega_300hPa_10pa.csv",
     )
 
@@ -41,7 +46,7 @@ CLI::
 
     pvtend blowup-scan \\
         --era5 '/net/flood/data2/users/x_yan/era/era5_w_*.nc' \\
-        --level 300 --threshold 10.0 \\
+        --level 300 --threshold 25.0 \\
         --out outputs/blowup_scan/omega_300hPa_10pa.csv
 """
 from __future__ import annotations
@@ -100,7 +105,7 @@ def _select_level(da: xr.DataArray, level_pa: float) -> xr.DataArray:
 def scan_omega_blowup(
     era5_w_glob: str,
     level_pa: float = 30000.0,
-    threshold: float = 10.0,
+    threshold: float = 25.0,
     out_csv: str | os.PathLike | None = None,
 ) -> pd.DataFrame:
     """Flag ERA5 timestamps whose max absolute ω at *level_pa* exceeds *threshold*.
@@ -111,7 +116,7 @@ def scan_omega_blowup(
     Args:
         era5_w_glob: Glob for ERA5 ω NetCDF files.
         level_pa: Pressure level [Pa]; default ``30000`` (300 hPa).
-        threshold: Hard cutoff abs(ω) [Pa s⁻¹]; default ``10.0`` (synoptic
+        threshold: Hard cutoff abs(ω) [Pa s⁻¹]; default ``25.0`` (raw ERA5
             300 hPa ω rarely exceeds 2-3 Pa/s, so |ω|>10 Pa/s in derived
             ω_dry / ω_moist / ω_LHR is essentially always solver blowup).
         out_csv: Optional output CSV path.

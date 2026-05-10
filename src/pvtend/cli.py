@@ -214,8 +214,10 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── blowup-scan ──────────────────────────────────────────────
     blowup = sub.add_parser(
         "blowup-scan",
-        help=("Detect ±Nσ ω blowup timestamps from ERA5 (data-driven; "
-              "replaces the obsolete hard-coded ±5 Pa/s clip)."),
+        help=("[Deprecated in v2.10.8] Detect raw ERA5 ω blowups. "
+              "Prefer scripts/aggregate_qg_blowup.py which scans NPZ "
+              "max_abs_w_*_300 metrics — only QG-omega solver output is "
+              "ever blowup-prone; raw ERA5 ω is observationally bounded."),
     )
     blowup.add_argument(
         "--era5", required=True, type=str,
@@ -226,11 +228,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Pressure level in hPa (default 300).",
     )
     blowup.add_argument(
-        "--threshold", type=float, default=10.0,
-        help=("Hard cutoff abs(omega) in Pa/s (default 10.0).  "
-              "Synoptic 300 hPa omega rarely exceeds 2-3 Pa/s; "
-              "|omega|>10 Pa/s in derived omega_dry/omega_moist/omega_lhr "
-              "is essentially always solver blowup."),
+        "--threshold", type=float, default=25.0,
+        help=("Hard cutoff abs(omega) in Pa/s (default 25.0).  "
+              "Empirical raw-ERA5 envelope at 300 hPa over 1990-2020 "
+              "hourly: max=22.4, 99.9th=19.9 Pa/s; QG-solver output "
+              ">25 Pa/s = solver pathology."),
     )
     blowup.add_argument(
         "--out", required=True, type=Path,
