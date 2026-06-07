@@ -53,6 +53,8 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "pvtend.data" = ["*.npz"]
+# Ship the Wu PPVI Fortran source so the f2py extension can be built on demand.
+"pvtend.ppvi.fortran" = ["*.f"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
