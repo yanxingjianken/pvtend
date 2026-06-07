@@ -108,6 +108,11 @@ Features
   via ``pyspharm``) plus a legacy spherical-FFT solver, with a
   parity-mirror trick that lifts NH-only fields onto the global sphere
   for a near-zero harmonic residual.
+- **Per-level piecewise PV inversion (PPVI)** — Wu/Davis nonlinear-balance
+  inversion decomposing the balanced rotational-wind anomaly into the part
+  induced by **each** pressure level's PV/θ anomaly (9 levels 1000→100 hPa;
+  Bretherton boundary-θ at top/bottom). NPZ keys ``u/v_rot_anom_ppvi_{L}``;
+  on by default in ``compute`` (``--with-ppvi``).
 - **Moist/dry omega splitting** — decomposes vertical motion into moist and dry
   contributions.
 - **Isentropic diagnostics** — PV-tendency analysis on isentropic surfaces.

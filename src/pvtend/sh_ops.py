@@ -368,6 +368,125 @@ def invert_laplacian_sh(
     return _from_global(chi_g, lat_g, was_nh)
 
 
+def filter_low_modes_sh(
+    field: np.ndarray,
+    lat: np.ndarray,
+    lon: np.ndarray,
+    nmin: int = 2,
+    R_earth: float = R_EARTH,
+    parity: str = "scalar",
+) -> np.ndarray:
+    """Return *field* with all total-wavenumber modes n < *nmin* zeroed.
+
+    .. deprecated::
+        Only used by the archived SH-PPVI method in
+        ``pv_inversion/archive/sh/sh_ppvi/``.  Not exported via ``__all__``.
+        Will be removed in a future release.
+
+    Uses the identical parity-mirror and north→south orientation pipeline
+    as :func:`invert_laplacian_sh`, so results are self-consistent.
+
+    The primary use case is ``nmin=2``: removes the global-mean (n=0) and
+    dipole (n=1) modes before a spectral inverse-Laplacian.  On the full
+    sphere ∇⁻² amplifies n=1 by R²/[n(n+1)·LL²] ≈ 730× (for LL=1.667e5 m),
+    causing Picard divergence in the BALNC ψ-solve when those modes are
+    unconstrained by lateral Dirichlet walls (cf. Wu's finite-difference
+    solver qinvert21_94.f, which pins rows I=1,I=NY,J=1,J=NX).
+
+    **pyspharm m-major spectral ordering** (triangular truncation T=ntrunc):
+      - block m=0: l = 0, 1, …, ntrunc   (ntrunc+1 entries)
+      - block m=1: l = 1, 2, …, ntrunc   (ntrunc   entries)
+      - block m=k: l = k, k+1, …, ntrunc  (ntrunc+1-k entries)
+      Start index of block m: ``m*(ntrunc+1) - m*(m-1)//2``
+    For ``nmin=2`` this zeros:
+      - (n=0, m=0)  → spectral index 0
+      - (n=1, m=0)  → spectral index 1          (already zero for even-parity NH)
+      - (n=1, m=1)  → spectral index ntrunc+1   (the primary culprit)
+
+    Args:
+        field:   Scalar field, shape ``(nlat, nlon)``.
+        lat:     Latitudes in degrees, ascending.
+        lon:     Longitudes in degrees.
+        nmin:    First total wavenumber to **keep**. Default ``2``.
+        R_earth: Earth radius in metres (used for the Spharmt cache key).
+        parity:  Mirror parity for NH-only inputs.  Defaults to ``"scalar"``.
+
+    Returns:
+        Filtered field of the same shape as *field*.
+    """
+    require_spharm()
+    f_g, lat_g, was_nh = _to_global(field, lat, kind=parity)
+    f_ns, asc = _orient_for_spharm(f_g, lat_g)
+
+    nlat, nlon = f_ns.shape
+    sx = _get_spharmt(nlon, nlat, R_earth)
+    ntrunc = nlat - 1
+    spec = sx.grdtospec(f_ns.astype(np.float32), ntrunc=ntrunc)
+
+    # Zero all spectral modes with total wavenumber n (= l in pyspharm) < nmin.
+    # m-major packing: block for wavenumber m starts at index m*(ntrunc+1) - m*(m-1)//2.
+    # Within that block l runs m, m+1, ..., ntrunc; so l < nmin means the first
+    # (nmin - m) entries of the block need to be zeroed.
+    for m in range(min(nmin, ntrunc + 1)):
+        m_start = m * (ntrunc + 1) - m * (m - 1) // 2
+        n_zero = nmin - m
+        spec[m_start : m_start + n_zero] = 0.0
+
+    filtered_ns = sx.spectogrd(spec)
+    filtered_g = _revert_orientation(np.asarray(filtered_ns), asc)
+    return _from_global(filtered_g, lat_g, was_nh)
+
+
+def invert_helmholtz_sh(
+    rhs: np.ndarray,
+    lat: np.ndarray,
+    lon: np.ndarray,
+    c: float,
+    R_earth: float = R_EARTH,
+    parity: str = "scalar",
+) -> np.ndarray:
+    """Solve ``(∇² + c)χ = rhs`` on the sphere for a scalar constant ``c``.
+
+    .. deprecated::
+        Only used by the archived SH-PPVI method in
+        ``pv_inversion/archive/sh/sh_ppvi/``.  Not exported via ``__all__``.
+        Will be removed in a future release.
+
+    This is the modified-Helmholtz (or screened-Poisson) equation.
+    When ``c = 0`` the result is identical to ``invert_laplacian_sh`` (with
+    the exception that the n=0 mean mode is also solved here rather than
+    pinned to zero, so the caller controls the mean).
+
+    Args:
+        rhs: Right-hand side, shape ``(nlat, nlon)``.
+        lat: Latitudes in degrees, ascending.
+        lon: Longitudes in degrees.
+        c: Constant Helmholtz coefficient.  Negative values are allowed
+           (as in the PPVI H-equation where ``c ≈ ASI·BB < 0``).
+        R_earth: Earth radius in metres.
+        parity: Mirror parity for NH-only inputs.  Defaults to ``"scalar"``.
+
+    Returns:
+        ``χ`` with the same shape as *rhs*.
+    """
+    require_spharm()
+    f_g, lat_g, was_nh = _to_global(rhs, lat, kind=parity)
+    f_ns, asc = _orient_for_spharm(f_g, lat_g)
+
+    nlat, nlon = f_ns.shape
+    sx = _get_spharmt(nlon, nlat, R_earth)
+    ntrunc = nlat - 1
+    spec = sx.grdtospec(f_ns.astype(np.float32), ntrunc=ntrunc)
+    eigs = _laplacian_eigenvalues(ntrunc, R_earth)          # -n(n+1)/R²
+    helm_eigs = eigs + float(c)                              # -n(n+1)/R² + c
+    # Guard against accidental zero eigenvalues
+    safe = np.abs(helm_eigs) > 1e-30
+    inv = np.where(safe, 1.0 / np.where(safe, helm_eigs, 1.0), 0.0)
+    chi_ns = sx.spectogrd((spec * inv.astype(spec.dtype)))
+    chi_g = _revert_orientation(np.asarray(chi_ns), asc)
+    return _from_global(chi_g, lat_g, was_nh)
+
+
 def vortdiv_sh(
     u: np.ndarray,
     v: np.ndarray,

@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import gc
 import os
+import re
 import tempfile
+import warnings
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -66,6 +68,10 @@ from .omega import (
 
 # Alias for brevity
 LEVELS = DEFAULT_LEVELS
+
+# Superseded grouped-piece PPVI keys (lower/middle/upper), now replaced by the
+# per-level ``*_ppvi_{L}`` keys. Used to drop them when re-running PPVI in place.
+_OLD_PIECE_KEY = re.compile(r"^[uv]_rot_anom_(lower|middle|upper)(_3d)?$")
 
 # ── Full list of variables stored in each NPZ ──────────────────────────
 VARS_3D: list[str] = [
@@ -192,7 +198,7 @@ def _find_per_var_month_files(parent: Path, stem: str) -> list[Path]:
 
 
 def load_climatology(
-    clim_path: Path, engine: str = "netcdf4",
+    clim_path: Path, engine: str = "netcdf4", chunks=None,
 ) -> xr.Dataset:
     """Load climatology, auto-detecting the file layout.
 
@@ -200,34 +206,44 @@ def load_climatology(
       1. Single merged file
       2. Per-var-per-month files
       3. Per-variable files
+
+    ``chunks=None`` (default) keeps the lazy-backend layout. Pass a dask chunk
+    spec (e.g. ``{"day":1,"hour":1}``) to back the variables with dask: each
+    ``.sel(month,day,hour).values`` then computes and **releases** its slice
+    instead of retaining it in the per-variable backend cache. This is what the
+    PPVI workers use — without it a long-lived worker accumulates one ~0.4 GB
+    month-chunk per accessed month/var (~19 GB/worker), throttling the cgroup.
     """
     clim_path = Path(clim_path)
-    if clim_path.is_file():
-        _log(f"Loading climatology from single file: {clim_path}")
-        return xr.open_dataset(clim_path, chunks=None, engine=engine,
-                               lock=False)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message=".*separate the stored chunks.*")
+        if clim_path.is_file():
+            _log(f"Loading climatology from single file: {clim_path}")
+            return xr.open_dataset(clim_path, chunks=chunks, engine=engine,
+                                   lock=False)
 
-    parent = clim_path.parent
-    stem = clim_path.stem.replace("_allvars", "")
+        parent = clim_path.parent
+        stem = clim_path.stem.replace("_allvars", "")
 
-    pvm_files = _find_per_var_month_files(parent, stem)
-    if pvm_files:
-        _log(f"Loading climatology from {len(pvm_files)} "
-             f"per-var-per-month files")
-        return xr.open_mfdataset(
-            [str(f) for f in pvm_files],
-            chunks=None, engine=engine, lock=False,
-            combine="by_coords", join="outer",
+        pvm_files = _find_per_var_month_files(parent, stem)
+        if pvm_files:
+            _log(f"Loading climatology from {len(pvm_files)} "
+                 f"per-var-per-month files")
+            return xr.open_mfdataset(
+                [str(f) for f in pvm_files],
+                chunks=chunks, engine=engine, lock=False,
+                combine="by_coords", join="outer",
+            )
+
+        per_var = sorted(
+            f for f in parent.glob(f"{stem}_*.nc")
+            if "_smoothed" not in f.stem and "_allvars" not in f.stem
         )
-
-    per_var = sorted(
-        f for f in parent.glob(f"{stem}_*.nc")
-        if "_smoothed" not in f.stem and "_allvars" not in f.stem
-    )
-    if per_var:
-        _log(f"Loading climatology from {len(per_var)} per-variable files")
-        return xr.open_mfdataset(per_var, chunks=None, engine=engine,
-                                 lock=False)
+        if per_var:
+            _log(f"Loading climatology from {len(per_var)} per-variable files")
+            return xr.open_mfdataset(per_var, chunks=chunks, engine=engine,
+                                     lock=False)
 
     raise FileNotFoundError(
         f"Climatology missing: {clim_path} "
@@ -273,9 +289,17 @@ def month_keys_for_window(
 
 def open_months_ds(
     data_dir: Path, var_list: list[str], month_keys: list[tuple[int, int]],
-    engine: str = "netcdf4",
+    engine: str = "netcdf4", chunks=None,
 ) -> xr.Dataset:
-    """Open multiple months of ERA5 data as a single dataset."""
+    """Open multiple months of ERA5 data as a single dataset.
+
+    ``chunks=None`` (default) loads each month eagerly — fine for the compute
+    path that touches most timesteps of the window. Pass a dask chunk spec
+    (e.g. ``{"valid_time": 1}``) to open lazily and only read the timesteps
+    actually accessed — the PPVI path uses this so a worker materialises one
+    (or a few) timesteps instead of the whole ~15 GB month, keeping per-worker
+    RSS low enough to scale to many workers under the 2 TB cap.
+    """
     data_dir = Path(data_dir)
     parts = []
     for v in var_list:
@@ -286,10 +310,15 @@ def open_months_ds(
         ]
         if not fns:
             raise FileNotFoundError(f"No files for {v} in months {month_keys}")
-        dsv = xr.open_mfdataset(
-            fns, combine="by_coords", parallel=False,
-            chunks=None, engine=engine, lock=False,
-        )
+        with warnings.catch_warnings():
+            # Per-timestep chunking can split the stored netCDF chunks; that's
+            # intentional here (memory over read-speed) — silence the notice.
+            warnings.filterwarnings(
+                "ignore", message=".*separate the stored chunks.*")
+            dsv = xr.open_mfdataset(
+                fns, combine="by_coords", parallel=False,
+                chunks=chunks, engine=engine, lock=False,
+            )
         dsv = _drop_cds_artefacts(dsv)
         dsv = _ensure_valid_time(dsv)
         if "level" in dsv.dims and "pressure_level" not in dsv.dims:
@@ -791,6 +820,21 @@ def with_derivs_for_window(
     ds = open_months_ds(cfg.data_dir, ["u", "v", "w", "pv", "z", "t", "q"],
                         month_keys, engine=cfg.engine)
 
+    # --- Restrict to the needed time window before any heavy compute ---
+    # Only ``rel_hours`` around ``base_ts`` are ever written, yet the monthly
+    # files hold ~744 hourly steps. Loading/deriving/Helmholtz-decomposing the
+    # whole month costs ~30× the memory (≈19 GB → <1 GB RSS) and compute. A
+    # ±EDGE_PAD_H pad keeps the centred time-derivative (np.gradient) at the
+    # extreme ``dh`` values bit-identical to the full-month result, since those
+    # output steps lie strictly inside the padded slice and use only their
+    # immediate hourly neighbours.
+    EDGE_PAD_H = 3
+    t_lo = (pd.to_datetime(base_ts)
+            + pd.Timedelta(hours=int(min(cfg.rel_hours)) - EDGE_PAD_H))
+    t_hi = (pd.to_datetime(base_ts)
+            + pd.Timedelta(hours=int(max(cfg.rel_hours)) + EDGE_PAD_H))
+    ds = ds.sortby("valid_time").sel(valid_time=slice(t_lo, t_hi))
+
     # --- lat metrics & Coriolis ---
     ds["latitude_rad"] = np.deg2rad(ds.latitude)
     lat_rad_vals = ds["latitude_rad"].values.copy()
@@ -1138,9 +1182,14 @@ class TendencyComputer:
         self._clim: xr.Dataset | None = None
         self._grid: _GridInfo | None = None
 
-    def _get_clim(self) -> xr.Dataset:
+    def _get_clim(self, chunks=None) -> xr.Dataset:
+        # ``chunks`` is honoured only on the first (cache-filling) call. PPVI
+        # workers pass {"day":1,"hour":1} so per-event clim slices are released
+        # rather than retained (see load_climatology); the compute path keeps
+        # the default eager layout.
         if self._clim is None:
-            self._clim = load_climatology(self.cfg.clim_path, self.cfg.engine)
+            self._clim = load_climatology(
+                self.cfg.clim_path, self.cfg.engine, chunks=chunks)
         return self._clim
 
     def _init_grid(self, ds: xr.Dataset) -> _GridInfo:
@@ -1159,12 +1208,20 @@ class TendencyComputer:
         lat0: float,
         lon0: float,
         base_ts: pd.Timestamp,
+        *,
+        also_ppvi: bool = False,
+        inv_lon_half: float = 90.0,
     ) -> int:
         """Process a single event and write NPZ files.
 
         Loads data **once** via :func:`with_derivs_for_window`, then
         iterates over ``cfg.rel_hours``, extracting a patch and computing
         QG omega + moist/dry + cross-terms + wavg per timestep.
+
+        When ``also_ppvi=True`` the Wu piecewise PV-inversion rotational
+        winds are computed for each ``dh`` and written **together** with
+        the base tendency fields in a single NPZ write (used for fresh
+        runs where no base NPZ exists yet — no append/re-write).
 
         Returns the number of NPZ files written.
         """
@@ -1215,6 +1272,13 @@ class TendencyComputer:
         levels = self.cfg.levels
         wavg_idx = [levels.index(l) for l in self.cfg.wavg_levels
                     if l in levels]
+
+        # Static PPVI inversion geometry (only when writing fields together).
+        ppvi_geom = None
+        cplev = None
+        if also_ppvi:
+            ppvi_geom = self._ppvi_geom(ds, inv_lon_half)
+            cplev = _plev_name(clim_ds)
 
         for dh in self.cfg.rel_hours:
             ts = base_ts + pd.Timedelta(hours=dh)
@@ -1385,13 +1449,7 @@ class TendencyComputer:
             _log(f"  Writing {out_fp} ...")
             # 300-hPa level index for QG-omega blowup watch (Phase 7 v2)
             _lvl300 = int(np.argmin(np.abs(np.asarray(levels) - 300)))
-            with tempfile.NamedTemporaryFile(
-                dir=out_fp.parent, prefix=out_fp.stem + ".",
-                suffix=".npz", delete=False,
-            ) as tf:
-                tmp_name = tf.name
-                np.savez_compressed(
-                    tf,
+            record = dict(
                     # ── Metadata ──
                     Y_rel=grid.Y_rel, X_rel=grid.X_rel,
                     levels=np.array(levels, dtype=np.int32),
@@ -1660,12 +1718,342 @@ class TendencyComputer:
                     w_lhr_moist_pv_bar_dp_3d=w_em_pvbar_dp_3d,
                     w_lhr_moist_pv_anom_dp_3d=w_em_pvanom_dp_3d,
                 )
+
+            # ── Optionally compute + merge PPVI fields (write together) ──
+            if also_ppvi:
+                try:
+                    record.update(self._ppvi_compute_keys(
+                        record, ts, ds, clim_ds, cplev, ppvi_geom))
+                except Exception as exc:  # noqa: BLE001 - log & continue
+                    _log(f"  PPVI (inline) dh={dh:+d} FAILED: {exc!r}")
+
+            with tempfile.NamedTemporaryFile(
+                dir=out_fp.parent, prefix=out_fp.stem + ".",
+                suffix=".npz", delete=False,
+            ) as tf:
+                tmp_name = tf.name
+                np.savez_compressed(tf, **record)
             os.replace(tmp_name, str(out_fp))
             written += 1
             gc.collect()
 
         _log(f"-> Event {track_id}: wrote {written} NPZ(s).")
         return written
+
+    # ── piecewise PV inversion pass ────────────────────────────────
+
+    # Fixed Wu inversion conventions. 9 levels 1000→100 hPa (matches the npz
+    # ``levels`` and the audited per-level PPVI); index 0 = 1000 hPa bottom-θ,
+    # index 8 = 100 hPa top-θ, 1..7 = interior PV.
+    _WU_PLEVS = [1000, 850, 700, 500, 400, 300, 250, 200, 100]
+    _WU2SI = 1.0e-8          # Wu pseudo-PV → SI Ertel PV
+    _WU_MI = 9999.90         # Wu missing-value sentinel
+    _BAND_N = 85.5           # fixed inversion latitude band (north)
+    _BAND_S = 10.5           # fixed inversion latitude band (south)
+
+    def _ppvi_geom(self, ds: xr.Dataset, inv_lon_half: float) -> dict:
+        """Build the static inversion geometry for an event.
+
+        Returns a dict of grid / header info reused across all ``dh`` of a
+        single event (depends only on the ERA5 grid + ``inv_lon_half``).
+        """
+        dlat = float(abs(np.diff(ds.latitude.values).mean()))
+        dlon = float(abs(np.diff(ds.longitude.values).mean()))
+        lat_all = ds.latitude.values
+        lon_all = ds.longitude.values
+        band_idx = np.where(
+            (lat_all <= self._BAND_N + 1e-6)
+            & (lat_all >= self._BAND_S - 1e-6))[0]
+        band_lats = lat_all[band_idx]
+        ny = len(band_idx)
+        inv_lon_pad = int(round(inv_lon_half / dlon))
+        nx = 2 * inv_lon_pad + 1
+        zhdr = np.array(
+            [self._BAND_S, 0.0, self._BAND_N, (nx - 1) * dlon,
+             dlat, dlon, nx, ny], dtype=np.float32)
+        wu_wavg_idx = [self._WU_PLEVS.index(l) for l in self.cfg.wavg_levels
+                       if l in self._WU_PLEVS]
+        return dict(
+            plev=_plev_name(ds), lat_all=lat_all, lon_all=lon_all,
+            nlon=len(lon_all), band_idx=band_idx, band_lats=band_lats,
+            ny=ny, inv_lon_pad=inv_lon_pad, nx=nx, zhdr=zhdr,
+            dlat=dlat, dlon=dlon, wu_wavg_idx=wu_wavg_idx,
+        )
+
+    def _ppvi_compute_keys(
+        self, store: dict, ts: pd.Timestamp, ds: xr.Dataset,
+        clim_ds: xr.Dataset, cplev: str, geom: dict,
+    ) -> dict:
+        """Compute the PPVI rotational-wind / PV-anomaly keys for one ``dh``.
+
+        ``store`` must already provide the base-patch metadata
+        (``center_lon``, ``lat_vec``, ``levels``) and the observed
+        rotational-wind anomalies (``u_rot_anom_3d``, ``v_rot_anom_3d``).
+        Returns a dict of new keys (no file IO).
+        """
+        from .ppvi import PIECES, invert_piecewise, psi_to_winds
+
+        WU_PLEVS = self._WU_PLEVS
+        WU2SI = self._WU2SI
+        MI = self._WU_MI
+        BAND_N = self._BAND_N
+        plev = geom["plev"]
+        band_idx = geom["band_idx"]
+        band_lats = geom["band_lats"]
+        ny = geom["ny"]
+        nx = geom["nx"]
+        inv_lon_pad = geom["inv_lon_pad"]
+        zhdr = geom["zhdr"]
+        lon_all = geom["lon_all"]
+        nlon = geom["nlon"]
+        dlat = geom["dlat"]
+        dlon = geom["dlon"]
+        wu_wavg_idx = geom["wu_wavg_idx"]
+
+        center_lon = float(store["center_lon"])
+        lat_vec = np.asarray(store["lat_vec"], dtype=float)
+        npz_levels = list(np.asarray(store["levels"]).tolist())
+        obs_u = np.asarray(store["u_rot_anom_3d"], dtype=float)
+        obs_v = np.asarray(store["v_rot_anom_3d"], dtype=float)
+        n_npz_lev, yp, xp = obs_u.shape
+
+        ilon_c = int(np.argmin(np.abs(lon_all - center_lon)))
+        lon_idx_inv = _wrapped_lon_index(
+            ilon_c, LON_PAD=inv_lon_pad, nlon=nlon)
+
+        # ── Extract event + climatological-mean cubes (NL, ny, nx) ──
+        mo, dy, hr = int(ts.month), int(ts.day), int(ts.hour)
+
+        def _ev(var):
+            return (ds[var].sel(valid_time=ts)
+                    .sel({plev: WU_PLEVS})
+                    .isel(latitude=band_idx, longitude=lon_idx_inv)
+                    .values.astype(np.float64))
+
+        def _mn(var):
+            return (clim_ds[var].sel(month=mo, day=dy, hour=hr)
+                    .sel({cplev: WU_PLEVS})
+                    .isel(latitude=band_idx, longitude=lon_idx_inv)
+                    .values.astype(np.float64))
+
+        z_e, t_e, u_e, v_e = _ev("z"), _ev("t"), _ev("u"), _ev("v")
+        z_m, t_m, u_m, v_m = _mn("z"), _mn("t"), _mn("u"), _mn("v")
+        H_e, H_m = z_e / G0, z_m / G0
+
+        # ── Run the Wu piecewise inversion ──
+        res = invert_piecewise(
+            H_m, t_m, u_m, v_m, H_e, t_e, u_e, v_e, zhdr)
+
+        # Rotational winds per piece on the inversion grid (NL, ny, nx).
+        piece_u: dict[str, np.ndarray] = {}
+        piece_v: dict[str, np.ndarray] = {}
+        for name in PIECES:
+            ur, vr = psi_to_winds(
+                res["psi_pieces"][name], band_lats, dlat, dlon)
+            piece_u[name], piece_v[name] = ur, vr
+
+        # Wu PV anomaly (interior levels valid; sentinel → NaN).
+        q_e = np.asarray(res["Q_event"], dtype=float)
+        q_m = np.asarray(res["Q_mean"], dtype=float)
+        bad = (np.abs(q_e) >= MI * 0.99) | (np.abs(q_m) >= MI * 0.99)
+        pv_anom_wu = (q_e - q_m) * WU2SI
+        pv_anom_wu[bad] = np.nan
+
+        # ── Crop inversion grid (ny, nx) → event patch (yp, xp) ──
+        # Latitude: match each patch row to a fixed-band row by value.
+        row_for = np.full(yp, -1, dtype=int)
+        for j, plat in enumerate(lat_vec):
+            if not np.isfinite(plat):
+                continue
+            r = int(round((BAND_N - plat) / dlat))
+            if 0 <= r < ny and abs(band_lats[r] - plat) < 0.25:
+                row_for[j] = r
+        # Longitude: map patch columns to inversion columns by grid index.
+        patch_lon_pad = (xp - 1) // 2
+        lon_idx_patch = _wrapped_lon_index(
+            ilon_c, LON_PAD=patch_lon_pad, nlon=nlon)
+        pos_of = {int(g): k for k, g in enumerate(lon_idx_inv)}
+        col_for = np.array(
+            [pos_of.get(int(g), -1) for g in lon_idx_patch], dtype=int)
+
+        vr_mask = row_for >= 0
+        vc_mask = col_for >= 0
+        rr = row_for[vr_mask]
+        cc = col_for[vc_mask]
+        ridx = np.where(vr_mask)[0]
+        cidx = np.where(vc_mask)[0]
+        wu_pos = [npz_levels.index(p) for p in WU_PLEVS]
+
+        def _crop(cube):
+            out = np.full((cube.shape[0], yp, xp), np.nan, dtype=float)
+            if rr.size and cc.size:
+                sub = cube[:, rr][:, :, cc]
+                out[np.ix_(np.arange(cube.shape[0]), ridx, cidx)] = sub
+            return out
+
+        def _pad_levels(cube8):
+            """(NL, yp, xp) Wu levels → (n_npz_lev, yp, xp), NaN elsewhere."""
+            out = np.full((n_npz_lev, yp, xp), np.nan, dtype=float)
+            out[wu_pos] = cube8
+            return out
+
+        piece_u_c = {n: _crop(piece_u[n]) for n in PIECES}
+        piece_v_c = {n: _crop(piece_v[n]) for n in PIECES}
+        pv_anom_wu_c = _crop(pv_anom_wu)
+
+        # Residual vs observed anomaly rotational wind (Wu levels only).
+        sum_u = sum(piece_u_c[n] for n in PIECES)
+        sum_v = sum(piece_v_c[n] for n in PIECES)
+        resid_u = obs_u[wu_pos] - sum_u
+        resid_v = obs_v[wu_pos] - sum_v
+
+        # ── Weighted vertical average → 2-D (over wavg_levels) ──
+        z_patch = _crop(z_e) / G0   # geopotential height [m], event
+        zw = z_patch[wu_wavg_idx]
+        wt = np.exp(-zw / H_SCALE)
+        den = np.nansum(wt, axis=0)
+        dmask = den > 0
+
+        def _wavg(cube8):
+            num = np.nansum(cube8[wu_wavg_idx] * wt, axis=0)
+            out = np.full_like(num, np.nan)
+            out[dmask] = num[dmask] / den[dmask]
+            return out
+
+        # ── Assemble new keys ──
+        # Per-level decomposition: the solver piece name is the 1-based Wu
+        # level index as a string; map it to the hPa level for the npz key,
+        # e.g. piece "7" → 250 hPa → ``u_rot_anom_ppvi_250(_3d)``.
+        new: dict[str, np.ndarray] = {}
+        for n in PIECES:
+            L = WU_PLEVS[int(n) - 1]
+            new[f"u_rot_anom_ppvi_{L}_3d"] = _pad_levels(piece_u_c[n])
+            new[f"v_rot_anom_ppvi_{L}_3d"] = _pad_levels(piece_v_c[n])
+            new[f"u_rot_anom_ppvi_{L}"] = _wavg(piece_u_c[n])
+            new[f"v_rot_anom_ppvi_{L}"] = _wavg(piece_v_c[n])
+        new["u_rot_anom_residual_ppvi_3d"] = _pad_levels(resid_u)
+        new["v_rot_anom_residual_ppvi_3d"] = _pad_levels(resid_v)
+        new["u_rot_anom_residual_ppvi"] = _wavg(resid_u)
+        new["v_rot_anom_residual_ppvi"] = _wavg(resid_v)
+        new["pv_anom_wu_3d"] = _pad_levels(pv_anom_wu_c)
+        new["pv_anom_wu"] = _wavg(pv_anom_wu_c)
+        return new
+
+    def compute_ppvi_for_event(
+        self,
+        evt_name: str,
+        track_id: int,
+        lat0: float,
+        lon0: float,
+        base_ts: pd.Timestamp,
+        *,
+        inv_lon_half: float = 90.0,
+    ) -> int:
+        """Append Wu piecewise PV-inversion rotational winds to NPZ files.
+
+        For each ``dh`` in :attr:`cfg.rel_hours` this reads the **existing**
+        NPZ (produced by :meth:`process_event`), runs the Wu piecewise PV
+        inversion on a **fixed** Northern-Hemisphere latitude band
+        (85.5°N → 10.5°N, ``NY=51``) and an event-centred longitude window
+        of half-width ``inv_lon_half`` (default ±90° → ``NX=121``), then
+        crops the resulting balanced rotational winds back to the event
+        patch and **appends** the new fields in-place.
+
+        Only NPZs that already exist on disk are touched here; missing NPZs
+        should be produced by :meth:`process_event` with ``also_ppvi=True``
+        (the ``ppvi`` CLI command does both — replace in existing, write
+        fresh ones together).
+
+        This **replaces** any superseded grouped-piece keys
+        (``[uv]_rot_anom_{lower,middle,upper}(_3d)``) with the per-level
+        decomposition. New keys (each also with a ``_3d`` variant), for each
+        Wu level ``L`` in 1000…100 hPa:
+        ``u_rot_anom_ppvi_{L}``, ``v_rot_anom_ppvi_{L}``,
+        plus ``u/v_rot_anom_residual_ppvi`` (observed − Σ of all per-level
+        pieces) and ``pv_anom_wu`` (Wu PV anomaly in SI, interior levels only).
+
+        Returns the number of NPZ files updated.
+        """
+        _log(f"\n--- PPVI (append) for event: {track_id} "
+             f"at ({lat0}, {lon0}) ---")
+
+        # Small-chunked clim: release per-event month slices (avoid the
+        # ~19 GB/worker accumulation that throttled the cgroup at scale).
+        clim_ds = self._get_clim(chunks={"day": 1, "hour": 1})
+
+        # ── Which dh have an existing NPZ that still needs PPVI fields? ──
+        todo: list[tuple[int, pd.Timestamp, Path]] = []
+        for dh in self.cfg.rel_hours:
+            ts = base_ts + pd.Timedelta(hours=dh)
+            fp = self._out_path(evt_name, dh, track_id, ts)
+            if not fp.exists():
+                continue
+            if self.cfg.skip_existing:
+                with np.load(fp, allow_pickle=True) as z:
+                    if "u_rot_anom_ppvi_250_3d" in z.files:
+                        continue
+            todo.append((dh, ts, fp))
+        if not todo:
+            _log(f"-> Event {track_id}: no existing NPZ needs PPVI.")
+            return 0
+
+        # ── Load only z, t, u, v for the window ──
+        month_keys = month_keys_for_window(
+            base_ts, hmin=min(self.cfg.rel_hours),
+            hmax=max(self.cfg.rel_hours))
+        # Lazy open (per-timestep chunks): a PPVI worker only reads the few
+        # timesteps it inverts, not the whole ~15 GB month — this keeps
+        # per-worker RSS at ~1-2 GB so many workers fit under the 2 TB cap.
+        ds = open_months_ds(
+            self.cfg.data_dir, ["z", "t", "u", "v"], month_keys,
+            engine=self.cfg.engine, chunks={"valid_time": 1})
+        cplev = _plev_name(clim_ds)
+        geom = self._ppvi_geom(ds, inv_lon_half)
+        dt_index = pd.to_datetime(ds.valid_time.values)
+
+        updated = 0
+        for dh, ts, fp in todo:
+            if ts not in dt_index:
+                continue
+            tmp_name = None
+            try:
+                with np.load(fp, allow_pickle=True) as z:
+                    store = {k: z[k] for k in z.files}
+                # Drop superseded grouped-piece keys so the npz is *replaced*,
+                # not appended (old lower/middle/upper PPVI fields).
+                for k in [k for k in store if _OLD_PIECE_KEY.match(k)]:
+                    store.pop(k, None)
+                new = self._ppvi_compute_keys(
+                    store, ts, ds, clim_ds, cplev, geom)
+                store.update(new)
+                if "u_rot_anom_ppvi_250_3d" not in store:
+                    raise RuntimeError("PPVI produced no per-level keys")
+                with tempfile.NamedTemporaryFile(
+                    mode="wb", suffix=".npz", dir=str(fp.parent),
+                    delete=False,
+                ) as tf:
+                    tmp_name = tf.name
+                    np.savez_compressed(tf, **store)
+                os.replace(tmp_name, str(fp))
+                tmp_name = None
+                updated += 1
+            except Exception as exc:  # noqa: BLE001 - log & continue
+                if tmp_name and os.path.exists(tmp_name):
+                    os.unlink(tmp_name)
+                _log(f"-> PPVI dh={dh:+d} FAILED: {exc!r}")
+            gc.collect()
+
+        # Release the ERA5 file handles / dask buffers for this event so a
+        # long-lived worker doesn't accumulate them across thousands of events
+        # (this leak drove per-worker RSS to ~8 GB and throttled the cgroup).
+        try:
+            ds.close()
+        except Exception:  # noqa: BLE001
+            pass
+        del ds
+        gc.collect()
+        _log(f"-> Event {track_id}: PPVI appended to {updated} NPZ(s).")
+        return updated
 
     # ── output path ────────────────────────────────────────────────
 

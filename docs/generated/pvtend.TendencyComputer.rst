@@ -14,6 +14,7 @@
    .. autosummary::
    
       ~TendencyComputer.__init__
+      ~TendencyComputer.compute_ppvi_for_event
       ~TendencyComputer.process_event
    
    

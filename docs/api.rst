@@ -281,6 +281,62 @@ CLI::
        --out outputs/blowup_scan/omega_300hPa_5pa.csv
 
 
+.. _ppvi:
+
+Piecewise PV inversion (PPVI)
+-----------------------------
+
+The :mod:`pvtend.ppvi` subpackage performs **Wu/Davis nonlinear-balance
+piecewise potential-vorticity inversion** and stores, in each event NPZ, the
+balanced rotational-wind anomaly induced by **each individual pressure level's**
+PV (or boundary-θ) anomaly.
+
+The inversion uses the validated Davis–Emanuel (1991) / Wu serial
+Gauss–Seidel SOR cores (``pvpialln`` → ``qinvert21`` → ``qinvertp21``),
+transcribed verbatim into Fortran and compiled on demand with f2py
+(:mod:`pvtend.ppvi._ext`).  It runs on **9 Wu levels**
+:math:`[1000, 850, 700, 500, 400, 300, 250, 200, 100]` hPa.  The 1000 hPa
+(bottom) and 100 hPa (top) pieces are **Bretherton (1966) boundary-θ sheets**
+— a warm low-level θ′ is equivalent to a positive (cyclonic) PV sheet — while
+levels 2–8 are interior PV.
+
+The rotational wind of each piece derives from its balanced streamfunction
+:math:`\psi` (:math:`u_\text{rot}=-\partial\psi/\partial y`,
+:math:`v_\text{rot}=\partial\psi/\partial x`).  Because the perturbation
+balance is **linear**, the per-level pieces sum **exactly** (to machine
+precision) to the full balanced field; the unbalanced remainder is stored as
+the ``residual``.
+
+**NPZ key contract** — for ``L`` in
+:math:`\{1000,850,700,500,400,300,250,200,100\}` hPa:
+
+* ``u_rot_anom_ppvi_{L}`` / ``v_rot_anom_ppvi_{L}`` (and ``_3d``) — rotational
+  wind induced by inverting *only* level ``L``'s PV/θ piece;
+* ``u/v_rot_anom_residual_ppvi`` — observed minus :math:`\sum_L` pieces;
+* ``pv_anom_wu`` — the Wu PV anomaly that is inverted.
+
+PPVI is produced by :meth:`~pvtend.TendencyComputer.process_event` (``compute
+--with-ppvi``, on by default) and appended/replaced in existing NPZ by
+:meth:`~pvtend.TendencyComputer.compute_ppvi_for_event` (the ``ppvi`` CLI
+subcommand).
+
+.. currentmodule:: pvtend.ppvi.solver
+
+.. autosummary::
+   :toctree: generated/
+
+   invert_piecewise
+
+.. currentmodule:: pvtend.ppvi.winds
+
+.. autosummary::
+   :toctree: generated/
+
+   psi_to_winds
+
+.. currentmodule:: pvtend
+
+
 .. _helmholtz:
 
 Helmholtz Decomposition

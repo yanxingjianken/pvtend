@@ -23,9 +23,11 @@ Or programmatically::
 
 from __future__ import annotations
 
+import os
 import pickle
 import re
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
@@ -86,6 +88,108 @@ def _accumulate(
         valids[key] += mask
 
 
+_LS_PREFIXES = ("prp__", "int__", "ax__", "ay__", "beta__")
+
+
+def _process_dh_dir(task: tuple) -> dict:
+    """Worker: accumulate one ``(stage, dh)`` directory.
+
+    Returns a dict with partial sums/valids/counts plus the geometry
+    metadata so the parent process can merge them.
+    """
+    (evt, dh, dh_dir_str, variant_trackset, excluded,
+     levels_ref) = task
+    dh_dir = Path(dh_dir_str)
+    npz_files = sorted(dh_dir.glob("*.npz"))
+
+    sums_o: dict[str, np.ndarray] = {}
+    valids_o: dict[str, np.ndarray] = {}
+    count_o = 0
+    sums_v: dict[str, dict[str, np.ndarray]] = {v: {} for v in variant_trackset}
+    valids_v: dict[str, dict[str, np.ndarray]] = {v: {} for v in variant_trackset}
+    counts_v: dict[str, int] = {v: 0 for v in variant_trackset}
+
+    levels_local: np.ndarray | None = (
+        np.asarray(levels_ref, dtype=int) if levels_ref is not None else None
+    )
+    x_rel = y_rel = None
+    h_scale: float | None = None
+    fields_3d: set[str] = set()
+
+    n_total = n_loaded = 0
+    for fp in npz_files:
+        n_total += 1
+        tid = _parse_track_id(fp)
+        if tid is not None and tid in excluded:
+            continue
+        try:
+            with np.load(fp, allow_pickle=False) as Z:
+                levels_file = Z["levels"]
+                if "pv_3d" in Z.files:
+                    probe = Z["pv_3d"]
+                elif "z_3d" in Z.files:
+                    probe = Z["z_3d"]
+                else:
+                    continue
+                if levels_local is None:
+                    levels_local = levels_file.astype(int).copy()
+                if x_rel is None:
+                    x_rel = Z["X_rel"]
+                    y_rel = Z["Y_rel"]
+                if h_scale is None and "H_SCALE" in Z.files:
+                    h_scale = float(Z["H_SCALE"])
+
+                idx = _levels_indexer(levels_file, levels_local)
+                if idx is None:
+                    continue
+                if probe[idx].ndim != 3:
+                    continue
+
+                # Which variants does this tid belong to?
+                membership = [
+                    v for v, tids in variant_trackset.items() if tid in tids
+                ]
+
+                for k in Z.files:
+                    if k in _META:
+                        continue
+                    a = Z[k]
+                    if a.ndim != 3:
+                        continue
+                    if any(k.startswith(p) for p in _LS_PREFIXES):
+                        continue
+                    fields_3d.add(k)
+                    a3 = a[idx]
+                    _accumulate(sums_o, valids_o, k, a3)
+                    for v in membership:
+                        _accumulate(sums_v[v], valids_v[v], k, a3)
+
+                count_o += 1
+                for v in membership:
+                    counts_v[v] += 1
+                n_loaded += 1
+        except Exception:
+            continue
+
+    return {
+        "evt": evt,
+        "dh": dh,
+        "n_total": n_total,
+        "n_loaded": n_loaded,
+        "levels": levels_local,
+        "x_rel": x_rel,
+        "y_rel": y_rel,
+        "h_scale": h_scale,
+        "fields_3d": fields_3d,
+        "sums_o": sums_o,
+        "valids_o": valids_o,
+        "count_o": count_o,
+        "sums_v": sums_v,
+        "valids_v": valids_v,
+        "counts_v": counts_v,
+    }
+
+
 # ── Config ────────────────────────────────────────────────────────────
 
 @dataclass
@@ -96,6 +200,10 @@ class CompositeConfig:
         npz_dir: Root directory with ``{stage}/dh=±N/*.npz``.
         stages: Event stages to process.
         exclude_file: Optional exclude-track CSV.
+        n_workers: Parallel workers across ``(stage, dh)`` tasks. If
+            ``None`` (default) falls back to the ``PVTEND_COMPOSITE_WORKERS``
+            env var, else ``1`` (serial). Set to ``>1`` to use
+            :class:`concurrent.futures.ProcessPoolExecutor`.
     """
 
     npz_dir: Path = Path(".")
@@ -103,6 +211,7 @@ class CompositeConfig:
         default_factory=lambda: ["onset", "peak", "decay"]
     )
     exclude_file: Path | None = None
+    n_workers: int | None = None
 
 
 # ── Result container ──────────────────────────────────────────────────
@@ -293,13 +402,12 @@ def build_composites(
     H_SCALE: float | None = None
     fields_3d: set[str] = set()
 
-    print("\n[pass2] Accumulating composites ...", flush=True)
-
+    # ── enumerate (stage, dh) tasks ──
+    tasks: list[tuple] = []
     for evt in cfg.stages:
         evt_dir = cfg.npz_dir / evt
         if not evt_dir.exists():
             continue
-
         dh_dirs = []
         for d in sorted(evt_dir.iterdir()):
             if not d.is_dir():
@@ -308,78 +416,72 @@ def build_composites(
             if dh_val is not None:
                 dh_dirs.append((dh_val, d))
         dh_dirs.sort(key=lambda x: x[0])
-
         for dh, dh_dir in dh_dirs:
-            npz_files = sorted(dh_dir.glob("*.npz"))
-            if not npz_files:
-                continue
+            tasks.append((evt, dh, str(dh_dir), variant_trackset,
+                          excluded, None))
 
-            n_total = n_loaded = 0
-            for fp in npz_files:
-                n_total += 1
-                tid = _parse_track_id(fp)
-                if tid is not None and tid in excluded:
-                    continue
+    # ── decide worker count ──
+    n_workers = cfg.n_workers
+    if n_workers is None:
+        env_w = os.environ.get("PVTEND_COMPOSITE_WORKERS")
+        n_workers = int(env_w) if env_w else 1
+    n_workers = max(1, min(n_workers, len(tasks)))
 
-                try:
-                    with np.load(fp, allow_pickle=False) as Z:
-                        levels_file = Z["levels"]
-                        # probe 3D field
-                        if "pv_3d" in Z.files:
-                            probe = Z["pv_3d"]
-                        elif "z_3d" in Z.files:
-                            probe = Z["z_3d"]
-                        else:
-                            continue
+    print(
+        f"\n[pass2] Accumulating composites "
+        f"({len(tasks)} dh-slices, n_workers={n_workers}) ...",
+        flush=True,
+    )
 
-                        if LEVELS is None:
-                            LEVELS = levels_file.astype(int).copy()
-                            X_REL = Z["X_rel"]
-                            Y_REL = Z["Y_rel"]
-                        if H_SCALE is None and "H_SCALE" in Z.files:
-                            H_SCALE = float(Z["H_SCALE"])
+    def _merge(result: dict) -> None:
+        nonlocal LEVELS, X_REL, Y_REL, H_SCALE
+        evt = result["evt"]
+        dh = result["dh"]
+        if LEVELS is None and result["levels"] is not None:
+            LEVELS = np.asarray(result["levels"], dtype=int).copy()
+        if X_REL is None and result["x_rel"] is not None:
+            X_REL = result["x_rel"]
+            Y_REL = result["y_rel"]
+        if H_SCALE is None and result["h_scale"] is not None:
+            H_SCALE = float(result["h_scale"])
+        fields_3d.update(result["fields_3d"])
 
-                        idx = _levels_indexer(levels_file, LEVELS)
-                        if idx is None:
-                            continue
-                        if probe[idx].ndim != 3:
-                            continue
+        # original
+        for k, a in result["sums_o"].items():
+            if k not in sums[evt][dh]:
+                sums[evt][dh][k] = a.astype(np.float64, copy=False)
+                valids[evt][dh][k] = result["valids_o"][k]
+            else:
+                sums[evt][dh][k] += a
+                valids[evt][dh][k] += result["valids_o"][k]
+        counts[evt][dh] += result["count_o"]
 
-                        # Discover & accumulate 3D fields
-                        for k in Z.files:
-                            if k in _META:
-                                continue
-                            a = Z[k]
-                            if a.ndim != 3:
-                                continue
-                            # Skip LS-derived fields
-                            if any(k.startswith(p)
-                                   for p in ("prp__", "int__", "ax__",
-                                             "ay__", "beta__")):
-                                continue
-                            fields_3d.add(k)
-                            a3 = a[idx]
-                            _accumulate(sums[evt][dh], valids[evt][dh], k, a3)
-                            for var in variants:
-                                if tid in variant_trackset[var]:
-                                    _accumulate(
-                                        sums_v[var][evt][dh],
-                                        valids_v[var][evt][dh],
-                                        k, a3,
-                                    )
+        # variants
+        for var, sd in result["sums_v"].items():
+            vd = result["valids_v"][var]
+            for k, a in sd.items():
+                if k not in sums_v[var][evt][dh]:
+                    sums_v[var][evt][dh][k] = a.astype(np.float64, copy=False)
+                    valids_v[var][evt][dh][k] = vd[k]
+                else:
+                    sums_v[var][evt][dh][k] += a
+                    valids_v[var][evt][dh][k] += vd[k]
+            counts_v[var][evt][dh] += result["counts_v"][var]
 
-                        counts[evt][dh] += 1
-                        for var in variants:
-                            if tid in variant_trackset[var]:
-                                counts_v[var][evt][dh] += 1
-                        n_loaded += 1
-                except Exception:
-                    continue
+        print(
+            f"[{evt}] dh={dh:+d}: total={result['n_total']} "
+            f"loaded={result['n_loaded']}",
+            flush=True,
+        )
 
-            print(
-                f"[{evt}] dh={dh:+d}: total={n_total} loaded={n_loaded}",
-                flush=True,
-            )
+    if n_workers == 1:
+        for task in tasks:
+            _merge(_process_dh_dir(task))
+    else:
+        with ProcessPoolExecutor(max_workers=n_workers) as ex:
+            futs = [ex.submit(_process_dh_dir, t) for t in tasks]
+            for fut in as_completed(futs):
+                _merge(fut.result())
 
     print(f"[pass2] 3D fields discovered: {sorted(fields_3d)}", flush=True)
 

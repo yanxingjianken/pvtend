@@ -60,7 +60,8 @@ The CSVs are the inputs for `pvtend-pipeline compute`, which extracts event-cent
 - **Composite lifecycle**: Multi-stage ensemble averaging with onset/peak/decay staging
 - **NaN-safe throughout**: All grid, derivative, solver, bootstrap, and plotting routines use `nanmean`/`nanpercentile` to handle partial-NaN edge events without corrupting composites or flipping projection signs
 - **ω blowup detection** (v2.10.8): Per-event NPZ scan via `scripts/aggregate_qg_blowup.py`. Each event NPZ embeds `max_abs_w_{adiabatic,diabatic,qg_diabatic,lhr_moist}_300` scalars; tracks whose any-stage max exceeds **25 Pa/s** are flagged. Raw ERA5 ω is observationally bounded (1990-2020 hourly: max=22.4, 99.9th=19.9 Pa/s) so only the QG-solver output ever blows up. Replaces both the silent in-solver ±5 Pa/s clip used in pvtend ≤ 2.9 and the v2.10.1–7 raw-ERA5 glob scan.
-- **CLI pipeline**: End-to-end processing via `pvtend-pipeline` command (`compute`, `clim-helmholtz`, `classify`, `composite`, `decompose`, `blowup-scan`)
+- **Per-level piecewise PV inversion (PPVI)**: Wu/Davis nonlinear-balance inversion (f2py `_wuppvi` cores: pvpialln → qinvert21 → qinvertp21) decomposing the balanced rotational-wind anomaly into the contribution induced by **each pressure level's** PV/θ anomaly across **9 levels 1000→100 hPa** (the 1000 hPa bottom-θ and 100 hPa top-θ pieces are Bretherton boundary sheets). Per-event NPZ keys `u/v_rot_anom_ppvi_{L}(_3d)` for `L ∈ {1000,…,100}`, plus `u/v_rot_anom_residual_ppvi` and `pv_anom_wu`. The 9 single-level pieces sum **exactly** to the full balanced field (linear perturbation balance). Enabled by default in `compute` (`--with-ppvi`); migrate existing NPZ with the `ppvi` subcommand. See the `ppvi` skill.
+- **CLI pipeline**: End-to-end processing via `pvtend-pipeline` command (`compute`, `clim-helmholtz`, `classify`, `composite`, `decompose`, `blowup-scan`, `ppvi`)
 
 ## Installation
 
@@ -194,17 +195,30 @@ graph TD
 
 ## Website Export
 
-The repository also contains a lightweight website export pipeline for the blocking/PRP composite viewer. The JSON exports under `website/blocking_export/` and `website/prp_export/` are built from the saved composite pickles and include grouped field metadata, basis payloads, and vector-overlay definitions so the viewer can switch between scalar contours and wind-arrow overlays.
+The repository also contains a lightweight website export pipeline for the blocking/PRP composite viewer. The JSON exports under `website/blocking_export/` and `website/prp_export/` are built from the latest per-event NPZ patches, RWB trackset pickles, and blowup-exclusion CSVs. The exports include grouped field metadata, basis payloads, and vector-overlay definitions so the viewer can switch between scalar contours and wind-arrow overlays.
+
+`website/build_and_export_clusters.py` prefers `rwb_variant_tracksets_wavg.pkl` and applies `outputs/blowup_scan/exclude_tracks_{event_type}.csv` by default when the file exists. This keeps the web viewer's `All Events` count and fields consistent with the screened production composites and avoids uploading composites contaminated by QG-omega blowup tracks. The clustered export also writes parent total variants (`awb`, `cwb`, and `rwb`) for all events with anticyclonic, cyclonic, or either type of wave breaking, alongside the regional sub-clusters. `website/upload_to_hf.py --clean-figures` uploads the refreshed `blocking/` and `prp/` JSON trees, removes stale remote JSONs, deletes the old Hugging Face `figures/` folder, and uploads `website/README.md` as the dataset card.
+
+```bash
+cd /net/flood/data2/users/x_yan/pvtend
+micromamba run -n blocking python website/build_and_export_clusters.py --event-type blocking
+micromamba run -n blocking python website/build_and_export_clusters.py --event-type prp
+micromamba run -n blocking python website/upload_to_hf.py --clean-figures
+```
 
 ```mermaid
 graph TD
-    A[composite_blocking.pkl or composite_prp.pkl] --> B[website/export_composite_web.py]
-    C[composite_blocking_clusters.pkl or composite_prp_clusters.pkl] --> D[website/build_and_export_clusters.py]
-    B --> E[Parent-category JSON.gz exports]
-    D --> F[Cluster and subcluster JSON.gz exports]
-    E --> G[Hugging Face dataset blocking-composites]
+    A[outputs/blocking and outputs/prp NPZ patches] --> B[outputs/blowup_scan exclude CSVs]
+    A --> C[rwb_variant_tracksets_wavg.pkl]
+    B --> D[website/build_and_export_clusters.py]
+    C --> D
+    A --> D
+    D --> E[website/blocking_export JSON.gz with total and clustered variants]
+    D --> F[website/prp_export JSON.gz with total and clustered variants]
+    E --> G[website/upload_to_hf.py --clean-figures]
     F --> G
-    G --> H[blocking-plots viewer]
+    G --> H[Hugging Face dataset blocking-composites]
+    H --> I[blocking-plots viewer]
 ```
 
 ## Publication Figures
@@ -214,7 +228,7 @@ The `paper/generals_paper_1/scripts/` directory contains the current paper Figur
 - `fig5_beta_closure_qg_onset_wavg.py` renders the blocking-onset raw PV-tendency closure and corresponding `beta*Phi_1` projections in two four-column blocks. The stationary-flow and baroclinic advection terms are split into separate columns, with term subtitles, panel-specific colorbars, a shared range for the six process-projection colorbars, total-PV contours on the LHS panel, and wind arrows on the other raw-term panels.
 - `fig6_beta_stacked_qg_wavg.py` renders the wavg-only onset lifecycle stacked-bar budget for `beta`, with the direct `partial q / partial t` projection overlaid as a black step curve and colors matched to `examples/05_stacked_bar_beta.ipynb` cell 14.
 - `fig7_ax_bootstrap_blocking_vs_prp_qg_wavg.py` renders peak-stage blocking versus propagating-anticyclone `alpha_x` bootstrap bars from event NPZs after excluding p99.9 blowup tracks. Projections use the full event fields without a pre-projection significance mask, the `pv_dt` bars include simple mean-value labels, and repeated runs reuse `paper/generals_paper_1/scripts/cache/` when the inventory and settings match.
-- `fig8_gamma_rwb_awb_cwb_onset_wavg.py` renders AWB/CWB onset raw maps and `-gamma_1*Phi_4 - gamma_2*Phi_5` deformation projections for four selected Eq. 11 terms. It uses QG-diabatic paper definitions, one colorbar per panel, and Figure-2-style stretch/compression arrows.
+- `fig8_gamma_rwb_awb_cwb_onset_wavg.py` renders AWB/CWB onset raw maps and `-gamma_1*Phi_4 - gamma_2*Phi_5` deformation projections for four selected Eq. 11 terms. It uses QG-diabatic paper definitions, one colorbar per panel, and Figure-2-style arrows oriented along the negative PV-tendency dipoles of the blocking anomaly.
 
 All four scripts write PNG and PDF files into `paper/generals_paper_1/figures/`, and `paper/generals_paper_1/main.tex` includes the generated PNGs.
 
@@ -294,6 +308,7 @@ Notebooks using **real ERA5 blocking event data** from the `composite_blocking_t
 | Notebook | Description |
 |----------|-------------|
 | [`00_idealized_6basis`](examples/00_idealized_6basis.ipynb) | Idealized Gaussian PV anomaly: prescribed β/αx/αy/γ₁/γ₂/σ at two timesteps, 6-basis visualisation, Gram-Schmidt, projection & reconstruction |
+| [`00_idealized_5basis`](examples/00_idealized_5basis.ipynb) | Idealized single negative Gaussian PV anomaly matching paper Figure 3: prescribed β/αx/αy/γ₁/γ₂, 5-basis visualisation, projection & reconstruction |
 | [`01_rwb_and_derivatives`](examples/01_rwb_and_derivatives.ipynb) | Grid setup, `ddx`/`ddy`/`ddp` derivatives, RWB detection on a real event |
 | [`02_helmholtz_and_qg_omega`](examples/02_helmholtz_and_qg_omega.ipynb) | 3-D Helmholtz decomposition, QG omega (LOG20 vs SP19), moist/dry ω split |
 | [`03_six_basis_projection`](examples/03_six_basis_projection.ipynb) | Orthogonal 6-basis (Φ₁–Φ₆), project dq'/dt → β/αx/αy/γ₁/γ₂/σ, lifecycle curves |

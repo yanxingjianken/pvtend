@@ -118,6 +118,86 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Directory with pre-computed Helmholtz climatology NetCDFs.  "
              "Defaults to the same directory as --clim-path.",
     )
+    compute.add_argument(
+        "--with-ppvi", action=argparse.BooleanOptionalAction, default=True,
+        help="Also compute the per-level Wu piecewise PV-inversion rotational "
+             "winds (u/v_rot_anom_ppvi_{L}) in each NPZ written from scratch "
+             "(default: enabled).  Use --no-with-ppvi to skip.",
+    )
+
+    # ── ppvi ─────────────────────────────────────────────────────
+    ppvi = sub.add_parser(
+        "ppvi",
+        help="Add Wu piecewise PV-inversion rotational winds to NPZ files: "
+             "append in-place to existing NPZ, or write base + PPVI "
+             "together for missing NPZ.",
+    )
+    ppvi.add_argument(
+        "--event-type", required=True, choices=["blocking", "prp"],
+        help="Event type.",
+    )
+    ppvi.add_argument(
+        "--events-csv", required=True, type=Path,
+        help="CSV with columns: evt_name, track_id, lat0, lon0, base_ts.",
+    )
+    ppvi.add_argument(
+        "--era5-dir", required=True, type=Path,
+        help="Directory with ERA5 monthly NetCDF files.",
+    )
+    ppvi.add_argument(
+        "--clim-path", required=True, type=Path,
+        help="Climatology file or directory.",
+    )
+    ppvi.add_argument(
+        "--out-dir", required=True, type=Path,
+        help="Root NPZ directory. Existing base NPZ are appended in-place; "
+             "missing ones are written together with their base fields.",
+    )
+    ppvi.add_argument(
+        "--track-file", type=Path, default=None,
+        help="Tracking data file for Lagrangian mode.",
+    )
+    ppvi.add_argument(
+        "--dh-range", type=str, default="-12:13:1",
+        help="Hour offsets as start:stop[:step]  (default: -12:13:1).",
+    )
+    ppvi.add_argument(
+        "--inv-lon-half", type=float, default=90.0,
+        help="Inversion longitude half-width in degrees (default: 90 → "
+             "NX=121). The latitude band is fixed at 85.5N→10.5N (NY=51).",
+    )
+    ppvi.add_argument(
+        "--center-mode", choices=["eulerian", "lagrangian"],
+        default="eulerian",
+        help="Centre tracking mode (default: eulerian).",
+    )
+    ppvi.add_argument(
+        "--n-workers", type=int, default=1,
+        help="Number of parallel worker processes (serial solver per event).",
+    )
+    ppvi.add_argument(
+        "--year-range", type=str, default=None,
+        help="Filter events to year range, e.g. '1990:2011' "
+             "(start:stop_exclusive).",
+    )
+    ppvi.add_argument(
+        "--stages", nargs="+", default=["onset", "peak", "decay"],
+        help="Event stages to process (default: onset peak decay).",
+    )
+    ppvi.add_argument(
+        "--skip-existing", action="store_true",
+        help="Skip NPZ files that already contain PPVI fields.",
+    )
+    ppvi.add_argument(
+        "--max-tasks-per-child", type=int, default=16,
+        help="Recycle each worker process after this many events to cap "
+             "per-event memory growth (0 = never recycle).  Default 16.",
+    )
+    ppvi.add_argument(
+        "--clim-helmholtz-dir", type=Path, default=None,
+        help="Directory with pre-computed Helmholtz climatology NetCDFs. "
+             "Defaults to the same directory as --clim-path.",
+    )
 
     # ── clim-helmholtz ───────────────────────────────────────────
     clim_helm = sub.add_parser(
@@ -271,36 +351,329 @@ def _parse_dh_range(s: str) -> list[int]:
 # =====================================================================
 
 _WORKER_CFG = None  # set before pool.map
+_WORKER_COMPUTER = None  # persistent TendencyComputer per worker process
 
 
-def _init_worker(cfg):
-    """Pool initializer — store config in global so workers can access it."""
-    global _WORKER_CFG
+def _pin_threads_for_pool() -> None:
+    """Pin BLAS/FFT/OpenMP to 1 thread per worker process.
+
+    Called in the **parent** before a ``ProcessPoolExecutor`` is created so
+    spawned children inherit the environment **before** numpy/xarray are
+    imported. With many workers each event is single-threaded; the batch is
+    parallel at the process level. Prevents thread oversubscription on the
+    384-core node (N_workers × BLAS-threads ≫ cores → cache thrash).
+    """
+    import os
+    for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+               "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+        os.environ.setdefault(_v, "1")
+
+
+# Whether the compute pool also computes PPVI fields (set per-run).
+_WORKER_ALSO_PPVI = True
+
+
+def _init_worker(cfg, also_ppvi=True):
+    """Pool initializer — store config + a persistent computer in globals."""
+    global _WORKER_CFG, _WORKER_COMPUTER, _WORKER_ALSO_PPVI
+    try:
+        from threadpoolctl import threadpool_limits
+        threadpool_limits(1)
+    except Exception:
+        pass
     _WORKER_CFG = cfg
+    _WORKER_ALSO_PPVI = also_ppvi
+    from pvtend.tendency import TendencyComputer
+    _WORKER_COMPUTER = TendencyComputer(cfg)
+    try:  # warm the climatology once per worker (not once per event)
+        _WORKER_COMPUTER._get_clim()
+    except Exception:
+        pass
 
 
 def _process_one_event(arg_tuple):
-    """Process a single event in a worker process."""
-    from pvtend.tendency import TendencyComputer
+    """Process a single event in a worker process (reuses cached computer)."""
     evt_name, track_id, lat0, lon0, base_ts = arg_tuple
-    computer = TendencyComputer(_WORKER_CFG)
     try:
-        n = computer.process_event(
+        n = _WORKER_COMPUTER.process_event(
             evt_name=evt_name, track_id=track_id,
-            lat0=lat0, lon0=lon0, base_ts=base_ts)
+            lat0=lat0, lon0=lon0, base_ts=base_ts,
+            also_ppvi=_WORKER_ALSO_PPVI)
         return n
     except Exception as exc:
         print(f"    ERROR [{track_id} {evt_name}]: {exc}", flush=True)
         return 0
 
 
+# Inversion longitude half-width for the ppvi worker (set per-run).
+_WORKER_INV_LON_HALF = 90.0
+
+
+def _init_ppvi_worker(cfg, inv_lon_half):
+    """Pool initializer for the ppvi subcommand (persistent computer)."""
+    global _WORKER_CFG, _WORKER_INV_LON_HALF, _WORKER_COMPUTER
+    try:
+        from threadpoolctl import threadpool_limits
+        threadpool_limits(1)
+    except Exception:
+        pass
+    try:  # bound xarray's global open-file-handle cache so a long-lived
+        # worker doesn't accumulate ~100 MB/handle across thousands of
+        # per-event ERA5 opens (this was the dominant per-worker RSS growth).
+        import xarray as _xr
+        _xr.set_options(file_cache_maxsize=32)
+    except Exception:
+        pass
+    _WORKER_CFG = cfg
+    _WORKER_INV_LON_HALF = inv_lon_half
+    from pvtend.tendency import TendencyComputer
+    _WORKER_COMPUTER = TendencyComputer(cfg)
+    try:  # warm the climatology once per worker (small-chunked for PPVI so
+        # per-event slices are released, not retained → bounded worker RSS)
+        _WORKER_COMPUTER._get_clim(chunks={"day": 1, "hour": 1})
+    except Exception:
+        pass
+
+
+def _ppvi_one_event(arg_tuple):
+    """Append/write PPVI fields for a single event (reuses cached computer)."""
+    evt_name, track_id, lat0, lon0, base_ts = arg_tuple
+    try:
+        return _ppvi_run_event(
+            _WORKER_COMPUTER, evt_name, track_id, lat0, lon0, base_ts,
+            _WORKER_INV_LON_HALF)
+    except Exception as exc:
+        print(f"    ERROR [{track_id} {evt_name}]: {exc}", flush=True)
+        return 0
+
+
+def _ppvi_run_event(computer, evt_name, track_id, lat0, lon0, base_ts,
+                    inv_lon_half):
+    """Run PPVI for one event: append to existing NPZ, write-together fresh.
+
+    1. ``compute_ppvi_for_event`` appends the PPVI fields to any base NPZ
+       that already exists on disk (the common case).
+    2. ``process_event(also_ppvi=True)`` then produces any **missing** base
+       NPZ with the base tendency + PPVI fields written **together** in a
+       single file (fresh run / new machine — no append).
+
+    When ``skip_existing=False`` the base NPZ are recomputed from scratch,
+    so only the write-together path runs (appending would be wasted work).
+    """
+    if not computer.cfg.skip_existing:
+        return computer.process_event(
+            evt_name=evt_name, track_id=track_id,
+            lat0=lat0, lon0=lon0, base_ts=base_ts,
+            also_ppvi=True, inv_lon_half=inv_lon_half)
+    n = computer.compute_ppvi_for_event(
+        evt_name=evt_name, track_id=track_id,
+        lat0=lat0, lon0=lon0, base_ts=base_ts,
+        inv_lon_half=inv_lon_half)
+    n += computer.process_event(
+        evt_name=evt_name, track_id=track_id,
+        lat0=lat0, lon0=lon0, base_ts=base_ts,
+        also_ppvi=True, inv_lon_half=inv_lon_half)
+    return n
+
+
+def _run_resilient_pool(event_args, n_workers, initializer, initargs,
+                        worker_fn, *, max_attempts=4, failures_path=None,
+                        unit="NPZ", max_tasks_per_child=None):
+    """Run ``worker_fn`` over ``event_args`` in a fault-tolerant process pool.
+
+    A single worker dying (e.g. a C-level segfault in the Fortran Wu solver
+    that Python cannot catch) marks a :class:`ProcessPoolExecutor` as
+    *broken* and poisons **every** outstanding future.  A naive
+    ``future.result()`` loop therefore aborts the whole run on the first bad
+    event.  This supervisor instead rebuilds the pool over the still-pending
+    events whenever it breaks, so completed work is preserved and the run
+    makes forward progress.
+
+    An event that repeatedly kills its worker (``>= max_attempts`` times) is
+    *quarantined* — recorded to ``failures_path`` and skipped — so one
+    pathological geometry can never wedge the run forever.
+
+    Because the underlying work is idempotent on disk (``skip_existing``),
+    re-submitting an already-finished event is cheap (it is detected and
+    skipped), so exact in-memory bookkeeping is not safety-critical.
+
+    Args:
+        event_args: List of per-event argument tuples passed to ``worker_fn``.
+        n_workers: Maximum worker processes per pool.
+        initializer: Pool initializer callable.
+        initargs: Tuple of arguments for ``initializer``.
+        worker_fn: Callable run for each event; returns an int file count.
+        max_attempts: Quarantine an event after this many failed attempts.
+        failures_path: Optional path to write the quarantined event tuples.
+        unit: Noun for progress messages (e.g. ``"NPZ"``).
+
+    Returns:
+        Tuple ``(n_total, quarantined_indices)``.
+    """
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from concurrent.futures.process import BrokenProcessPool
+
+    n_events = len(event_args)
+    done: set[int] = set()
+    quarantined: set[int] = set()
+    attempts = [0] * n_events
+    n_total = 0
+    n_completed = 0
+    restart = 0
+    broke_count = 0
+
+    while True:
+        pending = [i for i in range(n_events)
+                   if i not in done and i not in quarantined]
+        if not pending:
+            break
+        if restart:
+            print(f"[pvtend] RESILIENT restart #{restart}: "
+                  f"{len(pending)} events remaining "
+                  f"({len(done)} done, {len(quarantined)} quarantined)",
+                  flush=True)
+        restart += 1
+
+        broke = False
+        _pool_kw = {}
+        if max_tasks_per_child:
+            # Recycle each worker after N events so accumulated per-event
+            # memory (xarray/dask caches) is freed — a hard cap independent
+            # of any single leak source. Requires a non-fork start method.
+            import multiprocessing as _mp
+            _pool_kw["max_tasks_per_child"] = max_tasks_per_child
+            _pool_kw["mp_context"] = _mp.get_context("spawn")
+        ex = ProcessPoolExecutor(
+            max_workers=min(n_workers, len(pending)),
+            initializer=initializer, initargs=initargs, **_pool_kw)
+        futs = {ex.submit(worker_fn, event_args[i]): i for i in pending}
+        try:
+            for f in as_completed(futs):
+                i = futs[f]
+                try:
+                    n_total += f.result()
+                    done.add(i)
+                    n_completed += 1
+                    if n_completed % 50 == 0 or n_completed == n_events:
+                        print(f"[pvtend] {n_completed}/{n_events} events done, "
+                              f"{n_total} {unit} updated so far", flush=True)
+                except BrokenProcessPool:
+                    broke = True  # pool poisoned; harvest the rest, then rebuild
+                except Exception as exc:  # noqa: BLE001 - worker-level failure
+                    attempts[i] += 1
+                    print(f"    ERROR event#{i}: {exc!r} "
+                          f"(attempt {attempts[i]}/{max_attempts})", flush=True)
+                    if attempts[i] >= max_attempts:
+                        quarantined.add(i)
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
+
+        if broke:
+            broke_count += 1
+            still = [i for i in range(n_events)
+                     if i not in done and i not in quarantined]
+            # A dead worker poisons the pool and drops its in-flight events, but
+            # we cannot tell WHICH event killed it — so do NOT penalise every
+            # pending event (that mass-quarantines healthy ones, which was the
+            # cause of ~26% spurious migration loss). Just rebuild and retry;
+            # healthy events succeed next round. Guard a truly poisonous set
+            # with a generous global break cap.
+            print(f"[pvtend] WARNING: worker pool broke (break #{broke_count}); "
+                  f"{len(still)} events pending; rebuilding pool.", flush=True)
+            if broke_count > 500:
+                for i in still:
+                    quarantined.add(i)
+                print(f"[pvtend] aborting after {broke_count} pool breaks; "
+                      f"quarantined {len(still)} remaining event(s).",
+                      flush=True)
+
+    if quarantined and failures_path is not None:
+        try:
+            with open(failures_path, "w") as fh:
+                fh.write("# events quarantined after repeated worker deaths\n")
+                fh.write("# evt_name, track_id, lat0, lon0, base_ts\n")
+                for i in sorted(quarantined):
+                    fh.write(f"{event_args[i]}\n")
+            print(f"[pvtend] {len(quarantined)} event(s) quarantined; "
+                  f"written to {failures_path}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[pvtend] (could not write failures file: {exc})",
+                  flush=True)
+
+    return n_total, quarantined
+
+
+
 # =====================================================================
 # Subcommand implementations
 # =====================================================================
 
+def _load_event_args(events_csv: Path, year_range, stages):
+    """Read an events CSV → list of (evt_name, track_id, lat0, lon0, base_ts).
+
+    Handles legacy column names, year-range filtering, and stage filtering
+    (shared by the ``compute`` and ``ppvi`` subcommands).
+    """
+    import pandas as pd
+
+    events_df = pd.read_csv(events_csv)
+
+    # --- Auto-detect old CSV format and rename columns ---
+    col_map = {}
+    if "lat" in events_df.columns and "lat0" not in events_df.columns:
+        col_map["lat"] = "lat0"
+    if "lon180" in events_df.columns and "lon0" not in events_df.columns:
+        col_map["lon180"] = "lon0"
+    if "type" in events_df.columns and "evt_name" not in events_df.columns:
+        col_map["type"] = "evt_name"
+    if col_map:
+        events_df = events_df.rename(columns=col_map)
+        print(f"[pvtend] Auto-mapped CSV columns: {col_map}")
+
+    # --- Filter by year range if provided ---
+    if year_range is not None:
+        yr_parts = year_range.split(":")
+        yr_start, yr_end = int(yr_parts[0]), int(yr_parts[1])
+        if "year" in events_df.columns:
+            events_df = events_df[
+                (events_df["year"] >= yr_start) & (events_df["year"] < yr_end)
+            ].reset_index(drop=True)
+        elif "timestamp" in events_df.columns:
+            ts_col = pd.to_datetime(events_df["timestamp"])
+            events_df = events_df[
+                (ts_col.dt.year >= yr_start) & (ts_col.dt.year < yr_end)
+            ].reset_index(drop=True)
+        elif "base_ts" in events_df.columns:
+            ts_col = pd.to_datetime(events_df["base_ts"])
+            events_df = events_df[
+                (ts_col.dt.year >= yr_start) & (ts_col.dt.year < yr_end)
+            ].reset_index(drop=True)
+        print(f"[pvtend] Filtered to years [{yr_start}, {yr_end}): "
+              f"{len(events_df)} events")
+
+    # --- Filter by stages if not all stages ---
+    stage_col = "evt_name" if "evt_name" in events_df.columns else "stage"
+    if stage_col in events_df.columns:
+        events_df = events_df[
+            events_df[stage_col].isin(stages)
+        ].reset_index(drop=True)
+        print(f"[pvtend] Filtered to stages {stages}: "
+              f"{len(events_df)} events")
+
+    event_args = []
+    for idx, row in events_df.iterrows():
+        evt_name = str(row.get("evt_name", row.get("stage", "onset")))
+        track_id = int(row.get("track_id", idx))
+        lat0 = float(row["lat0"])
+        lon0 = float(row["lon0"])
+        base_ts = pd.Timestamp(str(row.get("base_ts",
+                                            row.get("timestamp"))))
+        event_args.append((evt_name, track_id, lat0, lon0, base_ts))
+    return event_args
+
+
 def _cmd_compute(args: argparse.Namespace) -> None:
     """Execute the ``compute`` subcommand."""
-    import pandas as pd
     from pvtend.tendency import TendencyComputer, TendencyConfig
 
     dh_values = _parse_dh_range(args.dh_range)
@@ -329,79 +702,23 @@ def _cmd_compute(args: argparse.Namespace) -> None:
     )
     computer = TendencyComputer(config)
 
-    events_df = pd.read_csv(args.events_csv)
+    event_args = _load_event_args(args.events_csv, args.year_range,
+                                  args.stages)
 
-    # --- Auto-detect old CSV format and rename columns ---
-    col_map = {}
-    if "lat" in events_df.columns and "lat0" not in events_df.columns:
-        col_map["lat"] = "lat0"
-    if "lon180" in events_df.columns and "lon0" not in events_df.columns:
-        col_map["lon180"] = "lon0"
-    if "type" in events_df.columns and "evt_name" not in events_df.columns:
-        col_map["type"] = "evt_name"
-    if col_map:
-        events_df = events_df.rename(columns=col_map)
-        print(f"[pvtend] Auto-mapped CSV columns: {col_map}")
-
-    # --- Filter by year range if provided ---
-    if args.year_range is not None:
-        yr_parts = args.year_range.split(":")
-        yr_start, yr_end = int(yr_parts[0]), int(yr_parts[1])
-        if "year" in events_df.columns:
-            events_df = events_df[
-                (events_df["year"] >= yr_start) & (events_df["year"] < yr_end)
-            ].reset_index(drop=True)
-        elif "timestamp" in events_df.columns:
-            ts_col = pd.to_datetime(events_df["timestamp"])
-            events_df = events_df[
-                (ts_col.dt.year >= yr_start) & (ts_col.dt.year < yr_end)
-            ].reset_index(drop=True)
-        elif "base_ts" in events_df.columns:
-            ts_col = pd.to_datetime(events_df["base_ts"])
-            events_df = events_df[
-                (ts_col.dt.year >= yr_start) & (ts_col.dt.year < yr_end)
-            ].reset_index(drop=True)
-        print(f"[pvtend] Filtered to years [{yr_start}, {yr_end}): "
-              f"{len(events_df)} events")
-
-    # --- Filter by stages if not all stages ---
-    stage_col = "evt_name" if "evt_name" in events_df.columns else "stage"
-    if stage_col in events_df.columns:
-        events_df = events_df[
-            events_df[stage_col].isin(args.stages)
-        ].reset_index(drop=True)
-        print(f"[pvtend] Filtered to stages {args.stages}: "
-              f"{len(events_df)} events")
-
-    print(f"[pvtend] Processing {len(events_df)} events, "
-          f"dh={dh_values[0]}..{dh_values[-1]}, qg_method={qg}")
-
-    # Build list of event tuples for iteration / parallelism
-    event_args = []
-    for idx, row in events_df.iterrows():
-        evt_name = str(row.get("evt_name", row.get("stage", "onset")))
-        track_id = int(row.get("track_id", idx))
-        lat0 = float(row["lat0"])
-        lon0 = float(row["lon0"])
-        base_ts = pd.Timestamp(str(row.get("base_ts",
-                                            row.get("timestamp"))))
-        event_args.append((evt_name, track_id, lat0, lon0, base_ts))
+    print(f"[pvtend] Processing {len(event_args)} events, "
+          f"dh={dh_values[0]}..{dh_values[-1]}, qg_method={qg}, "
+          f"ppvi={'on' if args.with_ppvi else 'off'}")
 
     if config.n_workers > 1:
-        from concurrent.futures import ProcessPoolExecutor, as_completed
-        print(f"[pvtend] Using {config.n_workers} parallel workers")
-
-        n_total = 0
-        with ProcessPoolExecutor(max_workers=config.n_workers,
-                                 initializer=_init_worker,
-                                 initargs=(config,)) as ex:
-            futs = {ex.submit(_process_one_event, a): a for a in event_args}
-            for i, f in enumerate(as_completed(futs), 1):
-                n = f.result()
-                n_total += n
-                if i % 50 == 0 or i == len(futs):
-                    print(f"[pvtend] {i}/{len(futs)} events done, "
-                          f"{n_total} NPZ written so far", flush=True)
+        _pin_threads_for_pool()
+        print(f"[pvtend] Using {config.n_workers} parallel workers "
+              f"(fault-tolerant pool)")
+        n_total, _quarantined = _run_resilient_pool(
+            event_args, config.n_workers,
+            _init_worker, (config, args.with_ppvi),
+            _process_one_event,
+            failures_path=args.out_dir / "compute_failures.txt",
+            unit="NPZ")
     else:
         n_total = 0
         for i, (evt_name, track_id, lat0, lon0, base_ts) in enumerate(
@@ -411,13 +728,80 @@ def _cmd_compute(args: argparse.Namespace) -> None:
             try:
                 n = computer.process_event(
                     evt_name=evt_name, track_id=track_id,
-                    lat0=lat0, lon0=lon0, base_ts=base_ts)
+                    lat0=lat0, lon0=lon0, base_ts=base_ts,
+                    also_ppvi=args.with_ppvi)
                 n_total += n
             except Exception as exc:
                 print(f"    ERROR: {exc}")
                 continue
 
     print(f"[pvtend] Done — wrote {n_total} NPZ files.")
+
+
+def _cmd_ppvi(args: argparse.Namespace) -> None:
+    """Execute the ``ppvi`` subcommand (append existing / write fresh)."""
+    from pvtend.tendency import TendencyComputer, TendencyConfig
+
+    dh_values = _parse_dh_range(args.dh_range)
+
+    config = TendencyConfig(
+        event_type=args.event_type,
+        data_dir=args.era5_dir,
+        clim_path=args.clim_path,
+        output_dir=args.out_dir,
+        csv_path=args.events_csv,
+        track_file=args.track_file or Path(""),
+        rel_hours=dh_values,
+        center_mode=args.center_mode,
+        skip_existing=args.skip_existing,
+        n_workers=args.n_workers,
+        clim_helmholtz_dir=(
+            args.clim_helmholtz_dir
+            if args.clim_helmholtz_dir is not None
+            else args.clim_path
+            if args.clim_path.is_dir()
+            else args.clim_path.parent
+        ),
+    )
+    computer = TendencyComputer(config)
+
+    event_args = _load_event_args(args.events_csv, args.year_range,
+                                  args.stages)
+
+    print(f"[pvtend] PPVI for {len(event_args)} events, "
+          f"dh={dh_values[0]}..{dh_values[-1]}, "
+          f"inv_lon_half={args.inv_lon_half}")
+
+    if config.n_workers > 1:
+        _pin_threads_for_pool()
+        print(f"[pvtend] Using {config.n_workers} parallel workers "
+              f"(fault-tolerant pool)")
+        n_total, _quarantined = _run_resilient_pool(
+            event_args, config.n_workers,
+            _init_ppvi_worker, (config, args.inv_lon_half),
+            _ppvi_one_event,
+            failures_path=args.out_dir / "ppvi_failures.txt",
+            unit="NPZ",
+            # Recycle each worker after this many events so per-event xarray/
+            # HDF5 cache growth (~0.5 GB/event) can't accumulate unbounded and
+            # push the cgroup to its 2 TB limit. ~1% clim-rewarm overhead.
+            max_tasks_per_child=args.max_tasks_per_child)
+    else:
+        n_total = 0
+        for i, (evt_name, track_id, lat0, lon0, base_ts) in enumerate(
+                event_args):
+            print(f"  Event {i + 1}/{len(event_args)}: "
+                  f"track_id={track_id}  {evt_name}  {base_ts}")
+            try:
+                n_total += _ppvi_run_event(
+                    computer, evt_name, track_id, lat0, lon0, base_ts,
+                    args.inv_lon_half)
+            except Exception as exc:
+                print(f"    ERROR: {exc}")
+                continue
+
+    print(f"[pvtend] Done — updated {n_total} NPZ files with PPVI fields.")
+
 
 
 def _cmd_clim_helmholtz(args: argparse.Namespace) -> None:
@@ -446,12 +830,21 @@ def _cmd_classify(args: argparse.Namespace) -> None:
     from pvtend.classify import ClassifyConfig, run_pass1
     from pvtend.rwb import RWBConfig
 
+    # Clamp threshold to number of levels: with N levels you cannot demand
+    # agreement from more than N. Prevents silent all-Neutral output when
+    # users pass e.g. `--levels wavg` (N=1) with the default threshold=3.
+    threshold = min(args.threshold, len(args.levels))
+    if threshold != args.threshold:
+        print(f"[pvtend] Warning: --threshold {args.threshold} > "
+              f"len(--levels)={len(args.levels)}; clamping to {threshold}.",
+              flush=True)
+
     cfg = ClassifyConfig(
         npz_dir=args.npz_dir,
         output_path=args.output,
         stages=args.stages,
         classify_levels=args.levels,
-        classify_threshold=args.threshold,
+        classify_threshold=threshold,
         rwb_cfg=RWBConfig(area_min_deg2=20.0, try_levels=400),
         exclude_file=args.exclude_file,
     )
@@ -545,6 +938,7 @@ def main(argv: list[str] | None = None) -> int:
 
     dispatch = {
         "compute": _cmd_compute,
+        "ppvi": _cmd_ppvi,
         "clim-helmholtz": _cmd_clim_helmholtz,
         "classify": _cmd_classify,
         "composite": _cmd_composite,

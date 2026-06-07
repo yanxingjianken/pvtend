@@ -207,3 +207,50 @@ Python:
 
    # Get composite-mean PV at peak + 0 h for AWB events
    pv_awb = comp.composite_mean_3d("pv_3d", stage="peak", dh=0, variant="AWB_peak")
+
+
+Per-level piecewise PV inversion (PPVI)
+---------------------------------------
+
+The :mod:`pvtend.ppvi` subpackage adds **piecewise potential-vorticity
+inversion** (Wu/Davis nonlinear balance) to each event NPZ: it decomposes the
+balanced rotational-wind anomaly into the contribution induced by **each
+pressure level's** PV / boundary-θ anomaly, across the **9 Wu levels
+1000 → 100 hPa**.  The 1000 hPa (bottom-θ) and 100 hPa (top-θ) pieces are
+Bretherton (1966) boundary sheets; levels 2–8 are interior PV.  Because the
+perturbation balance is linear, the 9 single-level pieces sum **exactly** to the
+full balanced field.
+
+Per-event NPZ keys (for ``L`` in ``{1000, 850, 700, 500, 400, 300, 250, 200,
+100}``):
+
+* ``u_rot_anom_ppvi_{L}`` / ``v_rot_anom_ppvi_{L}`` (+ ``_3d``) — rotational-wind
+  anomaly induced by inverting *only* level ``L``'s PV/θ piece;
+* ``u/v_rot_anom_residual_ppvi`` — observed minus the sum of all per-level
+  pieces (the unbalanced / divergent part);
+* ``pv_anom_wu`` — the Wu PV anomaly that is inverted.
+
+PPVI runs **by default** in ``compute`` (disable with ``--no-with-ppvi``); to
+add it to *existing* NPZ (or recompute), use the ``ppvi`` subcommand.  The Wu
+inversion can occasionally segfault on a few events; the fault-tolerant pool
+retries and ``--skip-existing`` makes the run idempotent/resumable.  Because a
+long-lived worker accumulates per-event reads, run very large migrations in
+**chunks** (a few hundred events per invocation):
+
+.. code-block:: bash
+
+   # add / replace per-level PPVI fields in existing event NPZ (resumable)
+   pvtend-pipeline ppvi \
+       --event-type blocking \
+       --events-csv tracked_events.csv \
+       --era5-dir /path/to/era5/ \
+       --clim-path /path/to/climatology/era5_hourly_clim_1990-2020 \
+       --clim-helmholtz-dir /path/to/climatology/ \
+       --out-dir /path/to/output/ \
+       --dh-range='-12:13' \
+       --n-workers 192 \
+       --skip-existing
+
+The per-level decomposition shows, e.g., that a blocking ridge's 250 hPa
+circulation is driven mostly by the 250/200/300 hPa PV pieces, while the
+warm-core 1000 hPa piece is weak and of opposite sign aloft.
