@@ -174,14 +174,29 @@ The full production pipeline is a **three-pass** workflow:
        --skip-existing
 
    # ── Pass 1: RWB classification ───────────────────────────────────
-   #   Detects overturning PV contours on multiple pressure levels and
-   #   classifies each event-stage as AWB / CWB / neutral.
+   #   Detects overturning Z contours on multiple pressure levels and
+   #   classifies each event-stage as AWB / CWB / Omega (both) / NEUTRAL.
    #   --levels accepts integer hPa values or 'wavg' (weighted-average Z).
    pvtend-pipeline classify \
        --npz-dir /path/to/output/ \
        --output /path/to/outputs/rwb_variant_tracksets.pkl \
        --levels 500 400 300 200 \
        --threshold 3
+
+   # Single-field "wavg one level" mode (e.g. for the upper-trop 300/250/200
+   # weighted-average Z): one field, threshold clamps to 1.
+   pvtend-pipeline classify --npz-dir /path/to/output/ \
+       --output /path/to/outputs/rwb_wavg.pkl --levels wavg --threshold 1
+
+   # Second option — classify a pre-extracted patch file (.npz or .nc) of
+   # single 2-D Z fields built on ANY grid (e.g. CESM f09), writing a per-event
+   # AWB/CWB/Omega/NEUTRAL label CSV (npz tree stays the default):
+   pvtend-pipeline classify \
+       --patches /path/to/zwavg_patches.npz \
+       --output /path/to/outputs/rwb_labels.csv
+   # In Python, the same single-field classifier is the public
+   #   pvtend.classify.classify_z_field(z2d, x_rel, y_rel) -> (awb, cwb)
+   #   pvtend.classify.label_from_flags(awb, cwb) -> "AWB"/"CWB"/"Omega"/"NEUTRAL"
 
    # ── Pass 2: Variant-aware composite ──────────────────────────────
    #   Accumulates NPZ fields, separately for "original", "AWB_onset",

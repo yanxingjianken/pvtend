@@ -71,6 +71,73 @@ def default_nh_grid() -> NHGrid:
     return NHGrid(lat=TARGET_LAT.copy(), lon=TARGET_LON.copy())
 
 
+@dataclass(frozen=True)
+class GridProfile:
+    """Static description of an input grid + its PV-inversion geometry (config).
+
+    Bundles the regular lat-lon grid metadata, the event-patch half-widths, and
+    the Wu QG piecewise-inversion latitude band. **Scope (v2.13):** this is
+    metadata/config consumed by *callers*. The Wu inversion **solver**
+    (:func:`pvtend.ppvi.solver.invert_piecewise`) is genuinely grid-agnostic
+    (anisotropic-safe ``zhdr`` reorder + below-ground fill), and the spectral
+    Helmholtz/derivatives (:mod:`pvtend.sh_ops`) are global. The higher-level
+    :class:`~pvtend.TendencyComputer` pipeline, however, is **still
+    ERA5-specific** (it hard-codes the 10.5–85.5°N band and ``H=z/g``), so f09
+    end-to-end use currently goes through the solver API directly — build the
+    cubes + ``zhdr`` yourself and pass ``H=z`` when ``z_is_height`` (see the
+    ``pv_inversion/wu_cesm`` closure test for a worked example). Two profiles
+    are provided:
+
+    - :data:`ERA5_1P5_NH` — the default ERA5 1.5° Northern-Hemisphere grid
+      (current behaviour; isotropic Δlat=Δlon=1.5°).
+    - :data:`CESM_F09` — the CESM2-LENS2 f09 global grid (192×288, anisotropic
+      Δlat≈0.942°, Δlon=1.25°). Helmholtz/derivatives run fully global; the Wu
+      QG inversion runs on the mid-latitude band ``[inv_band_s, inv_band_n]``
+      (it is singular at the equator/poles, so a truly-global QG inversion is
+      out of scope — the band covers all blocking, ~25–85°N).
+
+    Note: CESM ``z`` is geopotential **height [m]** (use ``H=z`` directly),
+    whereas ERA5 ``z`` is geopotential [m²/s²] (``H=z/g``).
+    """
+
+    name: str
+    nlat: int
+    nlon: int
+    lat_south: float
+    lat_north: float
+    dlat: float
+    dlon: float
+    lon_west: float          # 0.0 (0–360) or -180.0 (−180–180)
+    lat_half: float          # event-patch half-width in latitude [deg]
+    lon_half: float          # event-patch half-width in longitude [deg]
+    z_is_height: bool        # True ⇒ H=z; False ⇒ H=z/g (ERA5 geopotential)
+    inv_band_s: float = 10.5  # Wu QG inversion band, south edge [°N]
+    inv_band_n: float = 85.5  # Wu QG inversion band, north edge [°N]
+
+    @property
+    def isotropic(self) -> bool:
+        """True if Δlat≈Δlon (Wu zhdr ordering is then irrelevant)."""
+        return abs(self.dlat - self.dlon) < 1e-6
+
+
+#: Default ERA5 1.5° NH profile (current pvtend behaviour).
+ERA5_1P5_NH = GridProfile(
+    name="ERA5_1P5_NH", nlat=61, nlon=240, lat_south=0.0, lat_north=90.0,
+    dlat=1.5, dlon=1.5, lon_west=-180.0, lat_half=LAT_HALF, lon_half=LON_HALF,
+    z_is_height=False,
+)
+
+#: CESM2-LENS2 f09 global profile (192×288, anisotropic; z is height [m]).
+CESM_F09 = GridProfile(
+    name="CESM_F09", nlat=192, nlon=288, lat_south=-90.0, lat_north=90.0,
+    dlat=180.0 / 191.0, dlon=1.25, lon_west=0.0, lat_half=30.0, lon_half=45.0,
+    z_is_height=True,
+)
+
+#: Registry for lookup by name.
+GRID_PROFILES = {p.name: p for p in (ERA5_1P5_NH, CESM_F09)}
+
+
 def crop_to_nh(lat: np.ndarray, lon: np.ndarray,
                data: np.ndarray, lat_axis: int = -2
                ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

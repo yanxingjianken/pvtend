@@ -22,7 +22,10 @@ from __future__ import annotations
 from pvtend._version import __version__
 
 # Core data structures and grid
-from pvtend.grid import NHGrid, default_nh_grid, EventPatch
+from pvtend.grid import (
+    NHGrid, default_nh_grid, EventPatch,
+    GridProfile, ERA5_1P5_NH, CESM_F09, GRID_PROFILES,
+)
 from pvtend.constants import (
     R_EARTH, OMEGA_E, G0, R_DRY, KAPPA, H_SCALE,
     SP19_DRY_FRACTION, MASK_PV_THRESHOLD,
@@ -84,7 +87,10 @@ from pvtend.composites import CompositeState, load_composite_state
 from pvtend.tendency import TendencyComputer, TendencyConfig
 
 # RWB classification (Pass 1) and composite builder (Pass 2)
-from pvtend.classify import ClassifyConfig, ClassifyResult, run_pass1
+from pvtend.classify import (
+    ClassifyConfig, ClassifyResult, run_pass1,
+    classify_z_field, label_from_flags,
+)
 from pvtend.composite_builder import (
     CompositeConfig, CompositeResult, build_composites,
 )
@@ -99,6 +105,7 @@ __all__ = [
     "__version__",
     # Grid
     "NHGrid", "default_nh_grid", "EventPatch",
+    "GridProfile", "ERA5_1P5_NH", "CESM_F09", "GRID_PROFILES",
     # Constants
     "R_EARTH", "OMEGA_E", "G0", "R_DRY", "KAPPA", "H_SCALE",
     "SP19_DRY_FRACTION", "MASK_PV_THRESHOLD",
@@ -135,6 +142,7 @@ __all__ = [
     "TendencyComputer", "TendencyConfig",
     # Classify (Pass 1) + Composite Builder (Pass 2)
     "ClassifyConfig", "ClassifyResult", "run_pass1",
+    "classify_z_field", "label_from_flags",
     "CompositeConfig", "CompositeResult", "build_composites",
     # Plotting
     "plot_var", "plot_baroclinic_tilt",

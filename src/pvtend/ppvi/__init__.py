@@ -23,6 +23,7 @@ from .solver import (
     PassCParams,
     PassDParams,
     invert_piecewise,
+    fill_below_ground,
 )
 from .winds import psi_to_winds
 
@@ -33,5 +34,6 @@ __all__ = [
     "PassCParams",
     "PassDParams",
     "invert_piecewise",
+    "fill_below_ground",
     "psi_to_winds",
 ]

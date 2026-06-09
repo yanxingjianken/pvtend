@@ -223,12 +223,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="RWB classification (Pass 1) → variant tracksets PKL.",
     )
     classify.add_argument(
-        "--npz-dir", required=True, type=Path,
-        help="Root NPZ directory (with onset/peak/decay sub-dirs).",
+        "--npz-dir", required=False, type=Path, default=None,
+        help="Root NPZ directory (with onset/peak/decay sub-dirs). Default "
+             "mode. Mutually exclusive with --patches.",
+    )
+    classify.add_argument(
+        "--patches", type=Path, default=None,
+        help="Second option: classify a pre-extracted patch file (.npz or "
+             ".nc) of single 2-D Z fields instead of the NPZ tree. The file "
+             "must hold a Z field (var z/patch_z/patch_zwavg, shape (N,NY,NX)), "
+             "relative coords (rel_lon/x_rel (NX,), rel_lat/y_rel (NY,)), and "
+             "an identifier (var id (N,), or member+track). Writes a per-event "
+             "label CSV to --output (single-field wavg mode; --threshold/--levels "
+             "ignored).",
     )
     classify.add_argument(
         "--output", required=True, type=Path,
-        help="Output pickle file for variant tracksets.",
+        help="Output pickle (NPZ-tree mode) or label CSV (--patches mode).",
     )
     classify.add_argument(
         "--stages", nargs="+", default=["onset", "peak", "decay"],
@@ -825,10 +836,94 @@ def _cmd_clim_helmholtz(args: argparse.Namespace) -> None:
           f"to {args.output_dir}")
 
 
+def _cmd_classify_patches(args: argparse.Namespace) -> None:
+    """Classify a pre-extracted patch file (.npz/.nc) of single 2-D Z fields.
+
+    The "second option" for ``classify``: instead of the per-event NPZ tree,
+    read a stack of block-relative weighted-average Z patches (e.g. built from
+    CESM f09 nc) and write a per-event AWB/CWB/Omega/NEUTRAL label CSV.
+    """
+    import csv
+    import numpy as np
+    from pvtend.classify import classify_z_field, label_from_flags
+    from pvtend.rwb import RWBConfig
+
+    fp = args.patches
+
+    def _pick(d, names):
+        for n in names:
+            if n in d:
+                return np.asarray(d[n])
+        raise KeyError(f"patch file missing any of {names}; has {list(d)}")
+
+    if fp.suffix.lower() in (".nc", ".nc4", ".netcdf"):
+        import xarray as xr
+        ds = xr.open_dataset(fp)
+        d = {k: ds[k].values for k in ds.variables}
+        ds.close()
+    else:
+        with np.load(fp, allow_pickle=False) as z:
+            d = {k: z[k] for k in z.files}
+
+    Z = _pick(d, ("z", "patch_zwavg", "patch_z"))          # (N, NY, NX) or (NY, NX)
+    if Z.ndim == 2:                                        # single patch → stack of 1
+        Z = Z[None]
+    if Z.ndim != 3:
+        raise SystemExit(
+            f"classify --patches: Z field has shape {Z.shape}; expected "
+            f"(N, NY, NX) or (NY, NX). Check the field variable is not a "
+            f"coordinate (rel_lon/rel_lat) — picked from {list(d)}.")
+    n = Z.shape[0]
+    x_rel = _pick(d, ("rel_lon", "x_rel"))
+    y_rel = _pick(d, ("rel_lat", "y_rel"))
+    try:
+        if "id" in d:
+            ident = [(int(i),) for i in np.asarray(d["id"]).ravel()]
+            cols = ["id"]
+        elif "member" in d and "track" in d:
+            ident = list(zip(np.asarray(d["member"]).astype(int).tolist(),
+                             np.asarray(d["track"]).astype(int).tolist()))
+            cols = ["member", "track"]
+        else:
+            ident = [(i,) for i in range(n)]
+            cols = ["id"]
+    except (ValueError, TypeError) as exc:
+        raise SystemExit(f"classify --patches: non-integer identifier — {exc}")
+    if len(ident) != n:
+        raise SystemExit(
+            f"classify --patches: {len(ident)} identifiers but {n} patches.")
+
+    # Match the ERA5 classify-CLI RWB tuning (see _cmd_classify) for consistency.
+    cfg = RWBConfig(area_min_deg2=20.0, try_levels=400)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    counts = {"AWB": 0, "CWB": 0, "Omega": 0, "NEUTRAL": 0}
+    with open(args.output, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([*cols, "label", "awb", "cwb"])
+        for k in range(Z.shape[0]):
+            awb, cwb = classify_z_field(Z[k], x_rel, y_rel, cfg)
+            lab = label_from_flags(awb, cwb)
+            counts[lab] += 1
+            w.writerow([*ident[k], lab, int(awb), int(cwb)])
+    print(f"[pvtend] classified {Z.shape[0]} patches from {fp.name}: "
+          + "  ".join(f"{k}={v}" for k, v in counts.items()))
+    print(f"[pvtend] labels saved to {args.output}")
+
+
 def _cmd_classify(args: argparse.Namespace) -> None:
     """Execute the ``classify`` subcommand (Pass 1)."""
     from pvtend.classify import ClassifyConfig, run_pass1
     from pvtend.rwb import RWBConfig
+
+    # Second option: a precomputed patch file (.npz/.nc) instead of the NPZ tree.
+    if getattr(args, "patches", None) is not None and args.npz_dir is not None:
+        raise SystemExit("classify: --npz-dir and --patches are mutually "
+                         "exclusive; pass exactly one.")
+    if getattr(args, "patches", None) is not None:
+        _cmd_classify_patches(args)
+        return
+    if args.npz_dir is None:
+        raise SystemExit("classify: one of --npz-dir or --patches is required.")
 
     # Clamp threshold to number of levels: with N levels you cannot demand
     # agreement from more than N. Prevents silent all-Neutral output when

@@ -188,6 +188,59 @@ def _classify_bays_z2d(
     return is_awb, is_cwb
 
 
+def classify_z_field(
+    z2d: np.ndarray,
+    x_rel: np.ndarray,
+    y_rel: np.ndarray,
+    cfg: RWBConfig | None = None,
+) -> tuple[bool, bool]:
+    """Classify AWB / CWB Rossby-wave-breaking bays on one 2-D Z field.
+
+    Public, side-effect-free wrapper around the internal bay-overturning
+    detector :func:`_classify_bays_z2d`. Intended for callers that already
+    hold a single 2-D geopotential-height patch — e.g. the weighted-average
+    Z(300/250/200) "single-field, threshold=1" classification used outside
+    the per-event NPZ tree (other grids/datasets, precomputed patch arrays).
+
+    Args:
+        z2d: 2-D geopotential-height field ``(NY, NX)`` [m] on a block- or
+            event-relative grid. NaNs (e.g. polar padding) are tolerated; an
+            all-NaN field returns ``(False, False)``.
+        x_rel: Relative longitudes — 1-D ``(NX,)`` or 2-D ``(NY, NX)``.
+        y_rel: Relative latitudes — 1-D ``(NY,)`` or 2-D ``(NY, NX)``,
+            ascending (north at top).
+        cfg: :class:`~pvtend.rwb.RWBConfig`; ``None`` uses the ``RWBConfig()``
+            dataclass defaults (``area_min_deg2=30, try_levels=300``). Note the
+            ``pvtend-pipeline classify`` CLI tunes these to
+            ``area_min_deg2=20, try_levels=400`` for ERA5; pass an explicit
+            ``cfg`` to reproduce that.
+
+    Returns:
+        ``(is_awb, is_cwb)`` — both ``True`` when the field exhibits *both*
+        an anticyclonic and a cyclonic overturning bay (an Omega block); see
+        :func:`label_from_flags` to collapse to a single class string.
+    """
+    if cfg is None:
+        cfg = RWBConfig()
+    return _classify_bays_z2d(z2d, x_rel, y_rel, cfg)
+
+
+def label_from_flags(is_awb: bool, is_cwb: bool) -> str:
+    """Collapse ``(AWB, CWB)`` flags to one physical-class string.
+
+    Mirrors :attr:`ClassifyResult.stage_labels` semantics exactly:
+    both → ``"Omega"``, AWB only → ``"AWB"``, CWB only → ``"CWB"``,
+    neither → ``"NEUTRAL"``.
+    """
+    if is_awb and is_cwb:
+        return "Omega"
+    if is_awb:
+        return "AWB"
+    if is_cwb:
+        return "CWB"
+    return "NEUTRAL"
+
+
 def _classify_multilevel(
     z3d: np.ndarray | None,
     levels_file: np.ndarray | None,

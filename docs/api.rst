@@ -16,12 +16,27 @@ throughout the package, spatial cropping/interpolation utilities, and
 event-centred patch extraction.  Constants include Earth parameters,
 thermodynamic constants, and default level lists.
 
+:class:`GridProfile` bundles a regular lat-lon grid's metadata, the
+event-patch half-widths, and the Wu QG-inversion latitude band.  Two
+profiles ship: :data:`ERA5_1P5_NH` (the default, isotropic 1.5° NH grid)
+and :data:`CESM_F09` (the CESM2-LENS2 f09 global grid, anisotropic
+Δlat≈0.942°/Δlon=1.25°, with ``z`` as geopotential height).  It is config
+metadata: the inversion **solver**
+(:func:`~pvtend.ppvi.solver.invert_piecewise`) is grid-agnostic and the
+spectral operators (:mod:`pvtend.sh_ops`) are global, but the higher-level
+:class:`~pvtend.TendencyComputer` pipeline is still ERA5-specific — so f09
+end-to-end inversion goes through the solver API directly (see the
+``pv_inversion/wu_cesm`` closure test).
+
 .. autosummary::
    :toctree: generated/
 
    NHGrid
    default_nh_grid
    EventPatch
+   GridProfile
+   ERA5_1P5_NH
+   CESM_F09
    constants
 
 
@@ -320,12 +335,21 @@ PPVI is produced by :meth:`~pvtend.TendencyComputer.process_event` (``compute
 :meth:`~pvtend.TendencyComputer.compute_ppvi_for_event` (the ``ppvi`` CLI
 subcommand).
 
+:func:`~pvtend.ppvi.solver.invert_piecewise` is grid-agnostic: it accepts any
+regular grid, including **anisotropic** ones (Δlat≠Δlon, e.g. CESM f09 — the
+``zhdr`` spacings are reordered internally to the Fortran's HDR(5)=Δlon /
+HDR(6)=Δlat convention), and by default hydrostatically gap-fills below-ground
+NaN via :func:`~pvtend.ppvi.solver.fill_below_ground` (a no-op on already-filled
+ERA5 pressure-level data). On the isotropic, gap-free ERA5 path the output is
+byte-identical to earlier releases.
+
 .. currentmodule:: pvtend.ppvi.solver
 
 .. autosummary::
    :toctree: generated/
 
    invert_piecewise
+   fill_below_ground
 
 .. currentmodule:: pvtend.ppvi.winds
 
@@ -935,8 +959,9 @@ RWB Classification (Pass 1)
 
 Reads the ``dh=0`` NPZ snapshots produced by :class:`TendencyComputer`,
 classifies each event as **AWB** (Anticyclonic Wave Breaking),
-**CWB** (Cyclonic Wave Breaking), or **NEUTRAL** at multiple pressure
-levels, and emits a "variant tracksets" PKL.
+**CWB** (Cyclonic Wave Breaking), **Omega** (both an AWB and a CWB bay),
+or **NEUTRAL** at multiple pressure levels, and emits a "variant
+tracksets" PKL.
 
 The classification uses :func:`sampled_longest_contours` on Z-field
 contours followed by :func:`overturn_x_intervals` and
@@ -950,6 +975,14 @@ the string ``wavg`` to classify on the pre-computed weighted-average
 
 The CLI subcommand is ``pvtend-pipeline classify``.
 
+For callers that already hold a single 2-D geopotential-height patch
+(e.g. an externally-built weighted-average Z field on another grid such
+as CESM f09), :func:`classify_z_field` runs the same bay detector on one
+field and :func:`label_from_flags` collapses the ``(awb, cwb)`` flags to
+the single class string ``"AWB"``/``"CWB"``/``"Omega"``/``"NEUTRAL"``
+(``Omega`` = both bays present), exactly mirroring
+:attr:`ClassifyResult.stage_labels`.
+
 .. autosummary::
    :toctree: generated/
 
@@ -962,6 +995,8 @@ The CLI subcommand is ``pvtend-pipeline classify``.
    :toctree: generated/
 
    run_pass1
+   classify_z_field
+   label_from_flags
 
 .. currentmodule:: pvtend
 

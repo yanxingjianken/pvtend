@@ -109,6 +109,42 @@ def _from_core(arr: np.ndarray) -> np.ndarray:
                                 dtype=np.float64)
 
 
+def fill_below_ground(
+    H: np.ndarray, T: np.ndarray, U: np.ndarray, V: np.ndarray,
+    pr: np.ndarray = PR,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Fill below-ground NaN so the Wu SOR cores (not NaN-aware) converge.
+
+    Pressure-level fields derived from terrain-following model levels (e.g.
+    CESM f09) are genuinely missing where the level lies below ground (1000/
+    850 hPa under high terrain or cold high-latitude highs). The Fortran SOR
+    solvers propagate any NaN across the whole 3-D elliptic solve, so the input
+    must be gap-filled first. T, U, V get constant downward extrapolation from
+    the lowest valid level; H (geopotential height) is filled hydrostatically
+    ``H_k = H_{k+1} + (R_d·T̄/g)·ln(p_{k+1}/p_k)`` (with ``p_k > p_{k+1}`` the
+    height decreases downward).
+
+    Cubes are ``(NL, NY, NX)`` with level 0 the highest pressure (1000 hPa).
+    Returns the inputs **unchanged** when there are no NaNs (e.g. ERA5
+    pressure-level data, which is filled below ground at the source) — so this
+    is a strict no-op on the validated ERA5 path.
+    """
+    if all(np.isfinite(x).all() for x in (H, T, U, V)):
+        return H, T, U, V
+    H, T, U, V = (np.array(x, dtype=np.float64, copy=True) for x in (H, T, U, V))
+    Rd, g = 287.05, 9.80665
+    p_hpa = np.asarray(pr, dtype=np.float64) * 1000.0   # σ → hPa
+    nl = H.shape[0]
+    for k in range(nl - 2, -1, -1):       # fill lower (higher-p) levels from above
+        for A in (T, U, V):
+            m = ~np.isfinite(A[k])
+            A[k][m] = A[k + 1][m]
+        mz = ~np.isfinite(H[k])
+        dz = (Rd * 0.5 * (T[k] + T[k + 1]) / g) * np.log(p_hpa[k + 1] / p_hpa[k])
+        H[k][mz] = (H[k + 1] + dz)[mz]
+    return H, T, U, V
+
+
 def _run_pvpialln(ext, H, T, U, V, zhdr10, p):
     """Run one pvpialln pass; return psi, q, thb, tht (all (NY,NX,·))."""
     psi, q, thb, tht = ext.pvpialln_core(
@@ -130,6 +166,7 @@ def invert_piecewise(
     V_event: np.ndarray,
     zhdr: np.ndarray,
     pieces: dict[str, list[int]] | None = None,
+    fill_nan: bool = True,
     pab: PassABParams | None = None,
     pc: PassCParams | None = None,
     pd: PassDParams | None = None,
@@ -141,9 +178,16 @@ def invert_piecewise(
             ``H`` = geopotential height [m]; ``T`` = raw temperature [K].
         H_event, T_event, U_event, V_event: Event-state cubes ``(NL, NY, NX)``.
         zhdr: Wu 8-element header
-            ``[lat_s, lon_w, lat_n, lon_e, dlat, dlon, nx, ny]``.
+            ``[lat_s, lon_w, lat_n, lon_e, dlat, dlon, nx, ny]``. Works on any
+            regular grid including **anisotropic** ones (Δlat≠Δlon, e.g. CESM
+            f09): the two spacings are reordered internally to match the
+            Fortran's ``HDR(5)=Δlon, HDR(6)=Δlat`` convention.
         pieces: Mapping name → 1-based Wu level list. Defaults to
             :data:`PIECES`.
+        fill_nan: If True (default), hydrostatically gap-fill below-ground NaN
+            in the input cubes via :func:`fill_below_ground` before inverting
+            (required for terrain-following model data such as CESM f09; a
+            no-op on already-filled ERA5 pressure-level data).
         pab, pc, pd: Solver parameter overrides for passes A/B, C, D.
 
     Returns:
@@ -167,9 +211,41 @@ def invert_piecewise(
     pd = pd or PassDParams()
     ext = load_ext()
 
+    if fill_nan:
+        H_mean, T_mean, U_mean, V_mean = fill_below_ground(
+            H_mean, T_mean, U_mean, V_mean)
+        H_event, T_event, U_event, V_event = fill_below_ground(
+            H_event, T_event, U_event, V_event)
+
     zhdr10 = np.zeros(10, dtype=np.float32)
     zhdr8 = np.asarray(zhdr, dtype=np.float32).ravel()[:8]
     zhdr10[:8] = zhdr8
+    # The Fortran cores reconstruct each row's latitude as ``HDR(3)-(I-1)*HDR(6)``
+    # and use ``HDR(5)`` for the zonal grid distance — i.e. they require
+    # ``HDR(5)=Δlon`` and ``HDR(6)=Δlat``. The public ``zhdr`` is documented as
+    # ``[..,dlat,dlon,..]`` (index 4=dlat, 5=dlon), so swap the two spacings here.
+    # No-op on isotropic grids (ERA5 1.5°, Δlat=Δlon ⇒ byte-identical); fixes
+    # anisotropic grids (CESM f09, Δlat=0.942≠Δlon=1.25) which would otherwise
+    # reconstruct latitudes running off into the SH and blow the solver up.
+    zhdr10[4], zhdr10[5] = zhdr8[5], zhdr8[4]
+
+    # Guard the Fortran's latitude contract: it reconstructs row I's latitude as
+    # ``lat_n - (I-1)·Δlat`` (HDR(3), HDR(6)), so the header band edges and Δlat
+    # must be mutually consistent — ``lat_n - lat_s ≈ (ny-1)·Δlat``. A caller
+    # passing nominal band edges (e.g. 10.5/85.5) with off-grid actual edges and
+    # an anisotropic Δlat would silently invert at the wrong latitudes. Cubes
+    # must also be ordered N→S (row 0 = northernmost), per the module docstring.
+    lat_s, lat_n, dlat_in, ny_in = (float(zhdr8[0]), float(zhdr8[2]),
+                                    float(zhdr8[4]), int(round(float(zhdr8[7]))))
+    span_err = abs((lat_n - lat_s) - (ny_in - 1) * dlat_in)
+    if span_err > 0.5 * dlat_in:
+        raise ValueError(
+            f"zhdr band edges inconsistent with Δlat·(ny-1): "
+            f"lat_n−lat_s={lat_n - lat_s:.3f}° but (ny−1)·Δlat="
+            f"{(ny_in - 1) * dlat_in:.3f}° (Δlat={dlat_in}, ny={ny_in}). "
+            f"Set lat_s/lat_n to the ACTUAL grid band-edge latitudes (the "
+            f"Fortran reconstructs rows as lat_n−(I−1)·Δlat)."
+        )
 
     # ── Pass A: mean state ───────────────────────────────────────────
     psi_m, q_m, thb_m, tht_m = _run_pvpialln(
