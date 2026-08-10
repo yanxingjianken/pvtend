@@ -689,8 +689,11 @@ cf2py integer intent(hide),depend(MBIN) :: NX=shape(MBIN,1)
       REAL THO, FRC, QCONST, BETA, HND, QMIN, CNLIN
       INTEGER MAXIT, MAXOT, I, J, K
       QMIN=0.00001
-      MAXIT=2000
-      MAXOT=400
+c     -- Iteration caps raised 10x (2026-08-06). Verified bit-identical on a real per-event
+c        inversion: a case that converges exits via IT=.TRUE. and never reads MAXIT again,
+c        so only cases that were HITTING the cap change. Original: MAXIT=2000, MAXOT=400.
+      MAXIT=20000
+      MAXOT=4000
 
       PII=4.*ATAN(1.)
       AA=2.E7/PII
