@@ -65,3 +65,6 @@ website/
 # OS
 .DS_Store
 Thumbs.db
+
+# Run logs (ppvi mass runs etc.) — not code
+logs/

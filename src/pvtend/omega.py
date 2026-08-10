@@ -714,6 +714,9 @@ def _compute_diabatic_rhs_log20(
     kappa = R_DRY / 1004.0
     c_p = 1004.0
 
+    # Solver-input sanitization, NOT a statistical mean (Rule 14 OK here): a missing diabatic
+    # T-tendency becomes 0 forcing in the elliptic ω RHS below — an acceptable "no known heating"
+    # default. Never 0-fill fields before a composite/mean.
     dT_dt_safe = np.nan_to_num(dT_dt, nan=0.0, posinf=0.0, neginf=0.0)
     C = np.zeros_like(t)
 
@@ -768,6 +771,8 @@ def _compute_diabatic_rhs_emanuel(
     kappa = R_DRY / 1004.0
     c_p = 1004.0
 
+    # Solver-input sanitization, NOT a statistical mean (Rule 14 OK here): missing latent-heating
+    # rate → 0 forcing in the elliptic ω RHS. Never 0-fill fields before a composite/mean.
     theta_dot_safe = np.nan_to_num(theta_dot_lhr, nan=0.0, posinf=0.0,
                                    neginf=0.0)
     C_em = np.zeros_like(t)
