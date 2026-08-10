@@ -933,10 +933,13 @@ def with_derivs_for_window(
     ds["theta_dot"] = theta_dot_raw.where(ds["w"] < 0, 0.0)
     ds["theta_dot_dp"] = _ddp_da(ds["theta_dot"])
 
-    # relative vorticity ζ = ∂v/∂x − ∂u/∂y
+    # relative vorticity ζ = ∂v/∂x − ∂u/∂y + u·tanφ/a  (spherical; the +u·tanφ/a curvature/metric
+    # term is REQUIRED — without it ζ is the flat-earth form and (f+ζ) in the Q source below carries a
+    # ~u·tanφ/a error, ~5% of f at 45° for u~30 m/s, growing poleward. Fixed 2026-06-23 per the cos-lat
+    # metric audit; see ~/.github/copilot-instructions.md §14.2.)
     ds["v_dx"] = _ddx_periodic_da(ds.v)
     ds["u_dy"] = _ddy_da(ds.u)
-    ds["zeta"] = ds["v_dx"] - ds["u_dy"]
+    ds["zeta"] = ds["v_dx"] - ds["u_dy"] + ds["u"] * (np.tan(ds["latitude_rad"]) / R_EARTH)
 
     # Q = −g(f + ζ) ∂θ̇_LHR/∂p  (vertical stretching only)
     ds["Q"] = -G0 * (ds["f"] + ds["zeta"]) * ds["theta_dot_dp"]
@@ -1344,7 +1347,11 @@ class TendencyComputer:
                 qg_method=self.cfg.qg_omega_method,
                 nh_data=nh_data)
 
-            # NaN safety on adiabatic/diabatic decomposition outputs
+            # NaN safety: 0-fill these solver-output fields ONLY as input sanitization before the
+            # nansum-based vertical mean `vwm` below — never 0-fill before a statistical mean
+            # (see Rule 14). On the validated ERA5 path the wavg levels (300/250/200) are NaN-free,
+            # so this is a no-op; dropping it to rely on nansum's exclude-NaN semantics is deferred
+            # to v2.14 (needs the full test/CI checklist on the published package).
             for _key in ("w_adiabatic", "w_diabatic", "w_qg_diabatic",
                          "w_lhr_moist",
                          "u_div_diabatic", "v_div_diabatic",
