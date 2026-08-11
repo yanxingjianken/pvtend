@@ -542,18 +542,36 @@ def fill_window_below_ground(ds: xr.Dataset) -> xr.Dataset:
     return ds
 
 
+#: Hours of slack added to the ``rel_hours`` span when deciding **which files**
+#: to open. The window actually read is ``rel_hours ± EDGE_PAD_H``, and the pad
+#: is derived from the data's cadence — which is not known until a file is
+#: open, so the file-key range cannot use the exact value. Being generous costs
+#: nothing: an extra month or member-year is opened lazily and sliced away.
+#:
+#: Without it a narrow ``rel_hours`` silently under-opens at a file boundary.
+#: With ``--dh-range 0:1:1`` the span is a single instant, so an event at
+#: 31 December 18:00 asked only for that year, and the 1 January 00:00 needed
+#: for the centred difference was in the next file. That cost 150 of the 176
+#: failures in the first full CESM run; the same hole was latent on ERA5 at
+#: month boundaries, hidden only because the default ``-49:25`` span already
+#: reaches into the neighbouring month.
+_FILE_KEY_PAD_H: int = 48
+
+
 def open_source_ds(cfg, base_ts: pd.Timestamp, chunks=None) -> xr.Dataset:
     """Open the time window for whichever source ``cfg.source`` names."""
+    hmin = int(min(cfg.rel_hours)) - _FILE_KEY_PAD_H
+    hmax = int(max(cfg.rel_hours)) + _FILE_KEY_PAD_H
     if getattr(cfg, "source", "era5") == "cesm":
         if getattr(cfg, "member", None) is None:
             raise ValueError("source='cesm' needs cfg.member (LENS2 member number)")
         return open_cesm_years_ds(
             cfg.data_dir, int(cfg.member),
-            year_keys_for_window(base_ts, cfg.rel_hours[0], cfg.rel_hours[-1]),
+            year_keys_for_window(base_ts, hmin, hmax),
             engine=cfg.engine, chunks=chunks)
     return open_months_ds(
         cfg.data_dir, ["u", "v", "w", "pv", "z", "t", "q"],
-        month_keys_for_window(base_ts, cfg.rel_hours[0], cfg.rel_hours[-1]),
+        month_keys_for_window(base_ts, hmin, hmax),
         engine=cfg.engine, chunks=chunks)
 
 

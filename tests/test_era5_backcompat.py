@@ -219,3 +219,33 @@ def test_era5_event_end_to_end(era5_tree, tmp_path):
         for key in ("Y_rel", "X_rel", "levels", "track_id", "lat0", "lon0"):
             assert key in z, f"missing NPZ key {key}"
         assert int(z["track_id"]) == 42
+
+
+def test_file_keys_cover_the_pad_at_a_month_boundary(era5_tree, tmp_path):
+    """A one-instant dh range must still open the neighbouring month.
+
+    The window read is ``rel_hours ± EDGE_PAD_H``, but the file-key range was
+    computed from ``rel_hours`` alone. With ``--dh-range 0:1:1`` that span is a
+    single instant, so an event near a boundary opened only its own file and the
+    neighbour needed for the centred difference was missing. Latent on ERA5 —
+    the default -49:25 span already reaches into the next month — and it cost
+    150 of 176 failures on the first full CESM run.
+    """
+    from pvtend.tendency import month_keys_for_window, _FILE_KEY_PAD_H
+
+    base = pd.Timestamp(f"{YEAR}-{MONTH:02d}-31 22:00")
+    naive = month_keys_for_window(base, 0, 0)
+    padded = month_keys_for_window(base, -_FILE_KEY_PAD_H, _FILE_KEY_PAD_H)
+    assert naive == [(YEAR, MONTH)], "precondition: the naive range is one month"
+    assert (YEAR, MONTH + 1) in padded, "padded range must reach the next month"
+    assert (YEAR, MONTH) in padded
+
+
+def test_file_keys_cover_the_pad_at_a_year_boundary():
+    """The CESM counterpart: 31 Dec 18:00 needs the following member-year."""
+    from pvtend.tendency import year_keys_for_window, _FILE_KEY_PAD_H
+
+    base = pd.Timestamp("1986-12-31 18:00")
+    assert year_keys_for_window(base, 0, 0) == [1986]
+    padded = year_keys_for_window(base, -_FILE_KEY_PAD_H, _FILE_KEY_PAD_H)
+    assert padded == [1986, 1987]
