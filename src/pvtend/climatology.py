@@ -205,7 +205,16 @@ def load_climatology(
 
     # Direct file
     if clim_path.is_file():
-        return xr.open_dataset(clim_path, chunks=None, engine=engine)
+        ds = xr.open_dataset(clim_path, chunks=None, engine=engine)
+        # The CESM climatology is a single slot-indexed file still carrying CAM
+        # names and the archive's 0…360 longitude. It must be put on the same
+        # footing as the state, because xarray aligns on coordinate *values*:
+        # ``pv − pv_bar`` against a 0…360 bar would go NaN over the western
+        # hemisphere rather than raise.
+        if "slot" in ds.dims:
+            from .tendency import cesm_to_pipeline_names
+            ds = cesm_to_pipeline_names(ds)
+        return ds
 
     # Directory with per-var-per-month files
     parent = clim_path.parent if clim_path.suffix else clim_path

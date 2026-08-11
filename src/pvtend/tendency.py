@@ -348,6 +348,74 @@ _CESM_COORDS = {"time": "valid_time", "lat": "latitude",
                 "lon": "longitude", "plev": "pressure_level"}
 
 
+def cesm_to_pipeline_names(ds: xr.Dataset) -> xr.Dataset:
+    """CAM names/coords → the lowercase, −180…180 convention used downstream.
+
+    Shared by the state reader and the climatology loader. The longitude
+    normalisation is not cosmetic: xarray aligns on coordinate *values*, so a
+    climatology left on the archive's 0…360 axis would only overlap the
+    −180…180 state on its eastern half and ``pv − pv_bar`` would come back NaN
+    over the Americas without raising anything.
+    """
+    ds = ds.rename({k: v for k, v in _CESM_RENAME.items() if k in ds.variables})
+    ds = ds.rename({k: v for k, v in _CESM_COORDS.items()
+                    if k in ds.variables or k in ds.dims})
+    if "longitude" in ds.coords:
+        ds = ds.assign_coords(
+            longitude=((ds.longitude + 180) % 360) - 180).sortby("longitude")
+    return ds
+
+
+def z_divisor(cfg) -> float:
+    """What ``z`` must be divided by to get geopotential height [m].
+
+    ERA5 ships geopotential [m²/s²], so ``H = z/g``. CESM ships ``Z3``, which
+    is already height, so ``H = z``. :class:`grid.GridProfile` has recorded this
+    as ``z_is_height`` since v2.13 but nothing ever read it, and the three
+    ``z / G0`` sites would have made every CESM inversion height 9.8x too small
+    — a base state that is wrong but finite, so the solver converges to it.
+    """
+    return 1.0 if getattr(cfg, "source", "era5") == "cesm" else G0
+
+
+def noleap_slot_scalar(ts) -> int:
+    """:func:`noleap_slot` for a single timestamp."""
+    ts = pd.to_datetime(ts)
+    doy = int(ts.dayofyear) - int(bool(ts.is_leap_year) and ts.month > 2)
+    return (doy - 1) * 4 + int(ts.hour) // 6
+
+
+def noleap_slot(valid_time: xr.DataArray) -> xr.DataArray:
+    """6-hourly climatology slot for a Gregorian axis carrying noleap dates.
+
+    ``slot = (dayofyr − 1)·4 + hour/6`` where ``dayofyr`` counts on the model's
+    **noleap** calendar. The state axis has been converted to Gregorian (see
+    :func:`open_cesm_years_ds`), and Gregorian day-of-year runs one ahead of
+    noleap for every date after February in a leap year — 1 March 1988 is day
+    61 there and day 60 in the model. Left uncorrected the climatology would be
+    fetched a full day late for ten months of every fourth year, quietly, since
+    a neighbouring day's climatology looks perfectly reasonable.
+    """
+    t = valid_time.dt
+    doy = t.dayofyear - ((t.is_leap_year) & (t.month > 2)).astype(int)
+    return ((doy - 1) * 4 + t.hour // 6).rename("slot")
+
+
+def clim_bar(clim_ds: xr.Dataset, var: str, ds: xr.Dataset) -> xr.DataArray:
+    """Climatological field sampled at each timestep of ``ds``.
+
+    Dispatches on the climatology's own layout rather than on a config flag:
+    the ERA5 climatology carries ``month``/``day``/``hour`` as dimensions and
+    is addressed with vectorised ``.sel``; the CESM one is ``(slot, plev, lat,
+    lon)`` and is addressed with vectorised ``.isel`` on the slot index.
+    """
+    if "slot" in clim_ds.dims:
+        return clim_ds[var].isel(slot=noleap_slot(ds.valid_time))
+    return clim_ds[var].sel(month=ds.valid_time.dt.month,
+                            day=ds.valid_time.dt.day,
+                            hour=ds.valid_time.dt.hour)
+
+
 def year_keys_for_window(
     base_ts: pd.Timestamp, hmin: int = -49, hmax: int = 24,
 ) -> list[int]:
@@ -414,9 +482,7 @@ def open_cesm_years_ds(
         )
 
     ds = ds[[v for v in _CESM_RENAME if v in ds.variables]]
-    ds = ds.rename({k: v for k, v in _CESM_RENAME.items() if k in ds.variables})
-    ds = ds.rename({k: v for k, v in _CESM_COORDS.items()
-                    if k in ds.variables or k in ds.dims})
+    ds = cesm_to_pipeline_names(ds)
 
     # noleap CFTimeIndex -> DatetimeIndex; see the docstring for the leap seam.
     idx = ds.indexes.get("valid_time")
@@ -428,10 +494,6 @@ def open_cesm_years_ds(
             except TypeError:                     # xarray < 2025.1
                 new = idx.to_datetimeindex()
         ds = ds.assign_coords(valid_time=new)
-
-    ds = ds.assign_coords(
-        longitude=((ds.longitude + 180) % 360) - 180,
-    ).sortby("longitude")
     return ds
 
 
@@ -1019,15 +1081,8 @@ def with_derivs_for_window(
 
     # --- climatology ---
     CLIM = clim_ds
-    mo = ds.valid_time.dt.month
-    dy = ds.valid_time.dt.day
-    hr = ds.valid_time.dt.hour
-    ds["pv_bar"] = CLIM["pv"].sel(month=mo, day=dy, hour=hr)
-    ds["u_bar"] = CLIM["u"].sel(month=mo, day=dy, hour=hr)
-    ds["v_bar"] = CLIM["v"].sel(month=mo, day=dy, hour=hr)
-    ds["w_bar"] = CLIM["w"].sel(month=mo, day=dy, hour=hr)
-    ds["z_bar"] = CLIM["z"].sel(month=mo, day=dy, hour=hr)
-    ds["t_bar"] = CLIM["t"].sel(month=mo, day=dy, hour=hr)
+    for v in ("pv", "u", "v", "w", "z", "t"):
+        ds[f"{v}_bar"] = clim_bar(CLIM, v, ds)
 
     ds["pv_anom"] = ds["pv"] - ds["pv_bar"]
     ds["u_anom"] = ds["u"] - ds["u_bar"]
@@ -1538,7 +1593,7 @@ class TendencyComputer:
                     cube3d[_key] = np.nan_to_num(
                         cube3d[_key], nan=0.0, posinf=0.0, neginf=0.0)
 
-            z_m_3d = cube3d["z"] / G0
+            z_m_3d = cube3d["z"] / z_divisor(self.cfg)
 
             def vwm(arrL, *, z_m_3d=z_m_3d, wavg_idx=wavg_idx):
                 arr_w = arrL[wavg_idx]
@@ -2020,14 +2075,19 @@ class TendencyComputer:
                     .values.astype(np.float64))
 
         def _mn(var):
-            return (clim_ds[var].sel(month=mo, day=dy, hour=hr)
-                    .sel({cplev: WU_PLEVS})
+            # Same layout dispatch as `clim_bar`, on a single timestamp.
+            if "slot" in clim_ds.dims:
+                base = clim_ds[var].isel(slot=noleap_slot_scalar(ts))
+            else:
+                base = clim_ds[var].sel(month=mo, day=dy, hour=hr)
+            return (base.sel({cplev: WU_PLEVS})
                     .isel(latitude=band_idx, longitude=lon_idx_inv)
                     .values.astype(np.float64))
 
         z_e, t_e, u_e, v_e = _ev("z"), _ev("t"), _ev("u"), _ev("v")
         z_m, t_m, u_m, v_m = _mn("z"), _mn("t"), _mn("u"), _mn("v")
-        H_e, H_m = z_e / G0, z_m / G0
+        _zd = z_divisor(self.cfg)
+        H_e, H_m = z_e / _zd, z_m / _zd
 
         # ── Run the Wu piecewise inversion ──
         res = invert_piecewise(
@@ -2097,7 +2157,7 @@ class TendencyComputer:
         resid_v = obs_v[wu_pos] - sum_v
 
         # ── Weighted vertical average → 2-D (over wavg_levels) ──
-        z_patch = _crop(z_e) / G0   # geopotential height [m], event
+        z_patch = _crop(z_e) / z_divisor(self.cfg)   # geopotential height [m]
         zw = z_patch[wu_wavg_idx]
         wt = np.exp(-zw / H_SCALE)
         den = np.nansum(wt, axis=0)
