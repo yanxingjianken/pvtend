@@ -821,19 +821,44 @@ def with_derivs_for_window(
                         month_keys, engine=cfg.engine)
 
     # --- Restrict to the needed time window before any heavy compute ---
-    # Only ``rel_hours`` around ``base_ts`` are ever written, yet the monthly
-    # files hold ~744 hourly steps. Loading/deriving/Helmholtz-decomposing the
-    # whole month costs ~30× the memory (≈19 GB → <1 GB RSS) and compute. A
+    # Only ``rel_hours`` around ``base_ts`` are ever written, yet the source
+    # files hold a whole month (or year). Loading/deriving/Helmholtz-decomposing
+    # all of it costs ~30× the memory (≈19 GB → <1 GB RSS) and compute. A
     # ±EDGE_PAD_H pad keeps the centred time-derivative (np.gradient) at the
-    # extreme ``dh`` values bit-identical to the full-month result, since those
-    # output steps lie strictly inside the padded slice and use only their
-    # immediate hourly neighbours.
-    EDGE_PAD_H = 3
+    # extreme ``dh`` values bit-identical to the full-window result, since those
+    # output steps then lie strictly inside the padded slice and use only their
+    # immediate neighbours.
+    #
+    # The pad is derived from the data's own cadence rather than fixed. It used
+    # to be a hardcoded 3 h, which silently assumed hourly ERA5: on 6-hourly
+    # CESM a ``--dh-range 0:1:1`` request sliced [t−3 h, t+3 h], which contains
+    # exactly ONE timestep, so the centred difference had no neighbours and the
+    # tendency LHS was destroyed with nothing raised. Two steps of pad — one for
+    # the gradient stencil, one of slack so an inclusive-endpoint slice cannot
+    # land a needed step exactly on the boundary.
+    ds = ds.sortby("valid_time")
+    t_axis = np.asarray(ds.valid_time.values)
+    dt_h = 1.0
+    if t_axis.size > 1:
+        dt_h = float(np.median(np.diff(t_axis).astype("timedelta64[m]")
+                               .astype(np.float64)) / 60.0)
+    EDGE_PAD_H = max(3.0, 2.0 * dt_h)
     t_lo = (pd.to_datetime(base_ts)
-            + pd.Timedelta(hours=int(min(cfg.rel_hours)) - EDGE_PAD_H))
+            + pd.Timedelta(hours=float(min(cfg.rel_hours)) - EDGE_PAD_H))
     t_hi = (pd.to_datetime(base_ts)
-            + pd.Timedelta(hours=int(max(cfg.rel_hours)) + EDGE_PAD_H))
-    ds = ds.sortby("valid_time").sel(valid_time=slice(t_lo, t_hi))
+            + pd.Timedelta(hours=float(max(cfg.rel_hours)) + EDGE_PAD_H))
+    ds = ds.sel(valid_time=slice(t_lo, t_hi))
+
+    # A centred difference needs three points. Fewer means the window missed the
+    # data (wrong month opened, event at the very start/end of the record), and
+    # every tendency downstream would be silently one-sided or NaN.
+    n_t = int(ds.sizes["valid_time"])
+    if n_t < 3:
+        raise ValueError(
+            f"time window [{t_lo}, {t_hi}] around {base_ts} holds {n_t} "
+            f"timestep(s) at Δt={dt_h:g} h; the centred time derivative needs "
+            f"at least 3. Check that the source files cover the window."
+        )
 
     # --- lat metrics & Coriolis ---
     ds["latitude_rad"] = np.deg2rad(ds.latitude)
