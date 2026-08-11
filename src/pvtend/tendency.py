@@ -2307,7 +2307,7 @@ class TendencyComputer:
     # ── output path ────────────────────────────────────────────────
 
     def _out_path(
-        self, evt: str, dh: int, track_id: int, ts: pd.Timestamp,
+        self, evt: str, dh: int, track_id: int | str, ts: pd.Timestamp,
     ) -> Path:
         """Compute the output NPZ file path."""
         return (

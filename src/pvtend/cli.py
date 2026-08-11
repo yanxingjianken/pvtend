@@ -700,7 +700,18 @@ def _load_event_args(events_csv: Path, year_range, stages):
     event_args = []
     for idx, row in events_df.iterrows():
         evt_name = str(row.get("evt_name", row.get("stage", "onset")))
-        track_id = int(row.get("track_id", idx))
+        # track_id only has to name the NPZ uniquely within the output tree, and
+        # `_out_path` interpolates it into an f-string, so a non-numeric id is
+        # fine. The unconditional int() broke the CESM catalogue: track_id
+        # restarts at 1 in every member there, so the event CSVs carry
+        # "m091_t00002" to stop the ten members colliding in a shared output
+        # directory. Numeric ids still become ints, so ERA5 filenames are
+        # unchanged.
+        raw_tid = row.get("track_id", idx)
+        try:
+            track_id = int(raw_tid)
+        except (TypeError, ValueError):
+            track_id = str(raw_tid)
         lat0 = float(row["lat0"])
         lon0 = float(row["lon0"])
         base_ts = pd.Timestamp(str(row.get("base_ts",
