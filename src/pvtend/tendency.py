@@ -226,8 +226,16 @@ def load_climatology(
             "ignore", message=".*separate the stored chunks.*")
         if clim_path.is_file():
             _log(f"Loading climatology from single file: {clim_path}")
-            return xr.open_dataset(clim_path, chunks=chunks, engine=engine,
-                                   lock=False)
+            ds = xr.open_dataset(clim_path, chunks=chunks, engine=engine,
+                                 lock=False)
+            # The CESM climatology is a single slot-indexed file still carrying
+            # CAM names and the archive's 0…360 longitude. It has to be put on
+            # the same footing as the state: `clim_bar` looks up "pv", and
+            # xarray aligns on coordinate *values*, so a bar left on 0…360
+            # would make `pv − pv_bar` NaN over the western hemisphere.
+            if "slot" in ds.dims:
+                ds = cesm_to_pipeline_names(ds)
+            return ds
 
         parent = clim_path.parent
         stem = clim_path.stem.replace("_allvars", "")
