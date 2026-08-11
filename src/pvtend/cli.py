@@ -69,8 +69,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="CSV with columns: evt_name, track_id, lat0, lon0, base_ts.",
     )
     compute.add_argument(
+        "--source", choices=["era5", "cesm"], default="era5",
+        help="Input dataset family (default: era5). 'cesm' reads the "
+             "CESM2-LENS2 member-year archive and needs --member.",
+    )
+    compute.add_argument(
+        "--member", type=int, default=None,
+        help="LENS2 member number (91-100 for the 6-hourly smbb set). "
+             "Required with --source cesm: the member selects the file and "
+             "cannot be inferred from the event row, which is why the event "
+             "CSVs are written one per member.",
+    )
+    compute.add_argument(
         "--era5-dir", required=True, type=Path,
-        help="Directory with ERA5 monthly NetCDF files.",
+        help="Directory with the input NetCDF files (ERA5 monthly, or the "
+             "CESM member-year archive when --source cesm).",
     )
     compute.add_argument(
         "--clim-path", required=True, type=Path,
@@ -141,8 +154,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="CSV with columns: evt_name, track_id, lat0, lon0, base_ts.",
     )
     ppvi.add_argument(
+        "--source", choices=["era5", "cesm"], default="era5",
+        help="Input dataset family (default: era5). 'cesm' reads the "
+             "CESM2-LENS2 member-year archive and needs --member.",
+    )
+    ppvi.add_argument(
+        "--member", type=int, default=None,
+        help="LENS2 member number (91-100 for the 6-hourly smbb set). "
+             "Required with --source cesm: the member selects the file and "
+             "cannot be inferred from the event row, which is why the event "
+             "CSVs are written one per member.",
+    )
+    ppvi.add_argument(
         "--era5-dir", required=True, type=Path,
-        help="Directory with ERA5 monthly NetCDF files.",
+        help="Directory with the input NetCDF files (ERA5 monthly, or the "
+             "CESM member-year archive when --source cesm).",
     )
     ppvi.add_argument(
         "--clim-path", required=True, type=Path,
@@ -691,9 +717,19 @@ def _cmd_compute(args: argparse.Namespace) -> None:
 
     qg = args.qg_method
 
+    if args.source == "cesm" and args.member is None:
+        raise SystemExit(
+            "--source cesm requires --member: the member selects which "
+            "lens2_smbb_m{member}_{year}_plev.nc to read and cannot be "
+            "inferred from the event rows.")
+    if args.source != "cesm" and args.member is not None:
+        raise SystemExit("--member only applies to --source cesm")
+
     config = TendencyConfig(
         event_type=args.event_type,
         data_dir=args.era5_dir,
+        source=args.source,
+        member=args.member,
         clim_path=args.clim_path,
         output_dir=args.out_dir,
         csv_path=args.events_csv,
@@ -755,9 +791,19 @@ def _cmd_ppvi(args: argparse.Namespace) -> None:
 
     dh_values = _parse_dh_range(args.dh_range)
 
+    if args.source == "cesm" and args.member is None:
+        raise SystemExit(
+            "--source cesm requires --member: the member selects which "
+            "lens2_smbb_m{member}_{year}_plev.nc to read and cannot be "
+            "inferred from the event rows.")
+    if args.source != "cesm" and args.member is not None:
+        raise SystemExit("--member only applies to --source cesm")
+
     config = TendencyConfig(
         event_type=args.event_type,
         data_dir=args.era5_dir,
+        source=args.source,
+        member=args.member,
         clim_path=args.clim_path,
         output_dir=args.out_dir,
         csv_path=args.events_csv,
