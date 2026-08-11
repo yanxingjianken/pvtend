@@ -176,6 +176,12 @@ class TendencyConfig:
     lat_half: float = LAT_HALF
     lon_half: float = LON_HALF
     partial_at_pole: bool = True
+    #: Input dataset family: ``"era5"`` (per-variable monthly files, hourly,
+    #: Gregorian) or ``"cesm"`` (per-member-year files, 6-hourly, noleap).
+    source: str = "era5"
+    #: LENS2 member number; required when ``source == "cesm"``, since the
+    #: member selects the file and cannot be inferred from the event row.
+    member: int | None = None
     qg_omega_method: str = "log20"
     center_mode: str = "eulerian"
     skip_existing: bool = True
@@ -330,6 +336,118 @@ def open_months_ds(
         longitude=((ds.longitude + 180) % 360) - 180,
     ).sortby("longitude")
     return ds
+
+
+# ============================================================================
+#  CESM2-LENS2 reader
+# ============================================================================
+#: CESM archive name -> the lowercase name the rest of the pipeline uses.
+_CESM_RENAME = {"U": "u", "V": "v", "OMEGA": "w", "PV": "pv",
+                "Z3": "z", "T": "t", "Q": "q"}
+_CESM_COORDS = {"time": "valid_time", "lat": "latitude",
+                "lon": "longitude", "plev": "pressure_level"}
+
+
+def year_keys_for_window(
+    base_ts: pd.Timestamp, hmin: int = -49, hmax: int = 24,
+) -> list[int]:
+    """Years whose CESM member-year files are needed for the time window."""
+    t0 = pd.to_datetime(base_ts) + pd.Timedelta(hours=hmin)
+    t1 = pd.to_datetime(base_ts) + pd.Timedelta(hours=hmax)
+    return list(range(int(t0.year), int(t1.year) + 1))
+
+
+def open_cesm_years_ds(
+    data_dir: Path, member: int, year_keys: list[int],
+    engine: str = "netcdf4", chunks=None,
+) -> xr.Dataset:
+    """Open CESM2-LENS2 member-year files as one ERA5-shaped dataset.
+
+    The archive differs from ERA5 in every surface detail: one file per
+    (member, year) holding **all** variables rather than one per (variable,
+    month); upper-case CAM names; ``time``/``lat``/``lon``/``plev`` instead of
+    ``valid_time``/``latitude``/``longitude``/``pressure_level``; and a
+    **noleap** calendar, which xarray decodes to ``CFTimeIndex`` rather than a
+    ``DatetimeIndex``.
+
+    Everything downstream of the reader is pandas-based (``pd.Timestamp`` /
+    ``pd.Timedelta`` arithmetic, ``.dt`` accessors), so the calendar is
+    converted here. That conversion is exact per timestamp — noleap dates all
+    exist in the proleptic Gregorian calendar — but it leaves a **48 h gap
+    across 28 February in leap years**, because the model has no 29 February
+    and the converted axis therefore jumps 28 Feb 18:00 -> 1 Mar 00:00.
+    ``xr.DataArray.differentiate`` uses the coordinate's own spacing, so a
+    window straddling that seam would take a 6-hourly tendency over a 30 h
+    interval. ``_open_window`` rejects such windows on the uniformity check
+    rather than returning a quietly wrong LHS; it costs ~0.06 % of the
+    catalogue (7 leap years x 10 members x ~1 day in 365).
+
+    Args:
+        data_dir: Directory of ``lens2_smbb_m{member}_{year}_plev.nc``.
+        member: LENS2 member number (91-100 for the 6-hourly smbb set).
+        year_keys: Years to open, from :func:`year_keys_for_window`.
+        engine: NetCDF engine.
+        chunks: As :func:`open_months_ds` — ``None`` loads eagerly, a dask
+            chunk spec opens lazily for the low-RSS PPVI path.
+
+    Returns:
+        Dataset with ``u, v, w, pv, z, t, q`` on ``valid_time``,
+        ``pressure_level``, ``latitude``, ``longitude``, longitude normalised
+        to −180…180 and sorted, matching :func:`open_months_ds`.
+
+    Raises:
+        FileNotFoundError: If no member-year file exists for the window.
+    """
+    data_dir = Path(data_dir)
+    fns = [str(data_dir / f"lens2_smbb_m{member}_{y}_plev.nc")
+           for y in year_keys
+           if (data_dir / f"lens2_smbb_m{member}_{y}_plev.nc").exists()]
+    if not fns:
+        raise FileNotFoundError(
+            f"No CESM files for member {member}, years {year_keys} in {data_dir}")
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*separate the stored chunks.*")
+        ds = xr.open_mfdataset(
+            fns, combine="by_coords", parallel=False,
+            chunks=chunks, engine=engine, lock=False,
+        )
+
+    ds = ds[[v for v in _CESM_RENAME if v in ds.variables]]
+    ds = ds.rename({k: v for k, v in _CESM_RENAME.items() if k in ds.variables})
+    ds = ds.rename({k: v for k, v in _CESM_COORDS.items()
+                    if k in ds.variables or k in ds.dims})
+
+    # noleap CFTimeIndex -> DatetimeIndex; see the docstring for the leap seam.
+    idx = ds.indexes.get("valid_time")
+    if isinstance(idx, xr.CFTimeIndex):
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*non-standard calendar.*")
+            try:
+                new = idx.to_datetimeindex(time_unit="ns")
+            except TypeError:                     # xarray < 2025.1
+                new = idx.to_datetimeindex()
+        ds = ds.assign_coords(valid_time=new)
+
+    ds = ds.assign_coords(
+        longitude=((ds.longitude + 180) % 360) - 180,
+    ).sortby("longitude")
+    return ds
+
+
+def open_source_ds(cfg, base_ts: pd.Timestamp, chunks=None) -> xr.Dataset:
+    """Open the time window for whichever source ``cfg.source`` names."""
+    if getattr(cfg, "source", "era5") == "cesm":
+        if getattr(cfg, "member", None) is None:
+            raise ValueError("source='cesm' needs cfg.member (LENS2 member number)")
+        return open_cesm_years_ds(
+            cfg.data_dir, int(cfg.member),
+            year_keys_for_window(base_ts, cfg.rel_hours[0], cfg.rel_hours[-1]),
+            engine=cfg.engine, chunks=chunks)
+    return open_months_ds(
+        cfg.data_dir, ["u", "v", "w", "pv", "z", "t", "q"],
+        month_keys_for_window(base_ts, cfg.rel_hours[0], cfg.rel_hours[-1]),
+        engine=cfg.engine, chunks=chunks)
 
 
 # ============================================================================
@@ -815,10 +933,7 @@ def with_derivs_for_window(
     Returns:
         xr.Dataset with all original + derived fields on the ERA5 grid.
     """
-    month_keys = month_keys_for_window(
-        base_ts, hmin=cfg.rel_hours[0], hmax=cfg.rel_hours[-1])
-    ds = open_months_ds(cfg.data_dir, ["u", "v", "w", "pv", "z", "t", "q"],
-                        month_keys, engine=cfg.engine)
+    ds = open_source_ds(cfg, base_ts)
 
     # --- Restrict to the needed time window before any heavy compute ---
     # Only ``rel_hours`` around ``base_ts`` are ever written, yet the source
@@ -858,6 +973,41 @@ def with_derivs_for_window(
             f"time window [{t_lo}, {t_hi}] around {base_ts} holds {n_t} "
             f"timestep(s) at Δt={dt_h:g} h; the centred time derivative needs "
             f"at least 3. Check that the source files cover the window."
+        )
+
+    # Every requested ``dh`` must have a neighbour on BOTH sides, or its
+    # centred difference quietly degrades to a one-sided one. Checking the
+    # window's endpoints rather than its length is what catches the CESM leap
+    # seam: for an event at 28 Feb 18:00 the slice bound ``base + 12 h`` is
+    # 29 February, a date the noleap model never wrote, so the slice simply
+    # stops at 28 Feb 18:00 — three uniformly spaced steps with ``dh=0`` sitting
+    # on the last one. Nothing about the returned axis looks wrong.
+    t_win = np.asarray(ds.valid_time.values)
+    need_lo = (pd.to_datetime(base_ts)
+               + pd.Timedelta(hours=float(min(cfg.rel_hours)) - dt_h))
+    need_hi = (pd.to_datetime(base_ts)
+               + pd.Timedelta(hours=float(max(cfg.rel_hours)) + dt_h))
+    have_lo, have_hi = pd.Timestamp(t_win[0]), pd.Timestamp(t_win[-1])
+    if have_lo > need_lo or have_hi < need_hi:
+        raise ValueError(
+            f"time window around {base_ts} does not bracket every requested dh: "
+            f"have [{have_lo}, {have_hi}], need [{need_lo}, {need_hi}] at "
+            f"Δt={dt_h:g} h. Either the event sits at the edge of the record, "
+            f"or (on CESM) the window runs into the 29 February that the noleap "
+            f"calendar does not have."
+        )
+
+    # A gap *inside* the window is the same problem one step further in: the
+    # derivative uses the coordinate's own spacing, so it would be taken over
+    # the wrong interval. On CESM the converted noleap axis jumps 30 h from
+    # 28 Feb 18:00 to 1 Mar 00:00, which a wide ``dh-range`` can span entirely.
+    step_h = np.diff(t_win).astype("timedelta64[m]").astype(np.float64) / 60.0
+    if step_h.size and not np.allclose(step_h, step_h[0], rtol=1e-6, atol=1e-6):
+        bad = int(np.argmax(np.abs(step_h - np.median(step_h))))
+        raise ValueError(
+            f"non-uniform time axis in the window around {base_ts}: step {bad} "
+            f"({pd.Timestamp(t_win[bad])} -> {pd.Timestamp(t_win[bad + 1])}) is "
+            f"{step_h[bad]:g} h against a median of {np.median(step_h):g} h."
         )
 
     # --- lat metrics & Coriolis ---
