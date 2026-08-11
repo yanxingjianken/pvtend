@@ -107,29 +107,54 @@ def parity_mirror(
     * ``"v"`` / ``"odd"``: field is **odd**, ``F(-φ, λ) = -F(φ, λ)``;
       the equator row is set to zero.
 
+    Two NH layouts are accepted, told apart by where the first row sits:
+
+    * **pole-centred** — a row lies *on* the equator (``lat[0] ≈ 0``), as on
+      the ERA5 0.25° grid. That row is shared between the hemispheres, so the
+      mirrored grid has ``2·nlat_nh − 1`` rows and odd fields are forced to
+      zero there.
+    * **cell-centred** — the first row sits half a spacing north of the
+      equator (``lat[0] ≈ Δlat/2``), as on CESM f09, whose 192 rows straddle
+      the equator at ±0.4712° with no row on it. Nothing is shared, so the
+      mirrored grid has ``2·nlat_nh`` rows and there is no equator row to
+      zero. For f09 this reproduces the parent global grid exactly
+      (192 rows, −90…90, Δ = 180/191).
+
     Args:
         field: Array with latitude on axis ``-2`` and longitude on
-            axis ``-1``. Latitudes must run from the equator (≈0) to
-            the north pole (90).
-        lat: Latitudes in degrees, ascending, ``lat[0] ≈ 0``,
-            ``lat[-1] ≈ 90``.
+            axis ``-1``. Latitudes must run from the equator to the
+            north pole (90).
+        lat: Latitudes in degrees, ascending, ``lat[-1] ≈ 90`` and
+            ``lat[0]`` either ``≈ 0`` or ``≈ Δlat/2``.
         kind: Parity tag; one of ``"scalar"``, ``"u"``, ``"v"``,
             ``"odd"``.
 
     Returns:
-        Tuple ``(field_global, lat_global)`` where ``field_global``
-        has latitude axis length ``2 * nlat_nh - 1`` and
-        ``lat_global`` runs from −lat[-1] to +lat[-1].
+        Tuple ``(field_global, lat_global)`` where ``lat_global`` runs
+        from −lat[-1] to +lat[-1], with ``2·nlat_nh − 1`` rows on a
+        pole-centred grid and ``2·nlat_nh`` on a cell-centred one.
+
+    Raises:
+        ValueError: If ``lat[0]`` is neither ≈0 nor ≈Δlat/2 — a band that
+            starts well north of the equator is not a hemisphere and cannot
+            be mirrored into a sphere.
     """
     lat = np.asarray(lat, dtype=float).ravel()
-    if abs(lat[0]) > 1e-3:
-        raise ValueError(
-            f"parity_mirror expects lat[0] ≈ 0; got {lat[0]:.4f}"
-        )
     nlat_nh = lat.size
-    # Mirror: drop equator row when concatenating (kept once, in NH).
-    south_lat = -lat[1:][::-1]                      # (nlat_nh-1,)
-    lat_global = np.concatenate([south_lat, lat])   # (2*nlat_nh-1,)
+    dlat = abs(float(lat[1] - lat[0])) if nlat_nh > 1 else 0.0
+    tol = max(1e-3, 1e-3 * dlat)
+
+    if abs(lat[0]) <= tol:
+        staggered = False
+    elif abs(abs(lat[0]) - 0.5 * dlat) <= tol:
+        staggered = True
+    else:
+        raise ValueError(
+            f"parity_mirror expects lat[0] ≈ 0 (pole-centred) or ≈ Δlat/2 "
+            f"(cell-centred); got lat[0]={lat[0]:.4f} with Δlat={dlat:.4f}. "
+            f"A band that starts well north of the equator is not a "
+            f"hemisphere and cannot be mirrored into a sphere."
+        )
 
     if kind in ("scalar", "u"):
         sign = 1.0
@@ -138,13 +163,20 @@ def parity_mirror(
     else:
         raise ValueError(f"Unknown parity kind: {kind!r}")
 
-    south = sign * field[..., 1:, :][..., ::-1, :]   # mirror across equator
+    if staggered:
+        # Nothing is shared: every NH row has a distinct southern image.
+        lat_global = np.concatenate([-lat[::-1], lat])      # (2*nlat_nh,)
+        south = sign * field[..., ::-1, :]
+    else:
+        # The equator row is kept once, in the NH half.
+        lat_global = np.concatenate([-lat[1:][::-1], lat])  # (2*nlat_nh-1,)
+        south = sign * field[..., 1:, :][..., ::-1, :]
+
     field_global = np.concatenate([south, field], axis=-2)
 
-    if sign == -1.0:
+    if sign == -1.0 and not staggered:
         # Force exact zero at the equator for odd fields (continuity).
-        eq_idx = nlat_nh - 1                         # equator row in global
-        field_global[..., eq_idx, :] = 0.0
+        field_global[..., nlat_nh - 1, :] = 0.0
 
     return field_global, lat_global
 
@@ -161,11 +193,21 @@ def restrict_to_nh(
         lat_global: Latitudes in degrees, ascending.
 
     Returns:
-        Tuple ``(field_nh, lat_nh)`` containing the equator and points
-        north of it.
+        Tuple ``(field_nh, lat_nh)`` containing the equator (if a row
+        lies on it) and every point north of it.
+
+    Note:
+        Selects on the *sign* of the latitude rather than on
+        ``argmin(|lat|)``. On a cell-centred grid the two rows nearest the
+        equator are equidistant (CESM f09: ±0.4712°), and ``argmin`` returns
+        the first of the tie — the **southern** one — which would prepend a
+        Southern-Hemisphere row to the result.
     """
     lat_global = np.asarray(lat_global, dtype=float).ravel()
-    eq_idx = int(np.argmin(np.abs(lat_global)))
+    nh = np.nonzero(lat_global >= -1e-6)[0]
+    if nh.size == 0:
+        raise ValueError("lat_global has no Northern-Hemisphere rows")
+    eq_idx = int(nh[0])
     return field_global[..., eq_idx:, :], lat_global[eq_idx:]
 
 

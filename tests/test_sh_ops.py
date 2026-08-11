@@ -13,6 +13,7 @@ from pvtend.sh_ops import (
     helmholtz_sh,
     second_derivs_sh,
     parity_mirror,
+    restrict_to_nh,
     is_nh_grid,
 )
 
@@ -108,3 +109,54 @@ def test_is_nh_grid():
     lat_global = np.linspace(-90, 90, 73)
     assert is_nh_grid(lat_nh)
     assert not is_nh_grid(lat_global)
+
+
+# --- cell-centred (staggered) NH grids, e.g. CESM f09 -----------------------
+# f09 has 192 latitude rows spanning -90..90, so the two rows nearest the
+# equator straddle it at +-0.4712 deg and NO row lies on it.
+
+F09_LAT_GLOBAL = -90.0 + np.arange(192) * (180.0 / 191.0)
+F09_LAT_NH = F09_LAT_GLOBAL[F09_LAT_GLOBAL > 0]          # 96 rows, 0.4712..90
+
+
+def test_parity_mirror_cell_centred_reconstructs_parent_grid():
+    """Mirroring the f09 NH half must reproduce the f09 global grid exactly."""
+    f_nh = np.zeros((F09_LAT_NH.size, 8))
+    _, lat_glob = parity_mirror(f_nh, F09_LAT_NH, kind="u")
+    assert lat_glob.size == 2 * F09_LAT_NH.size == 192     # nothing shared
+    assert np.allclose(lat_glob, F09_LAT_GLOBAL)
+
+
+def test_parity_mirror_cell_centred_roundtrip_is_lossless():
+    """With no equator row there is nothing to overwrite, so v survives intact.
+
+    On a pole-centred grid the odd-parity branch zeroes the equator row, so the
+    round trip loses that row; a cell-centred grid has no such row.
+    """
+    rng = np.random.default_rng(3)
+    for kind in ("u", "v"):
+        f_nh = rng.standard_normal((F09_LAT_NH.size, 8))
+        f_glob, lat_glob = parity_mirror(f_nh, F09_LAT_NH, kind=kind)
+        sign = 1.0 if kind == "u" else -1.0
+        n = F09_LAT_NH.size
+        for j in range(n):                                  # mirror symmetry
+            assert np.allclose(f_glob[n - 1 - j], sign * f_glob[n + j])
+        f_back, lat_back = restrict_to_nh(f_glob, lat_glob)
+        assert np.allclose(lat_back, F09_LAT_NH)
+        assert np.allclose(f_back, f_nh)
+
+
+def test_restrict_to_nh_does_not_return_a_southern_row():
+    """``argmin(|lat|)`` would pick the southern member of the +-0.4712 tie."""
+    f_glob = np.arange(192 * 4, dtype=float).reshape(192, 4)
+    f_nh, lat_nh = restrict_to_nh(f_glob, F09_LAT_GLOBAL)
+    assert lat_nh.size == 96
+    assert lat_nh.min() > 0.0
+    assert np.allclose(f_nh, f_glob[96:])
+
+
+def test_parity_mirror_rejects_a_midlatitude_band():
+    """A band starting well north of the equator is not a hemisphere."""
+    lat_band = np.linspace(10.5, 85.5, 80)
+    with pytest.raises(ValueError, match="cell-centred"):
+        parity_mirror(np.zeros((80, 8)), lat_band, kind="u")
