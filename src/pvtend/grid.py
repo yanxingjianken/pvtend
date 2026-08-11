@@ -130,7 +130,8 @@ ERA5_1P5_NH = GridProfile(
 #: CESM2-LENS2 f09 global profile (192×288, anisotropic; z is height [m]).
 CESM_F09 = GridProfile(
     name="CESM_F09", nlat=192, nlon=288, lat_south=-90.0, lat_north=90.0,
-    dlat=180.0 / 191.0, dlon=1.25, lon_west=0.0, lat_half=30.0, lon_half=45.0,
+    dlat=180.0 / 191.0, dlon=1.25, lon_west=0.0,
+    lat_half=LAT_HALF, lon_half=LON_HALF,
     z_is_height=True,
 )
 
