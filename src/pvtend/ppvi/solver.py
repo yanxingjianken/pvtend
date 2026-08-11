@@ -166,6 +166,8 @@ def invert_piecewise(
     V_event: np.ndarray,
     zhdr: np.ndarray,
     pieces: dict[str, list[int]] | None = None,
+    qp_anoms: dict[str, np.ndarray] | None = None,
+    th_anoms: dict[str, np.ndarray] | None = None,
     fill_nan: bool = True,
     pab: PassABParams | None = None,
     pc: PassCParams | None = None,
@@ -184,6 +186,36 @@ def invert_piecewise(
             Fortran's ``HDR(5)=Δlon, HDR(6)=Δlat`` convention.
         pieces: Mapping name → 1-based Wu level list. Defaults to
             :data:`PIECES`.
+        qp_anoms: Optional mapping name → ``(NL, NY, NX)`` PV **anomaly** to use
+            for that piece instead of ``Q_event - Q_mean``::
+
+                QPIN_piece = QBIN + qp_anoms[name]
+
+            The base state is untouched, so this partitions the anomaly
+            horizontally (or spectrally) instead of by level.  Pass D is linear
+            in the PV source, so arrays that sum to the full anomaly give pieces
+            that sum exactly to the unmasked result -- which is what makes a
+            scale split (planetary vs eddy) a legitimate piecewise inversion
+            rather than an approximation.
+
+            An additive override rather than a multiplicative mask on purpose:
+            a spectral split needs ``q'_p = filter(q')`` inside an object mask,
+            and recovering that as a multiplicative weight would need
+            ``filter(q')/q'``, which is unbounded wherever ``q'`` is small.
+
+            Names not present here fall back to the unmasked ``QPIN``.
+        th_anoms: Optional mapping name → ``(NY, NX, 2)`` boundary-θ **anomaly**
+            (``[..., 0]`` bottom, ``[..., 1]`` top) to use for that piece::
+
+                THPIN_piece = THBIN + th_anoms[name]
+
+            The counterpart of `qp_anoms` for the boundary pieces.  ``qp_anoms``
+            cannot reach them: K=1 and K=NL are driven by ``THPIN``, not
+            ``QPIN``, so masking the PV array leaves the boundary-θ source
+            untouched.  Splitting a boundary piece by the same 3-D object mask
+            (its slice at that boundary level) needs this.
+
+            Names not present here fall back to the unmasked ``THPIN``.
         fill_nan: If True (default), hydrostatically gap-fill below-ground NaN
             in the input cubes via :func:`fill_below_ground` before inverting
             (required for terrain-following model data such as CESM f09; a
@@ -277,18 +309,51 @@ def invert_piecewise(
         np.stack([np.asarray(thb_m), np.asarray(tht_m)], axis=2),
         dtype=np.float32)
     THPIN = THTIN                                   # reuse event θ stack
-    zhdr_d = zhdr8                                  # pass D uses 8-elt header
+    # Pass D needs the SAME Fortran convention as passes A/B/C: qinvertp's BALP
+    # reads ZHDR(5) as dlon and ZHDR(6) as dlat (SIGM=ZHDR(5)/ZHDR(6),
+    # LL=AA*ZHDR(5), and the row latitudes as ZHDR(3)-(I-1)*ZHDR(6)).  Handing it
+    # the unswapped public header is a no-op on an isotropic grid but wrong on an
+    # anisotropic one: on CESM f09 (0.9424 x 1.25) pass D laid its 80 rows out at
+    # 1.25 deg spacing, spanning 98.75 deg from 85.29 N down past the equator to
+    # -13.5 N, so the Coriolis parameter changed sign inside the box.  Measured
+    # effect: RMS(sum of pieces)/RMS(observed u'_rot) = 1.43-1.66 on CESM against
+    # 0.99 on ERA5 and JRA-3Q, which are isotropic and therefore unaffected.
+    zhdr_d = zhdr10[:8]                             # pass D uses 8-elt header
 
     psi_pieces: dict[str, np.ndarray] = {}
     H_pieces: dict[str, np.ndarray] = {}
     SP_pieces: dict[str, np.ndarray] = {}
     HP_pieces: dict[str, np.ndarray] = {}
+    qp_anoms = qp_anoms or {}
+    th_anoms = th_anoms or {}
     for name, levels in pieces.items():
         nmlv = len(levels)
         qlv = np.zeros(NL, dtype=np.int32)
         qlv[:nmlv] = levels
+        if name in qp_anoms:
+            a = np.asarray(qp_anoms[name], dtype=np.float64)
+            # accept the (NL, NY, NX) layout every other array in this API uses;
+            # QPIN itself is the Fortran (NY, NX, NL) order
+            if a.shape == QPIN.shape[::-1] or a.shape == (QPIN.shape[2],) + QPIN.shape[:2]:
+                a = _to_core(a)
+            elif a.shape != QPIN.shape:
+                raise ValueError(
+                    f"qp_anoms['{name}'] has shape {a.shape}; expected "
+                    f"{(QPIN.shape[2],) + QPIN.shape[:2]} (NL,NY,NX) or {QPIN.shape} (NY,NX,NL)")
+            QP_use = np.asfortranarray(QBIN + np.asarray(a, dtype=np.float32),
+                                       dtype=np.float32)
+        else:
+            QP_use = QPIN
+        if name in th_anoms:
+            t = np.asarray(th_anoms[name], dtype=np.float32)
+            if t.shape != THPIN.shape:
+                raise ValueError(
+                    f"th_anoms['{name}'] has shape {t.shape}, expected {THPIN.shape}")
+            TH_use = np.asfortranarray(THBIN + t, dtype=np.float32)
+        else:
+            TH_use = THPIN
         HPOUT, SPOUT = ext.qinvertp_core(
-            MBIN, SBIN, H_bal, SI_bal, QBIN, QPIN, THBIN, THPIN,
+            MBIN, SBIN, H_bal, SI_bal, QBIN, QP_use, THBIN, TH_use,
             zhdr_d, PR, qlv, int(nmlv),
             np.float32(pd.omegs), np.float32(pd.omegah), np.float32(pd.part),
             np.float32(pd.thrsh), np.float32(pd.tscal), np.float32(pd.qscal),

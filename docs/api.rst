@@ -88,6 +88,7 @@ identities on band-limited inputs.
 .. autosummary::
    :toctree: generated/
 
+   gridtype_for
    gradient_sh
    laplacian_sh
    invert_laplacian_sh

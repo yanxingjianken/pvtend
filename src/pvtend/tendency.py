@@ -1752,6 +1752,13 @@ class TendencyComputer:
     # Fixed Wu inversion conventions. 9 levels 1000→100 hPa (matches the npz
     # ``levels`` and the audited per-level PPVI); index 0 = 1000 hPa bottom-θ,
     # index 8 = 100 hPa top-θ, 1..7 = interior PV.
+    # 9-level Wu grid.  NL is a recompile-time PARAMETER in wuppvi.f and this
+    # list MUST match solver.PR -- they are edited together or pass D silently
+    # mismatches.  NL=20 was tried on 2026-08-10 and is BROKEN in this port:
+    # the f2py build uses -frecursive (stack locals, no zero-init) whereas the
+    # original relied on -fno-automatic static zero-init, and only 7 of ~35
+    # local arrays in BALP are explicitly zeroed.  At NL=9 the leftover stack
+    # happens to be harmless; at NL=20 pass D returns ~95 % NaN.
     _WU_PLEVS = [1000, 850, 700, 500, 400, 300, 250, 200, 100]
     _WU2SI = 1.0e-8          # Wu pseudo-PV → SI Ertel PV
     _WU_MI = 9999.90         # Wu missing-value sentinel

@@ -204,14 +204,34 @@ def _revert_orientation(field_ns: np.ndarray, was_ascending: bool) -> np.ndarray
 _SPHARMT_CACHE: dict = {}
 
 
-def _get_spharmt(nlon: int, nlat: int, rsphere: float) -> "Spharmt":
+def gridtype_for(lat: np.ndarray) -> str:
+    """``"regular"`` if the latitudes are equally spaced, else ``"gaussian"``.
+
+    Every transform in this module used to hardcode ``gridtype="regular"``.  On a
+    Gaussian grid that does **not** raise -- pyspharm happily returns wrong
+    derivatives.  Reanalyses that ship native model levels are commonly Gaussian
+    (JRA-3Q is 480x960 Gaussian, and its model-level stream has no regular
+    counterpart), so the failure mode is reachable and silent.
+
+    Equally-spaced input keeps the previous behaviour exactly, so this is a
+    no-op for the regular grids already in use (CAM f09, ERA5).
+    """
+    lat = np.asarray(lat, dtype=float).ravel()
+    if lat.size < 3:
+        return "regular"
+    d = np.diff(np.sort(lat))
+    return "regular" if np.allclose(d, d[0], rtol=1e-3, atol=1e-6) else "gaussian"
+
+
+def _get_spharmt(nlon: int, nlat: int, rsphere: float,
+                 gridtype: str = "regular") -> "Spharmt":
     """Return a cached :class:`spharm.Spharmt` instance for this grid."""
     require_spharm()
-    key = (int(nlon), int(nlat), float(rsphere))
+    key = (int(nlon), int(nlat), float(rsphere), str(gridtype))
     sx = _SPHARMT_CACHE.get(key)
     if sx is None:
         sx = Spharmt(int(nlon), int(nlat), rsphere=float(rsphere),
-                     gridtype="regular", legfunc="stored")
+                     gridtype=str(gridtype), legfunc="stored")
         _SPHARMT_CACHE[key] = sx
     return sx
 
@@ -284,7 +304,7 @@ def gradient_sh(
     f_ns, asc = _orient_for_spharm(f_g, lat_g)
 
     nlat, nlon = f_ns.shape
-    sx = _get_spharmt(nlon, nlat, R_earth)
+    sx = _get_spharmt(nlon, nlat, R_earth, gridtype_for(lat_g))
     spec = sx.grdtospec(f_ns.astype(np.float32))
     uchi, vchi = sx.getgrad(spec)
     # pyspharm's getgrad returns the components of ∇χ with v pointing
@@ -321,7 +341,7 @@ def laplacian_sh(
     f_ns, asc = _orient_for_spharm(f_g, lat_g)
 
     nlat, nlon = f_ns.shape
-    sx = _get_spharmt(nlon, nlat, R_earth)
+    sx = _get_spharmt(nlon, nlat, R_earth, gridtype_for(lat_g))
     ntrunc = nlat - 1
     spec = sx.grdtospec(f_ns.astype(np.float32), ntrunc=ntrunc)
     eigs = _laplacian_eigenvalues(ntrunc, R_earth).astype(spec.dtype)
@@ -357,7 +377,7 @@ def invert_laplacian_sh(
     f_ns, asc = _orient_for_spharm(f_g, lat_g)
 
     nlat, nlon = f_ns.shape
-    sx = _get_spharmt(nlon, nlat, R_earth)
+    sx = _get_spharmt(nlon, nlat, R_earth, gridtype_for(lat_g))
     ntrunc = nlat - 1
     spec = sx.grdtospec(f_ns.astype(np.float32), ntrunc=ntrunc)
     eigs = _laplacian_eigenvalues(ntrunc, R_earth)
@@ -419,7 +439,7 @@ def filter_low_modes_sh(
     f_ns, asc = _orient_for_spharm(f_g, lat_g)
 
     nlat, nlon = f_ns.shape
-    sx = _get_spharmt(nlon, nlat, R_earth)
+    sx = _get_spharmt(nlon, nlat, R_earth, gridtype_for(lat_g))
     ntrunc = nlat - 1
     spec = sx.grdtospec(f_ns.astype(np.float32), ntrunc=ntrunc)
 
@@ -474,7 +494,7 @@ def invert_helmholtz_sh(
     f_ns, asc = _orient_for_spharm(f_g, lat_g)
 
     nlat, nlon = f_ns.shape
-    sx = _get_spharmt(nlon, nlat, R_earth)
+    sx = _get_spharmt(nlon, nlat, R_earth, gridtype_for(lat_g))
     ntrunc = nlat - 1
     spec = sx.grdtospec(f_ns.astype(np.float32), ntrunc=ntrunc)
     eigs = _laplacian_eigenvalues(ntrunc, R_earth)          # -n(n+1)/R²
@@ -519,7 +539,7 @@ def vortdiv_sh(
     u_ns, asc = _orient_for_spharm(u_g, lat_g)
     v_ns, _ = _orient_for_spharm(v_g, lat_g)
     nlat, nlon = u_ns.shape
-    sx = _get_spharmt(nlon, nlat, R_earth)
+    sx = _get_spharmt(nlon, nlat, R_earth, gridtype_for(lat_g))
     ntrunc = nlat - 1
     vrtspec, divspec = sx.getvrtdivspec(
         u_ns.astype(np.float32), v_ns.astype(np.float32), ntrunc=ntrunc
@@ -581,7 +601,7 @@ def helmholtz_sh(
     u_ns, asc = _orient_for_spharm(u_g, lat_g)
     v_ns, _ = _orient_for_spharm(v_g, lat_g)
     nlat, nlon = u_ns.shape
-    sx = _get_spharmt(nlon, nlat, R_earth)
+    sx = _get_spharmt(nlon, nlat, R_earth, gridtype_for(lat_g))
     ntrunc = nlat - 1
 
     psi_ns, chi_ns = sx.getpsichi(
