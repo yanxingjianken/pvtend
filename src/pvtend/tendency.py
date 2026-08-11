@@ -1749,7 +1749,11 @@ class TendencyComputer:
                     H_SCALE=float(H_SCALE), G0=float(G0),
                     lat_vec=lat_vec_full.astype(float),
                     lon_vec_unwrapped=lon_unwrapped.astype(float),
-                    track_id=int(track_id),
+                    # Stored as-is: CESM ids are strings ('m091_t00002')
+                    # because track_id restarts per LENS2 member. np.savez
+                    # keeps a str as a 0-d unicode array, so readers get
+                    # str(npz['track_id']) either way.
+                    track_id=track_id,
                     lat0=float(lat0), lon0=float(lon0),
                     center_lat=float(current_lat),
                     center_lon=float(current_lon),
