@@ -145,6 +145,66 @@ def fill_below_ground(
     return H, T, U, V
 
 
+def fill_below_ground_stack(
+    fields: dict[str, np.ndarray],
+    plev_hpa: np.ndarray,
+    height_key: str = "z",
+    temp_key: str = "t",
+) -> dict[str, np.ndarray]:
+    """:func:`fill_below_ground` over an arbitrary set of fields.
+
+    Same convention, same sweep, same formula — persistence downward from the
+    lowest valid level for everything except the height, which is continued
+    hydrostatically. This exists because the tendency chain needs ``q``, ``w``
+    and ``pv`` filled as well, and running the inversion and the tendency under
+    *different* below-ground conventions would plant an artefact in exactly the
+    difference between them.
+
+    ERA5 needs none of this — ECMWF extrapolates below ground at the source, so
+    its pressure-level fields are already gap-free and this is a no-op on them.
+    CESM's are not: at 1000 hPa ~52 % of the NH is below ground, 4.6 % at
+    850 hPa, 1.1 % at 700 hPa. Left alone, a single NaN destroys a whole
+    spherical-harmonic transform and quietly poisons the QG-omega solve.
+
+    Args:
+        fields: ``{name: (nlev, ny, nx)}``; must contain *height_key* and
+            *temp_key*. Modified copies are returned; the inputs are untouched.
+        plev_hpa: ``(nlev,)`` pressure levels [hPa], **descending in altitude**
+            — index 0 is the highest pressure, as in ``PR``.
+        height_key: Field continued hydrostatically rather than by persistence.
+        temp_key: Temperature [K], needed for the hypsometric thickness.
+
+    Returns:
+        A new dict with the same keys, gap-filled.
+    """
+    if all(np.isfinite(v).all() for v in fields.values()):
+        return dict(fields)
+    for k in (height_key, temp_key):
+        if k not in fields:
+            raise KeyError(f"fill_below_ground_stack needs {k!r}; got "
+                           f"{sorted(fields)}")
+
+    out = {k: np.array(v, dtype=np.float64, copy=True) for k, v in fields.items()}
+    Rd, g = 287.05, 9.80665
+    p = np.asarray(plev_hpa, dtype=np.float64)
+    if p[0] < p[-1]:
+        raise ValueError(f"plev_hpa must descend in altitude (index 0 = highest "
+                         f"pressure); got {p[0]} .. {p[-1]}")
+    H, T = out[height_key], out[temp_key]
+    persist = [v for k, v in out.items() if k != height_key]
+
+    for k in range(len(p) - 2, -1, -1):      # downward: fill k from k+1
+        for A in persist:
+            m = ~np.isfinite(A[k])
+            A[k][m] = A[k + 1][m]
+        mz = ~np.isfinite(H[k])
+        # T[k] has just been filled, so 0.5*(T[k]+T[k+1]) is the persisted
+        # value — an isothermal layer, matching `fill_below_ground`.
+        dz = (Rd * 0.5 * (T[k] + T[k + 1]) / g) * np.log(p[k + 1] / p[k])
+        H[k][mz] = (H[k + 1] + dz)[mz]
+    return out
+
+
 def _run_pvpialln(ext, H, T, U, V, zhdr10, p):
     """Run one pvpialln pass; return psi, q, thb, tht (all (NY,NX,·))."""
     psi, q, thb, tht = ext.pvpialln_core(

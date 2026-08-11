@@ -505,6 +505,43 @@ def open_cesm_years_ds(
     return ds
 
 
+def fill_window_below_ground(ds: xr.Dataset) -> xr.Dataset:
+    """Gap-fill below-ground NaN on an already-sliced time window.
+
+    Applied to the window rather than to the whole opened file: a window is a
+    handful of timesteps (~35 MB), a member-year is 1460.
+
+    The archive stores NaN below ground on purpose, so the fill convention stays
+    visible and swappable instead of being baked in. Nothing downstream
+    tolerates it — one NaN destroys an entire spherical-harmonic transform, and
+    the QG-omega SOR spreads it across the solve. The climatology is filled
+    during the merge, so the state must be filled the same way or ``pv − pv_bar``
+    becomes a difference between two conventions.
+
+    A no-op on ERA5, whose pressure-level fields ECMWF already extrapolates
+    below ground.
+    """
+    from .ppvi.solver import fill_below_ground_stack
+
+    names = [v for v in ds.data_vars
+             if ds[v].dims[-3:] == ("pressure_level", "latitude", "longitude")]
+    if not names:
+        return ds
+    vals = {n: np.asarray(ds[n].values, dtype=np.float64) for n in names}
+    if all(np.isfinite(v).all() for v in vals.values()):
+        return ds
+
+    plev = np.asarray(ds.pressure_level.values, dtype=float)
+    for ti in range(ds.sizes["valid_time"]):
+        filled = fill_below_ground_stack(
+            {n: vals[n][ti] for n in names}, plev, height_key="z", temp_key="t")
+        for n in names:
+            vals[n][ti] = filled[n]
+    for n in names:
+        ds[n] = (ds[n].dims, vals[n].astype(np.float32))
+    return ds
+
+
 def open_source_ds(cfg, base_ts: pd.Timestamp, chunks=None) -> xr.Dataset:
     """Open the time window for whichever source ``cfg.source`` names."""
     if getattr(cfg, "source", "era5") == "cesm":
@@ -1090,6 +1127,8 @@ def with_derivs_for_window(
     # low-RSS PPVI path.
     if ds.chunks and len(ds.chunks.get("valid_time", ())) > 1:
         ds = ds.chunk({"valid_time": -1})
+
+    ds = fill_window_below_ground(ds)
 
     # --- lat metrics & Coriolis ---
     ds["latitude_rad"] = np.deg2rad(ds.latitude)
