@@ -1265,39 +1265,36 @@ def with_derivs_for_window(
     # ================================================================
     #  Load climatological Helmholtz & compute anomaly by subtraction
     # ================================================================
-    # Gather unique months needed in this time window
-    months_needed = sorted(set(ds.valid_time.dt.month.values.tolist()))
-    clim_helm_cache: dict[int, dict[str, np.ndarray]] = {}
-    for m in months_needed:
-        clim_helm_cache[m] = load_helmholtz_climatology(
-            cfg.clim_helmholtz_dir, m)
+    HELM_BARS = ("u_rot_bar", "u_div_bar", "v_rot_bar", "v_div_bar")
 
-    # Build 4-D bar arrays by matching each timestep to its month/hour/level
-    u_rot_bar_4d = np.zeros(shape_4d, dtype=np.float32)
-    u_div_bar_4d = np.zeros(shape_4d, dtype=np.float32)
-    v_rot_bar_4d = np.zeros(shape_4d, dtype=np.float32)
-    v_div_bar_4d = np.zeros(shape_4d, dtype=np.float32)
+    if all(b in clim_ds.variables for b in HELM_BARS):
+        # CESM: the decomposition is folded into the climatology file itself.
+        # It is linear, so decomposing the mean wind is identical to averaging
+        # the decompositions, and doing it during the merge cost ~4 min against
+        # a second pass over the 11 GB file plus a layout conversion. Addressed
+        # by slot, exactly like every other bar.
+        for name in HELM_BARS:
+            ds[name] = clim_bar(clim_ds, name, ds)
+    else:
+        # ERA5: 24 separate per-month files, indexed (nday, 24, nlev, ny, nx).
+        months_needed = sorted(set(ds.valid_time.dt.month.values.tolist()))
+        clim_helm_cache: dict[int, dict[str, np.ndarray]] = {}
+        for m in months_needed:
+            clim_helm_cache[m] = load_helmholtz_climatology(
+                cfg.clim_helmholtz_dir, m)
 
-    times = pd.to_datetime(ds.valid_time.values)
-    for ti, t in enumerate(times):
-        m = t.month
-        hr = t.hour
-        day = t.day  # 1-based calendar day
-        ch = clim_helm_cache[m]
-        # Climatology files now have shape (nday, 24, nlev, nlat, nlon)
-        # Index by (day-1, hour) for daily-hourly resolution
-        di = day - 1  # 0-based day index
-        if di < ch["u_rot_bar"].shape[0] and hr < ch["u_rot_bar"].shape[1]:
-            u_rot_bar_4d[ti] = ch["u_rot_bar"][di, hr]
-            u_div_bar_4d[ti] = ch["u_div_bar"][di, hr]
-            v_rot_bar_4d[ti] = ch["v_rot_bar"][di, hr]
-            v_div_bar_4d[ti] = ch["v_div_bar"][di, hr]
+        bars_4d = {name: np.zeros(shape_4d, dtype=np.float32)
+                   for name in HELM_BARS}
+        times = pd.to_datetime(ds.valid_time.values)
+        for ti, t in enumerate(times):
+            ch = clim_helm_cache[t.month]
+            di, hr = t.day - 1, t.hour        # 0-based day, 0-23 hour
+            if di < ch["u_rot_bar"].shape[0] and hr < ch["u_rot_bar"].shape[1]:
+                for name in HELM_BARS:
+                    bars_4d[name][ti] = ch[name][di, hr]
 
-    for name, arr in [
-        ("u_rot_bar", u_rot_bar_4d), ("u_div_bar", u_div_bar_4d),
-        ("v_rot_bar", v_rot_bar_4d), ("v_div_bar", v_div_bar_4d),
-    ]:
-        ds[name] = xr.DataArray(arr, dims=dims4d, coords=coords4d)
+        for name in HELM_BARS:
+            ds[name] = xr.DataArray(bars_4d[name], dims=dims4d, coords=coords4d)
 
     # ── Anomaly Helmholtz by subtraction: u'_rot = u_rot − ū_rot ──
     ds["u_rot_anom"] = ds["u_rot"] - ds["u_rot_bar"]
