@@ -41,6 +41,8 @@ References:
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
@@ -670,6 +672,18 @@ if _HAS_NUMBA:
         return n_iters, rsm
 else:
     _sip_core = _sip_core_python
+    # Loud on purpose. The fallback is correct but ~57x slower, measured on one
+    # CESM f09 event: 1071 s per NPZ against 18.9 s with the JIT, with
+    # _sip_core_python alone accounting for 97 % of the profile. Across 85,425
+    # NPZ that is the difference between ~450 and ~28,500 core-hours. Nothing
+    # else about the run looks wrong -- same output, same values -- so without
+    # this warning a mis-provisioned environment quietly spends an allocation.
+    warnings.warn(
+        "pvtend.omega: numba is not installed, so the QG-omega SIP solver is "
+        "using its pure-Python fallback (~57x slower; ~97 % of per-event cost). "
+        "Install with `pip install numba` or `pip install pvtend[sip]`.",
+        RuntimeWarning, stacklevel=2,
+    )
 
 
 # ---------------------------------------------------------------------------
