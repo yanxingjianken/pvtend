@@ -1080,6 +1080,17 @@ def with_derivs_for_window(
             f"{step_h[bad]:g} h against a median of {np.median(step_h):g} h."
         )
 
+    # ``differentiate`` needs at least edge_order + 1 = 2 points per dask chunk
+    # along the axis it differentiates. ``open_mfdataset`` adopts the file's own
+    # chunking, and the CESM archive is written (1, 9, 96, 288) — one timestep
+    # per chunk — so every event failed with "Chunk size must be larger than
+    # edge_order + 1". ERA5's monthly files chunk differently and never showed
+    # it. The window is a handful of timesteps (~35 MB for 5), so collapsing the
+    # time axis to one chunk is cheap and leaves the other dims lazy for the
+    # low-RSS PPVI path.
+    if ds.chunks and len(ds.chunks.get("valid_time", ())) > 1:
+        ds = ds.chunk({"valid_time": -1})
+
     # --- lat metrics & Coriolis ---
     ds["latitude_rad"] = np.deg2rad(ds.latitude)
     lat_rad_vals = ds["latitude_rad"].values.copy()
