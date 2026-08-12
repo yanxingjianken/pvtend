@@ -182,6 +182,12 @@ class TendencyConfig:
     #: LENS2 member number; required when ``source == "cesm"``, since the
     #: member selects the file and cannot be inferred from the event row.
     member: int | None = None
+    #: PPVI decomposition. ``"per_level"`` gives one single-level piece per Wu
+    #: level (``u/v_rot_anom_ppvi_{L}_3d``); ``"scale"`` gives the four
+    #: surface / lower / upper_p / upper_e pieces, with the upper level split
+    #: into a planetary (zonal k≤4, confined to the tracked object) and an eddy
+    #: part. Both are kept: existing analyses read the per-level keys.
+    ppvi_pieces: str = "per_level"
     qg_omega_method: str = "log20"
     center_mode: str = "eulerian"
     skip_existing: bool = True
@@ -2114,8 +2120,15 @@ class TendencyComputer:
         ny = len(band_idx)
         inv_lon_pad = int(round(inv_lon_half / dlon))
         nx = 2 * inv_lon_pad + 1
+        # The band EDGES must be the grid's own, not the nominal 10.5/85.5:
+        # the Fortran reconstructs its rows as lat_n-(I-1)*dlat, so a nominal
+        # span that is not (ny-1)*dlat puts every row at the wrong latitude.
+        # 10.5..85.5 is exactly 51 rows on ERA5's 1.5 deg grid, but on CESM f09
+        # (dlat = 180/191) the same band holds 80 rows spanning 74.45 deg, and
+        # invert_piecewise rejected it -- so PPVI had never run on CESM at all.
+        lat_s_act, lat_n_act = float(band_lats.min()), float(band_lats.max())
         zhdr = np.array(
-            [self._BAND_S, 0.0, self._BAND_N, (nx - 1) * dlon,
+            [lat_s_act, 0.0, lat_n_act, (nx - 1) * dlon,
              dlat, dlon, nx, ny], dtype=np.float32)
         wu_wavg_idx = [self._WU_PLEVS.index(l) for l in self.cfg.wavg_levels
                        if l in self._WU_PLEVS]
@@ -2123,8 +2136,85 @@ class TendencyComputer:
             plev=_plev_name(ds), lat_all=lat_all, lon_all=lon_all,
             nlon=len(lon_all), band_idx=band_idx, band_lats=band_lats,
             ny=ny, inv_lon_pad=inv_lon_pad, nx=nx, zhdr=zhdr,
+            lat_s_act=lat_s_act, lat_n_act=lat_n_act,
             dlat=dlat, dlon=dlon, wu_wavg_idx=wu_wavg_idx,
         )
+
+    def _scale_split_sources(self, ds, clim_ds, cplev, ts, geom, store,
+                             lon_idx_inv):
+        """Planetary/eddy PV and boundary-θ anomalies for the upper piece.
+
+        Runs pass A/B a second time over the **whole longitude circle**, not the
+        ±90° inversion box: `zonal_filter` needs 360° or the wavenumbers it
+        keeps are not global ones. The split is then cropped back onto the box
+        and handed to ``invert_piecewise`` as additive PV overrides, which is
+        exact because pass D is linear in its source — ``upper_p`` and
+        ``upper_e`` sum to the unsplit ``upper``.
+
+        Returns ``(qp_anoms, th_anoms, diagnostics)``.
+        """
+        from .ppvi import scale_split
+        from .ppvi.solver import (PR, PassABParams, _from_core, _to_core,
+                                  fill_below_ground)
+        from .ppvi import _ext
+
+        plev, band_idx, band_lats = geom["plev"], geom["band_idx"], geom["band_lats"]
+        dlat, dlon, nlon = geom["dlat"], geom["dlon"], geom["nlon"]
+        lon_all = geom["lon_all"]
+        mo, dy, hr = int(ts.month), int(ts.day), int(ts.hour)
+
+        def _cube(src, var, is_clim):
+            if is_clim:
+                base = (src[var].isel(slot=noleap_slot_scalar(ts))
+                        if "slot" in src.dims
+                        else src[var].sel(month=mo, day=dy, hour=hr))
+                base = base.sel({cplev: self._WU_PLEVS})
+            else:
+                base = src[var].sel(valid_time=ts).sel({plev: self._WU_PLEVS})
+            return np.ascontiguousarray(
+                base.isel(latitude=band_idx).values.astype(np.float64))
+
+        def _pass_ab(src, is_clim):
+            H = _cube(src, "z", is_clim) / z_divisor(self.cfg)
+            T, U, V = (_cube(src, v, is_clim) for v in ("t", "u", "v"))
+            H, T, U, V = fill_below_ground(H, T, U, V)
+            p = PassABParams()
+            z = np.zeros(10, dtype=np.float32)
+            z[0], z[1], z[2] = geom["lat_s_act"], 0.0, geom["lat_n_act"]
+            z[3] = (nlon - 1) * dlon
+            z[4], z[5] = dlon, dlat
+            z[6], z[7] = nlon, H.shape[1]
+            _, q, _thb, tht = _ext.load_ext().pvpialln_core(
+                _to_core(H), _to_core(T), _to_core(U), _to_core(V),
+                z, PR, int(p.imax), np.float32(p.omegs), np.float32(p.thrs))
+            return _from_core(q), np.asarray(tht)
+
+        q_e, tht_e = _pass_ab(ds, False)
+        q_m, tht_m = _pass_ab(clim_ds, True)
+        q_anom, th_anom = q_e - q_m, tht_e - tht_m
+
+        clat, clon = float(store["center_lat"]), float(store["center_lon"])
+        box_lat = np.nonzero(np.abs(band_lats - clat) <= self.cfg.lat_half)[0]
+        box_lon = np.nonzero(
+            np.abs((lon_all - clon + 180.0) % 360.0 - 180.0)
+            <= self.cfg.lon_half)[0]
+
+        out = scale_split.split_at_box_minimum(
+            q_anom, th_anom, scale_split.UPPER_INTERIOR_IDX,
+            scale_split.TOP_IDX, box_lat, box_lon)
+
+        sub = lambda a: np.ascontiguousarray(a[..., lon_idx_inv])
+        qp_anoms = {"upper_p": sub(out["q_p"]), "upper_e": sub(out["q_e"])}
+        # (NY, NX, 2): bottom boundary theta is untouched by the upper split.
+        def _th(a):
+            z = np.zeros(sub(a).shape + (2,), dtype=np.float64)
+            z[..., 1] = sub(a)
+            return z
+        th_anoms = {"upper_p": _th(out["th_p"]), "upper_e": _th(out["th_e"])}
+        diag = dict(q_min=out["q_min"], thresh=out["thresh_used"],
+                    mask_frac=float(out["mask"][scale_split.UPPER_INTERIOR_IDX].mean()),
+                    top_frac=out["top_frac"])
+        return qp_anoms, th_anoms, diag
 
     def _ppvi_compute_keys(
         self, store: dict, ts: pd.Timestamp, ds: xr.Dataset,
@@ -2138,6 +2228,7 @@ class TendencyComputer:
         Returns a dict of new keys (no file IO).
         """
         from .ppvi import PIECES, invert_piecewise, psi_to_winds
+        from .ppvi import scale_split
 
         WU_PLEVS = self._WU_PLEVS
         WU2SI = self._WU2SI
@@ -2191,14 +2282,29 @@ class TendencyComputer:
         _zd = z_divisor(self.cfg)
         H_e, H_m = z_e / _zd, z_m / _zd
 
+        # ── Planetary/eddy split of the upper piece ──────────────────────
+        # Only in "scale" mode, and only ever on the GLOBAL longitude circle:
+        # a zonal wavenumber does not exist on a sector. The inversion box is
+        # +-90 deg, i.e. half the globe, so its k<=4 content is meaningless --
+        # hence a second pass A/B over the full band purely to build the split,
+        # after which q_p / q_e are cropped back onto the inversion box.
+        pieces = PIECES
+        qp_anoms = th_anoms = None
+        if getattr(self.cfg, "ppvi_pieces", "per_level") == "scale":
+            pieces = scale_split.PIECES_SCALE
+            qp_anoms, th_anoms, split_diag = self._scale_split_sources(
+                ds, clim_ds, cplev, ts, geom, store, lon_idx_inv)
+            store.update({f"ppvi_split_{k}": v for k, v in split_diag.items()})
+
         # ── Run the Wu piecewise inversion ──
         res = invert_piecewise(
-            H_m, t_m, u_m, v_m, H_e, t_e, u_e, v_e, zhdr)
+            H_m, t_m, u_m, v_m, H_e, t_e, u_e, v_e, zhdr,
+            pieces=pieces, qp_anoms=qp_anoms, th_anoms=th_anoms)
 
         # Rotational winds per piece on the inversion grid (NL, ny, nx).
         piece_u: dict[str, np.ndarray] = {}
         piece_v: dict[str, np.ndarray] = {}
-        for name in PIECES:
+        for name in pieces:
             ur, vr = psi_to_winds(
                 res["psi_pieces"][name], band_lats, dlat, dlon)
             piece_u[name], piece_v[name] = ur, vr
@@ -2248,13 +2354,13 @@ class TendencyComputer:
             out[wu_pos] = cube8
             return out
 
-        piece_u_c = {n: _crop(piece_u[n]) for n in PIECES}
-        piece_v_c = {n: _crop(piece_v[n]) for n in PIECES}
+        piece_u_c = {n: _crop(piece_u[n]) for n in pieces}
+        piece_v_c = {n: _crop(piece_v[n]) for n in pieces}
         pv_anom_wu_c = _crop(pv_anom_wu)
 
         # Residual vs observed anomaly rotational wind (Wu levels only).
-        sum_u = sum(piece_u_c[n] for n in PIECES)
-        sum_v = sum(piece_v_c[n] for n in PIECES)
+        sum_u = sum(piece_u_c[n] for n in pieces)
+        sum_v = sum(piece_v_c[n] for n in pieces)
         resid_u = obs_u[wu_pos] - sum_u
         resid_v = obs_v[wu_pos] - sum_v
 
@@ -2276,8 +2382,10 @@ class TendencyComputer:
         # level index as a string; map it to the hPa level for the npz key,
         # e.g. piece "7" → 250 hPa → ``u_rot_anom_ppvi_250(_3d)``.
         new: dict[str, np.ndarray] = {}
-        for n in PIECES:
-            L = WU_PLEVS[int(n) - 1]
+        for n in pieces:
+            # per_level pieces are keyed by their hPa level ("7" -> 250); the
+            # scale pieces keep their own names (surface/lower/upper_p/upper_e)
+            L = WU_PLEVS[int(n) - 1] if n.isdigit() else n
             new[f"u_rot_anom_ppvi_{L}_3d"] = _pad_levels(piece_u_c[n])
             new[f"v_rot_anom_ppvi_{L}_3d"] = _pad_levels(piece_v_c[n])
             new[f"u_rot_anom_ppvi_{L}"] = _wavg(piece_u_c[n])

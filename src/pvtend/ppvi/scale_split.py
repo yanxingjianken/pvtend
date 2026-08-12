@@ -71,6 +71,26 @@ THRESH = None
 SEED_RADIUS_DEG = 20.0
 
 
+#: The four-piece decomposition, as 1-based Wu level indices. ``upper_p`` and
+#: ``upper_e`` cover the same levels; what separates them is the PV anomaly each
+#: is given (see :func:`split_at_box_minimum`), which is why the split has to go
+#: through ``invert_piecewise``'s ``qp_anoms`` rather than a level list.
+PIECES_SCALE: dict[str, list[int]] = {
+    "surface": [1],
+    "lower": [2, 3, 4],
+    "upper_p": [5, 6, 7, 8, 9],
+    "upper_e": [5, 6, 7, 8, 9],
+}
+
+#: 0-based indices into the 9-level Wu grid: the upper **interior** levels
+#: (400/300/250/200 hPa) and the top boundary (100 hPa). Wu's ``Q`` is
+#: identically zero at the boundary levels, so only the interior takes part in
+#: the flood fill; the top boundary inherits the mask of the highest interior
+#: level and carries the θ anomaly instead.
+UPPER_INTERIOR_IDX = [4, 5, 6, 7]
+TOP_IDX = 8
+
+
 def zonal_filter(field: np.ndarray, kmin: int = KMIN, kmax: int = KMAX) -> np.ndarray:
     """Keep zonal wavenumbers ``kmin..kmax``. Last axis must span 360°."""
     F = np.fft.rfft(np.asarray(field, dtype=float), axis=-1)
