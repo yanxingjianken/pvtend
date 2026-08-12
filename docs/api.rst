@@ -359,6 +359,40 @@ byte-identical to earlier releases.
 
    psi_to_winds
 
+Two decompositions: the planetary/eddy scale split
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``--ppvi-pieces`` selects what the balanced field is decomposed *into*.
+``per_level`` (the default) gives the nine single-level pieces above.
+``scale`` instead gives **four**: ``surface``, ``lower``, and the upper levels
+split into a planetary part ``upper_p`` and an eddy part ``upper_e``.
+
+The planetary part is the zonal-wavenumber :math:`k\le4` PV anomaly *confined
+to the tracked object* — filtered on the full longitude circle (wavenumber only
+exists there), flood-filled from the box minimum out to a contour at
+:math:`0.35\times` the event's own minimum, then re-filtered after masking,
+since a sharp mask edge puts power back into every wavenumber. ``upper_e`` is
+defined as the remainder, so ``upper_p + upper_e`` reproduces the upper-level
+total *by construction* — which means the residual diagnostics cannot detect a
+mis-drawn mask, and the object geometry has to be right on its own terms.
+
+The two modes write **different NPZ keys** (``u/v_rot_anom_ppvi_{surface,
+lower,upper_p,upper_e}``) and must not be mixed in one output directory. The
+``ppvi`` subcommand's ``--skip-existing`` tests for the keys of the mode it was
+asked for, so switching modes re-runs rather than silently skipping.
+
+.. currentmodule:: pvtend.ppvi.scale_split
+
+.. autosummary::
+   :toctree: generated/
+
+   split_at_box_minimum
+   split_planetary_eddy
+   seed_from_box_min
+   component_containing
+   zonal_filter
+   fill_seam_columns
+
 .. currentmodule:: pvtend
 
 
