@@ -361,3 +361,100 @@ class TestDatelineBoxIsContiguous:
         seed = int(np.nonzero(old_box == int(np.nonzero(blob)[0][0]))[0][0])
         comp = component_containing(sub, 0, 1, seed)
         assert comp.sum() < sub.sum(), "expected the old ordering to split the object"
+
+
+class TestSeedNearCentre:
+    """The object must be the TRACKED feature, not whatever is deepest in the
+    +/-60 x +/-30 box. Measured on 30+30 m091 events: a blocking high IS its box
+    minimum, a propagating high is not, and the old policy then inverted an
+    unrelated system a median 4193 km away while every sum still balanced.
+    """
+
+    NL, NY, NX = 9, 40, 288
+    UPPER, TOP = [4, 5, 6, 7], 8
+
+    def _field(self):
+        """A shallow anomaly at the tracked centre, a DEEPER one far away."""
+        q = np.zeros((self.NL, self.NY, self.NX))
+        lon = np.arange(self.NX) * (360.0 / self.NX) - 180.0
+        for k in self.UPPER:
+            for j in range(self.NY):
+                # the event: modest, centred at lon 0, row 20
+                q[k] += -60.0 * np.exp(-(((lon - 0.0) / 18.0) ** 2))[None, :] \
+                    * np.exp(-(((np.arange(self.NY) - 20) / 5.0) ** 2))[:, None]
+                # a deeper distractor 100 deg away, inside the same box
+                q[k] += -200.0 * np.exp(-(((lon + 100.0) / 18.0) ** 2))[None, :] \
+                    * np.exp(-(((np.arange(self.NY) - 22) / 5.0) ** 2))[:, None]
+                break
+        for k in self.UPPER[1:]:
+            q[k] = q[self.UPPER[0]]
+        return q
+
+    @property
+    def _box(self):
+        return np.arange(5, 35), np.arange(self.NX)   # box holds both features
+
+    def test_box_min_seed_lands_on_the_distractor(self):
+        """Guard the guard: the old policy really does pick the wrong feature."""
+        from pvtend.ppvi.scale_split import seed_from_box_min, zonal_filter
+        q = self._field(); bl, bo = self._box
+        _, _, i = seed_from_box_min(zonal_filter(q, 1, 4), self.UPPER, bl, bo)
+        lon_i = i * (360.0 / self.NX) - 180.0
+        assert abs(lon_i + 100.0) < 25.0, f"expected the distractor, got lon {lon_i}"
+
+    def test_near_centre_seed_lands_on_the_event(self):
+        from pvtend.ppvi.scale_split import seed_near_centre, zonal_filter
+        q = self._field(); bl, bo = self._box
+        ic = int(np.argmin(np.abs(np.arange(self.NX)*(360.0/self.NX)-180.0)))
+        _, _, i = seed_near_centre(zonal_filter(q, 1, 4), self.UPPER, bl, bo,
+                                   centre_lat=20, centre_lon=ic,
+                                   halo_lat=10, halo_lon=16)
+        lon_i = i * (360.0 / self.NX) - 180.0
+        assert abs(lon_i) < 25.0, f"expected the tracked event, got lon {lon_i}"
+
+    def test_contour_scales_to_the_LOCAL_minimum(self):
+        """0.35 x box min would be deeper than the event and reject it."""
+        from pvtend.ppvi.scale_split import split_near_centre, split_at_box_minimum
+        q = self._field(); bl, bo = self._box
+        th = np.zeros((self.NY, self.NX))
+        ic = int(np.argmin(np.abs(np.arange(self.NX)*(360.0/self.NX)-180.0)))
+        near = split_near_centre(q, th, self.UPPER, self.TOP, bl, bo,
+                                 centre_lat=20, centre_lon=ic,
+                                 halo_lat=10, halo_lon=16)
+        boxm = split_at_box_minimum(q, th, self.UPPER, self.TOP, bl, bo)
+        assert abs(near["q_min"]) < abs(boxm["q_min"]), "local min must be shallower"
+        assert near["seed_source"] == "near_centre"
+
+    def test_mask_covers_the_tracked_centre(self):
+        from pvtend.ppvi.scale_split import split_near_centre
+        q = self._field(); th = np.zeros((self.NY, self.NX)); bl, bo = self._box
+        ic = int(np.argmin(np.abs(np.arange(self.NX)*(360.0/self.NX)-180.0)))
+        out = split_near_centre(q, th, self.UPPER, self.TOP, bl, bo,
+                                centre_lat=20, centre_lon=ic,
+                                halo_lat=10, halo_lon=16)
+        assert out["mask"][self.UPPER][:, 20, ic].any()
+
+    def test_pieces_still_sum_to_the_total(self):
+        from pvtend.ppvi.scale_split import split_near_centre
+        q = self._field(); th = np.zeros((self.NY, self.NX)); bl, bo = self._box
+        ic = int(np.argmin(np.abs(np.arange(self.NX)*(360.0/self.NX)-180.0)))
+        out = split_near_centre(q, th, self.UPPER, self.TOP, bl, bo,
+                                centre_lat=20, centre_lon=ic,
+                                halo_lat=10, halo_lon=16)
+        np.testing.assert_allclose(out["q_p"] + out["q_e"], q, atol=1e-9)
+
+    def test_centre_outside_the_box_is_refused(self):
+        from pvtend.ppvi.scale_split import seed_near_centre, zonal_filter
+        q = self._field(); bl, bo = self._box
+        with pytest.raises(ValueError, match="not inside the event box"):
+            seed_near_centre(zonal_filter(q, 1, 4), self.UPPER, bl, bo,
+                             centre_lat=999, centre_lon=0,
+                             halo_lat=10, halo_lon=16)
+
+    def test_no_negative_anomaly_near_the_centre_is_refused(self):
+        from pvtend.ppvi.scale_split import seed_near_centre
+        q = np.ones((self.NL, self.NY, self.NX)) * 5.0
+        bl, bo = self._box
+        with pytest.raises(ValueError, match="no negative"):
+            seed_near_centre(q, self.UPPER, bl, bo, centre_lat=20, centre_lon=10,
+                             halo_lat=4, halo_lon=4)

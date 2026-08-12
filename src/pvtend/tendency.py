@@ -612,6 +612,14 @@ def fill_window_below_ground(ds: xr.Dataset) -> xr.Dataset:
 #: reaches into the neighbouring month.
 _FILE_KEY_PAD_H: int = 48
 
+#: Half-width of the window the ``scale`` split searches for its seed, around
+#: the tracker's own centre. Wide enough that the upper-level PV feature need
+#: not sit on the Z500 centroid (it generally does not — measured median offset
+#: 737 km for blocking), narrow enough that the search cannot escape to another
+#: system: the +/-60 x +/-30 deg event box usually contains a deeper one.
+SEED_HALO_LAT: float = 10.0
+SEED_HALO_LON: float = 20.0
+
 
 #: Every variable the tendency budget needs. The PPVI pass needs only four of
 #: them, which on ERA5 is four monthly files instead of seven.
@@ -2276,9 +2284,25 @@ class TendencyComputer:
             _circ_nearest_lon(lon_all, clon),
             LON_PAD=int(round(self.cfg.lon_half / dlon)), nlon=nlon)
 
-        out = scale_split.split_at_box_minimum(
+        # Seed the object at the TRACKED centre, not at the box minimum.  The
+        # box is +/-60 x +/-30 deg and routinely contains something deeper than
+        # the event: measured on 30+30 m091 events, a blocking high IS its box
+        # minimum (ratio 1.0) but a propagating high is not (1.5), so the old
+        # policy inverted an unrelated system a median 4193 km away -- and
+        # upper_e is defined as the remainder, so the sums still balanced.
+        # Seeding near the centre puts the object back on the event: distance
+        # from the tracked centre to the nearest point of the object goes
+        # 1581 -> 117 km for prp, while blocking is untouched (45 -> 44 km).
+        # The halo bounds only where the SEARCH starts; the fill still spreads
+        # across the whole box.
+        centre_row = int(np.argmin(np.abs(band_lats - clat)))
+        out = scale_split.split_near_centre(
             q_anom, th_anom, scale_split.UPPER_INTERIOR_IDX,
-            scale_split.TOP_IDX, box_lat, box_lon)
+            scale_split.TOP_IDX, box_lat, box_lon,
+            centre_lat=centre_row,          # row within the band, as box_lat is
+            centre_lon=_circ_nearest_lon(lon_all, clon),   # global column
+            halo_lat=int(round(SEED_HALO_LAT / dlat)),
+            halo_lon=int(round(SEED_HALO_LON / dlon)))
 
         sub = lambda a: np.ascontiguousarray(a[..., lon_idx_inv])
         qp_anoms = {"upper_p": sub(out["q_p"]), "upper_e": sub(out["q_e"])}

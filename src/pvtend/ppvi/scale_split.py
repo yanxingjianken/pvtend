@@ -287,6 +287,113 @@ def split_planetary_eddy(
             "seed": (int(seed_lev), int(seed_lat), int(seed_lon))}
 
 
+def seed_near_centre(q_k4: np.ndarray, upper_idx, box_lat, box_lon,
+                     centre_lat: int, centre_lon: int,
+                     halo_lat: int, halo_lon: int) -> tuple[int, int, int]:
+    """Global ``(lev, lat, lon)`` of the most negative anomaly NEAR the centre.
+
+    :func:`seed_from_box_min` searches the whole event box, which is right only
+    when the tracked feature *is* the box minimum. Measured on 30+30 m091
+    events: for blocking it is (box min / local min = 1.0), but for a
+    propagating high it is not (1.5), and the seed then runs away to a deeper
+    unrelated system a median **4193 km** from the tracked centre — inverting
+    the wrong feature while every residual diagnostic still balances.
+
+    Restricting the search to a halo around the tracker's own centre brings
+    that to 1375 km, and the distance from the centre to the nearest point of
+    the resulting object from **1581 km to 117 km** — about one grid cell.
+    Blocking is left alone (45 km before, 44 km after).
+
+    Works in box-relative positions, so it inherits the circular ordering of
+    *box_lon* and needs no longitude arithmetic of its own.
+
+    Args:
+        q_k4: ``(NL, NY, NX_global)`` already-filtered anomaly.
+        upper_idx: 0-based upper interior level indices to search.
+        box_lat, box_lon: index arrays of the event box, ordered as the flood
+            fill will see them.
+        centre_lat, centre_lon: **global** row/column of the tracked centre.
+        halo_lat, halo_lon: half-width of the seed window, in grid cells.
+
+    Returns:
+        Global indices ``(lev, lat, lon)``.
+
+    Raises:
+        ValueError: If the centre is outside the box, or no negative anomaly
+            lies within the halo — the tracked feature has no upper-level
+            negative PV signature to invert, which is worth surfacing.
+    """
+    upper_idx = np.asarray(upper_idx, dtype=int)
+    box_lat = np.asarray(box_lat, dtype=int)
+    box_lon = np.asarray(box_lon, dtype=int)
+    jp = np.nonzero(box_lat == int(centre_lat))[0]
+    ip = np.nonzero(box_lon == int(centre_lon))[0]
+    if jp.size == 0 or ip.size == 0:
+        raise ValueError(
+            f"tracked centre (row {centre_lat}, col {centre_lon}) is not inside "
+            f"the event box — cannot seed near it")
+    j0 = slice(max(0, int(jp[0]) - halo_lat), int(jp[0]) + halo_lat + 1)
+    i0 = slice(max(0, int(ip[0]) - halo_lon), int(ip[0]) + halo_lon + 1)
+    rows, cols = box_lat[j0], box_lon[i0]
+    sub = q_k4[np.ix_(upper_idx, rows, cols)]
+    k, a, b = np.unravel_index(int(np.nanargmin(sub)), sub.shape)
+    if not (sub[k, a, b] < 0):
+        raise ValueError(
+            f"no negative k<=4 PV anomaly within the seed halo of the tracked "
+            f"centre (local minimum is {sub[k, a, b]:+.4g})")
+    return int(upper_idx[k]), int(rows[a]), int(cols[b])
+
+
+def split_near_centre(
+    q_anom: np.ndarray,
+    th_anom_top: np.ndarray,
+    upper_idx,
+    top_idx: int,
+    box_lat,
+    box_lon,
+    centre_lat: int,
+    centre_lon: int,
+    halo_lat: int,
+    halo_lon: int,
+    kmin: int = KMIN,
+    kmax: int = KMAX,
+    frac: float = OBJ_FRAC,
+) -> dict:
+    """:func:`split_planetary_eddy` seeded and scaled at the TRACKED centre.
+
+    The order matters and is not interchangeable:
+
+    1. filter to ``kmin..kmax`` on the **whole longitude circle** — a zonal
+       wavenumber does not exist on a cropped strip;
+    2. take the seed as the most negative filtered point within a halo of the
+       tracker's centre (:func:`seed_near_centre`);
+    3. set the contour at *frac* x **that local minimum**, not the box minimum,
+       so the depth scale comes from the event rather than from whatever deeper
+       system shares its box;
+    4. flood fill across the **whole box**, so the object may still grow to its
+       natural extent — the halo constrains only where the search starts.
+
+    :func:`split_at_box_minimum` is the older policy: steps 2 and 3 both keyed
+    off the box minimum. It agrees with this one whenever the tracked feature is
+    the deepest thing in its box (blocking), and picks a different feature
+    entirely when it is not (propagating highs).
+
+    Returns:
+        As :func:`split_planetary_eddy`, plus ``q_min`` (the *local* minimum),
+        ``thresh_used`` and ``seed_source='near_centre'``.
+    """
+    q_k4 = zonal_filter(q_anom, kmin, kmax)
+    lev, j, i = seed_near_centre(q_k4, upper_idx, box_lat, box_lon,
+                                 centre_lat, centre_lon, halo_lat, halo_lon)
+    q_min = float(q_k4[lev, j, i])
+    out = split_planetary_eddy(q_anom, th_anom_top, upper_idx, top_idx,
+                               box_lat, box_lon, lev, j, i,
+                               kmin=kmin, kmax=kmax, thresh=frac * q_min)
+    out.update(seed_source="near_centre", q_min=q_min,
+               thresh_used=-abs(frac * q_min))
+    return out
+
+
 def split_at_box_minimum(
     q_anom: np.ndarray,
     th_anom_top: np.ndarray,
