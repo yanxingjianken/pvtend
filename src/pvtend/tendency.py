@@ -322,6 +322,19 @@ def _plev_name(ds: xr.Dataset) -> str:
     raise KeyError("No pressure level dimension.")
 
 
+def _circ_nearest_lon(lon_axis, lon0) -> int:
+    """Index of the grid longitude nearest ``lon0``, measured the short way.
+
+    A plain ``argmin(|lon - lon0|)`` measures along the axis, which is not the
+    distance on a circle: an event at 179.7° is nearest the −180° grid point,
+    but the plain form returns 178.75°. 176 of the 85,425 catalogue events fall
+    in that band — all of them dateline / North Pacific — and each got its patch
+    centred one cell off.
+    """
+    return int(np.abs(
+        (np.asarray(lon_axis) - lon0 + 180.0) % 360.0 - 180.0).argmin())
+
+
 def month_keys_for_window(
     base_ts: pd.Timestamp, hmin: int = -49, hmax: int = 24,
 ) -> list[tuple[int, int]]:
@@ -904,11 +917,7 @@ def _qg_diabatic_adiabatic_on_patch(
         lat_idx = np.array([np.argmin(np.abs(lat_nh_asc - la))
                             for la in lat_v])
 
-        def _circ_nearest_sp19(lv):
-            d = np.abs((lon_nh - lv + 180) % 360 - 180)
-            return int(np.argmin(d))
-
-        lon_idx = np.array([_circ_nearest_sp19(lo) for lo in lon_vec])
+        lon_idx = np.array([_circ_nearest_lon(lon_nh, lo) for lo in lon_vec])
         ix = np.ix_(np.arange(w_adiabatic_nh.shape[0]), lat_idx, lon_idx)
 
         cube3d["u_div_diabatic"]    = unpack(udm_nh[ix])
@@ -1036,11 +1045,7 @@ def _qg_diabatic_adiabatic_on_patch(
     lat_idx = np.array([np.argmin(np.abs(lat_nh_asc - la))
                         for la in lat_v])
 
-    def _circ_nearest(lv):
-        d = np.abs((lon_nh - lv + 180) % 360 - 180)
-        return int(np.argmin(d))
-
-    lon_idx = np.array([_circ_nearest(lo) for lo in lon_vec])
+    lon_idx = np.array([_circ_nearest_lon(lon_nh, lo) for lo in lon_vec])
     ix = np.ix_(np.arange(od_nh.shape[0]), lat_idx, lon_idx)
 
     od       = od_nh[ix]
@@ -1418,7 +1423,7 @@ class _GridInfo:
 
 def _nearest_idx(lat0, lon0, grid):
     ilat = int(np.abs(grid.lat - lat0).argmin())
-    ilon = int(np.abs(grid.lon - lon0).argmin())
+    ilon = _circ_nearest_lon(grid.lon, lon0)
     ok = (ilat >= grid.LAT_PAD) and (ilat + grid.LAT_PAD < len(grid.lat))
     return ilat, ilon, ok
 
@@ -2287,7 +2292,7 @@ class TendencyComputer:
         obs_v = np.asarray(store["v_rot_anom_3d"], dtype=float)
         n_npz_lev, yp, xp = obs_u.shape
 
-        ilon_c = int(np.argmin(np.abs(lon_all - center_lon)))
+        ilon_c = _circ_nearest_lon(lon_all, center_lon)
         lon_idx_inv = _wrapped_lon_index(
             ilon_c, LON_PAD=inv_lon_pad, nlon=nlon)
 

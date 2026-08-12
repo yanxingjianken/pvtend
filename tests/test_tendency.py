@@ -13,6 +13,7 @@ from pvtend.tendency import (
     TendencyComputer,
     TendencyConfig,
     _band_row_index,
+    _circ_nearest_lon,
     load_climatology,
     month_keys_for_window,
 )
@@ -316,3 +317,34 @@ class TestPPVIPieceKeys:
     def test_default_is_per_level(self):
         assert self._keys("per_level") == TendencyComputer(
             TendencyConfig())._ppvi_piece_keys()
+
+
+class TestCircNearestLon:
+    """The longitude axis wraps; a plain argmin does not know that. Events near
+    the dateline were centred on the wrong side of the seam — 176 of the 85,425
+    catalogue rows, all North Pacific.
+    """
+
+    LON = np.arange(-180.0, 180.0, 1.25)   # f09 after the 0-360 -> -180..180 fix
+
+    def test_picks_across_the_seam(self):
+        """179.7 is 0.3 deg from -180 and 0.95 from 178.75."""
+        assert _circ_nearest_lon(self.LON, 179.7) == 0
+
+    def test_agrees_with_plain_argmin_away_from_the_seam(self):
+        for lon0 in (-140.0, -26.95, 0.3, 87.6, 150.0):
+            assert (_circ_nearest_lon(self.LON, lon0)
+                    == int(np.abs(self.LON - lon0).argmin()))
+
+    def test_never_worse_than_plain_argmin(self):
+        """Circular distance to the chosen point is minimal, everywhere."""
+        for lon0 in np.arange(-180.0, 180.0, 0.37):
+            i = _circ_nearest_lon(self.LON, lon0)
+            d = np.abs((self.LON - lon0 + 180.0) % 360.0 - 180.0)
+            assert d[i] == pytest.approx(d.min())
+
+    def test_equivalent_on_a_0_360_axis(self):
+        """Wrapping is what matters, not which convention the axis uses."""
+        lon360 = np.arange(0.0, 360.0, 1.25)
+        assert lon360[_circ_nearest_lon(lon360, -0.4)] == pytest.approx(0.0)
+        assert lon360[_circ_nearest_lon(lon360, 359.8)] == pytest.approx(0.0)
