@@ -41,16 +41,29 @@ from scipy import ndimage
 #: meridional-only offset with no wave structure.
 KMIN, KMAX = 1, 4
 
-#: PV-anomaly threshold [PVU] defining the negative object. Zero, i.e. simply
-#: "negative". A stricter threshold was needed only while the object was picked
-#: as the *largest* component of the *global* field, where the negative side of
-#: a k≤4 zero line links through the weakly negative subtropics into one blob
-#: covering ~38 % of the hemisphere. Cropping to the tracked box before the
-#: flood fill removes that entirely — the component cannot leave the box — and
-#: seeding from the box minimum makes the fill unconditional: the minimum of a
-#: box containing a tracked anticyclone is negative, so it always lies inside
-#: the negative set and there is nothing left to tune.
-THRESH = 0.0
+#: Contour level defining the object, as a fraction of the event's **own** box
+#: minimum. 0.35 was calibrated against the tracker's `area` column over 120
+#: CESM events (60 blocking + 60 prp, member 91): it puts the object's
+#: footprint at the same size as the Z500 blob at peak.
+#:
+#: The form matters more than the number. An absolute threshold cannot serve
+#: both ends of a life cycle — the tracked blob is 4.4x larger at peak than at
+#: onset — and a *band percentile* cannot either, for a definitional reason:
+#: taking the most negative p % of the band pins the below-threshold AREA to
+#: p % of the band, so the object cannot grow with the event and the ratio just
+#: tracks 1/blob_area (measured: onset 3-4x peak at every percentile). Anchoring
+#: on the event's own amplitude is scale-free, and is how anomaly contours are
+#: conventionally drawn.
+#:
+#: Neither form makes the object/blob ratio constant across the life cycle
+#: (onset stays ~2.5-3x peak for blocking, ~5-6x for prp). That is a physical
+#: result, not a tuning failure: the k<=4 PV anomaly is a planetary-scale
+#: feature and is already broad at onset, while the Z500 blob grows into it.
+OBJ_FRAC = 0.35
+
+#: Retained so a caller can still pass an absolute contour; ``None`` means use
+#: :data:`OBJ_FRAC` against the box minimum.
+THRESH = None
 
 #: Radius [deg] around the tracked centroid for :func:`seed_from_centroid`,
 #: which the single-event method pipeline still uses. The NPZ path seeds from
@@ -159,9 +172,13 @@ def split_planetary_eddy(
     seed_lon: int,
     kmin: int = KMIN,
     kmax: int = KMAX,
-    thresh: float = THRESH,
+    thresh: float = 0.0,
 ) -> dict:
     """Split the upper PV anomaly and its top boundary θ into planetary/eddy.
+
+    The low-level entry point, taking an **absolute** contour. Bulk callers
+    should use :func:`split_at_box_minimum`, which derives the contour from the
+    event's own amplitude. The default of 0.0 is "simply negative".
 
     Args:
         q_anom: ``(NL, NY, NX_global)`` Wu PV anomaly; last axis spans 360°.
@@ -232,23 +249,36 @@ def split_at_box_minimum(
     box_lon,
     kmin: int = KMIN,
     kmax: int = KMAX,
-    thresh: float = THRESH,
+    thresh: float | None = THRESH,
+    frac: float = OBJ_FRAC,
 ) -> dict:
     """:func:`split_planetary_eddy` seeded from the box minimum.
 
     The entry point for bulk NPZ generation, where no one is looking at each
-    event. There is no radius and no threshold to tune: the box comes from the
-    tracker, so it contains an anticyclone; its minimum is therefore negative;
-    a negative point is inside ``q'_k4 < 0``; so the flood fill always succeeds
-    and always returns the object the tracker found.
+    event. Nothing here needs tuning per event: the box comes from the tracker,
+    so it contains an anticyclone; its minimum is therefore negative; the
+    contour is a fraction of that minimum, so the minimum is inside its own
+    contour by construction; so the flood fill always succeeds and always
+    returns the object the tracker found.
 
-    The only way out is a box with no negative k≤4 anomaly at all, which would
-    contradict the tracking and is raised rather than worked around.
+    Args:
+        thresh: Absolute contour level. ``None`` (the default) derives it from
+            the box minimum via *frac*.
+        frac: Fraction of the box minimum to contour at, when *thresh* is None.
+
+    Returns:
+        As :func:`split_planetary_eddy`, plus ``q_min`` and ``thresh_used``.
+
+    Raises:
+        ValueError: If the box holds no negative k≤4 anomaly at all — which
+            contradicts the tracking, and is surfaced rather than worked around.
     """
     q_k4 = zonal_filter(q_anom, kmin, kmax)
     lev, j, i = seed_from_box_min(q_k4, upper_idx, box_lat, box_lon)
+    q_min = float(q_k4[lev, j, i])
+    level = float(thresh) if thresh is not None else frac * q_min
     out = split_planetary_eddy(q_anom, th_anom_top, upper_idx, top_idx,
                                box_lat, box_lon, lev, j, i,
-                               kmin=kmin, kmax=kmax, thresh=thresh)
-    out["seed_source"] = "box_min"
+                               kmin=kmin, kmax=kmax, thresh=level)
+    out.update(seed_source="box_min", q_min=q_min, thresh_used=-abs(level))
     return out

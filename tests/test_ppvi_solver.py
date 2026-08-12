@@ -225,3 +225,26 @@ class TestScaleSplit:
         F = np.abs(np.fft.rfft(out["q_p"][upper], axis=-1)) ** 2
         keep = F[..., ss.KMIN:ss.KMAX + 1].sum()
         assert keep / F.sum() > 0.999
+
+    def test_contour_is_a_fraction_of_the_events_own_minimum(self):
+        """The contour scales with the event, and the seed stays inside it.
+
+        `frac * q_min` is negative and `q_min < frac * q_min` for any frac < 1,
+        so the box minimum is inside its own contour by construction -- which is
+        what keeps the flood fill unconditional after adding a threshold back.
+        """
+        import numpy as np
+        from pvtend.ppvi import scale_split as ss
+
+        q, th = self._field(seed=11)
+        upper, top = [4, 5, 6, 7], 8
+        bl, bo = np.arange(5, 55), np.arange(60, 150)
+
+        out = ss.split_at_box_minimum(q, th, upper, top, bl, bo)
+        assert out["thresh_used"] == pytest.approx(ss.OBJ_FRAC * out["q_min"])
+        assert out["mask"][out["seed"]]
+
+        # a tighter contour must give a strictly smaller object
+        tight = ss.split_at_box_minimum(q, th, upper, top, bl, bo, frac=0.7)
+        loose = ss.split_at_box_minimum(q, th, upper, top, bl, bo, frac=0.0)
+        assert tight["mask"].sum() < out["mask"].sum() < loose["mask"].sum()
