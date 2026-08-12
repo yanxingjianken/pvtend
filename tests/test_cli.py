@@ -150,3 +150,31 @@ class TestMain:
         with pytest.raises(SystemExit) as exc_info:
             main(["--version"])
         assert exc_info.value.code == 0
+
+
+class TestPPVIPiecesFlag:
+    """``--ppvi-pieces`` must exist on BOTH subcommands that write PPVI keys:
+    `compute` starts a catalogue and `ppvi` appends to one, and the two
+    decompositions write different key sets.
+    """
+
+    BASE = ["--event-type", "blocking", "--events-csv", "e.csv",
+            "--era5-dir", "/d/era5", "--clim-path", "/d/clim.nc",
+            "--out-dir", "/d/out"]
+
+    @pytest.mark.parametrize("cmd", ["compute", "ppvi"])
+    def test_defaults_to_per_level(self, cmd):
+        args = _build_parser().parse_args([cmd, *self.BASE])
+        assert args.ppvi_pieces == "per_level"
+
+    @pytest.mark.parametrize("cmd", ["compute", "ppvi"])
+    def test_scale_is_selectable(self, cmd):
+        args = _build_parser().parse_args(
+            [cmd, *self.BASE, "--ppvi-pieces", "scale"])
+        assert args.ppvi_pieces == "scale"
+
+    @pytest.mark.parametrize("cmd", ["compute", "ppvi"])
+    def test_unknown_mode_rejected(self, cmd):
+        with pytest.raises(SystemExit):
+            _build_parser().parse_args(
+                [cmd, *self.BASE, "--ppvi-pieces", "lower_middle_upper"])

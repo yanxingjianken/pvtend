@@ -44,6 +44,24 @@ from pvtend._version import __version__
 # Argument parser
 # =====================================================================
 
+def _add_ppvi_pieces_arg(p: argparse.ArgumentParser) -> None:
+    """``--ppvi-pieces``, shared by ``compute`` and ``ppvi``.
+
+    The two subcommands must offer the same choice or a catalogue could be
+    started in one decomposition and appended to in the other.
+    """
+    p.add_argument(
+        "--ppvi-pieces", choices=("per_level", "scale"), default="per_level",
+        help="How to split the PV/theta anomaly before inverting.  "
+             "'per_level' (default) gives one piece per Wu level, keys "
+             "u/v_rot_anom_ppvi_{1000..100}.  'scale' gives four pieces "
+             "surface / lower / upper_p / upper_e, splitting the upper level "
+             "into a planetary (zonal k<=4, inside the tracked object) and an "
+             "eddy part.  The two write different keys — do not mix them "
+             "within one output directory.",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser."""
     parser = argparse.ArgumentParser(
@@ -137,6 +155,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "winds (u/v_rot_anom_ppvi_{L}) in each NPZ written from scratch "
              "(default: enabled).  Use --no-with-ppvi to skip.",
     )
+    _add_ppvi_pieces_arg(compute)
 
     # ── ppvi ─────────────────────────────────────────────────────
     ppvi = sub.add_parser(
@@ -224,6 +243,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Directory with pre-computed Helmholtz climatology NetCDFs. "
              "Defaults to the same directory as --clim-path.",
     )
+    _add_ppvi_pieces_arg(ppvi)
 
     # ── clim-helmholtz ───────────────────────────────────────────
     clim_helm = sub.add_parser(
@@ -750,6 +770,7 @@ def _cmd_compute(args: argparse.Namespace) -> None:
         center_mode=args.center_mode,
         skip_existing=args.skip_existing,
         n_workers=args.n_workers,
+        ppvi_pieces=args.ppvi_pieces,
         clim_helmholtz_dir=(
             args.clim_helmholtz_dir
             if args.clim_helmholtz_dir is not None
@@ -823,6 +844,7 @@ def _cmd_ppvi(args: argparse.Namespace) -> None:
         center_mode=args.center_mode,
         skip_existing=args.skip_existing,
         n_workers=args.n_workers,
+        ppvi_pieces=args.ppvi_pieces,
         clim_helmholtz_dir=(
             args.clim_helmholtz_dir
             if args.clim_helmholtz_dir is not None

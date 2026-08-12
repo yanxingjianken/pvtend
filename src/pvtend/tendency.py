@@ -1428,6 +1428,34 @@ def _wrapped_lon_index(ilon, *, LON_PAD, nlon):
     return (np.arange(0, 2 * LON_PAD + 1) + start) % nlon
 
 
+def _band_row_index(lat_vec, band_lats, dlat):
+    """Row in the fixed PPVI inversion band for each patch-row latitude.
+
+    Matched by nearest value, so this holds for either latitude ordering and
+    for bands whose actual edge is off the nominal one. The predecessor,
+    ``round((BAND_N - plat)/dlat)``, baked in both a N->S band and a nominal
+    85.5 deg north edge; CESM f09 breaks both (stored S->N, band ends at
+    85.29), no row matched, and every PPVI field cropped to pure NaN.
+
+    Patch and band rows are both exact grid latitudes, so real matches are
+    exact; the tolerance only has to exclude a non-band row one dlat away.
+
+    Returns an int array of length ``len(lat_vec)``, ``-1`` where the patch row
+    is not in the band (off-grid NaN, or outside the band edges).
+    """
+    lat_vec = np.asarray(lat_vec, dtype=float)
+    band_lats = np.asarray(band_lats, dtype=float)
+    row_for = np.full(lat_vec.shape[0], -1, dtype=int)
+    tol = 0.25 * float(dlat)
+    for j, plat in enumerate(lat_vec):
+        if not np.isfinite(plat):
+            continue
+        r = int(np.abs(band_lats - plat).argmin())
+        if abs(band_lats[r] - plat) < tol:
+            row_for[j] = r
+    return row_for
+
+
 def _patch_lon1d(ds, ilon, grid):
     nlon = ds.sizes["longitude"]
     idx = _wrapped_lon_index(ilon, LON_PAD=grid.LON_PAD, nlon=nlon)
@@ -2116,6 +2144,14 @@ class TendencyComputer:
         band_idx = np.where(
             (lat_all <= self._BAND_N + 1e-6)
             & (lat_all >= self._BAND_S - 1e-6))[0]
+        # Row 0 MUST be the northernmost. The Fortran is never given latitudes:
+        # it rebuilds row I's as lat_n-(I-1)*dlat and keys cos(phi) and the
+        # Coriolis f off that index, so a S->N cube is inverted with f upside
+        # down. ERA5 is stored N->S and satisfies this for free; CESM f09 is
+        # stored S->N. Reversing here gives one convention to every downstream
+        # consumer -- the Fortran, psi_to_winds' centred differences, the crop.
+        if band_idx.size > 1 and lat_all[band_idx[0]] < lat_all[band_idx[-1]]:
+            band_idx = np.ascontiguousarray(band_idx[::-1])
         band_lats = lat_all[band_idx]
         ny = len(band_idx)
         inv_lon_pad = int(round(inv_lon_half / dlon))
@@ -2233,12 +2269,9 @@ class TendencyComputer:
         WU_PLEVS = self._WU_PLEVS
         WU2SI = self._WU2SI
         MI = self._WU_MI
-        BAND_N = self._BAND_N
         plev = geom["plev"]
         band_idx = geom["band_idx"]
         band_lats = geom["band_lats"]
-        ny = geom["ny"]
-        nx = geom["nx"]
         inv_lon_pad = geom["inv_lon_pad"]
         zhdr = geom["zhdr"]
         lon_all = geom["lon_all"]
@@ -2318,13 +2351,7 @@ class TendencyComputer:
 
         # ── Crop inversion grid (ny, nx) → event patch (yp, xp) ──
         # Latitude: match each patch row to a fixed-band row by value.
-        row_for = np.full(yp, -1, dtype=int)
-        for j, plat in enumerate(lat_vec):
-            if not np.isfinite(plat):
-                continue
-            r = int(round((BAND_N - plat) / dlat))
-            if 0 <= r < ny and abs(band_lats[r] - plat) < 0.25:
-                row_for[j] = r
+        row_for = _band_row_index(lat_vec, band_lats, dlat)
         # Longitude: map patch columns to inversion columns by grid index.
         patch_lon_pad = (xp - 1) // 2
         lon_idx_patch = _wrapped_lon_index(
@@ -2398,6 +2425,24 @@ class TendencyComputer:
         new["pv_anom_wu"] = _wavg(pv_anom_wu_c)
         return new
 
+    def _ppvi_piece_keys(self) -> list[str]:
+        """The ``u_rot_anom_ppvi_*_3d`` keys this run's mode writes.
+
+        Mode-dependent, and it has to be: "scale" writes surface / lower /
+        upper_p / upper_e and never a per-level key, so keying off a hardcoded
+        ``u_rot_anom_ppvi_250_3d`` made --skip-existing skip nothing (no run
+        resumable) and the post-condition in compute_ppvi_for_event fail every
+        single event.
+        """
+        from .ppvi import PIECES
+        from .ppvi import scale_split
+
+        if getattr(self.cfg, "ppvi_pieces", "per_level") == "scale":
+            names: list = list(scale_split.PIECES_SCALE)
+        else:
+            names = [self._WU_PLEVS[int(n) - 1] for n in PIECES]
+        return [f"u_rot_anom_ppvi_{n}_3d" for n in names]
+
     def compute_ppvi_for_event(
         self,
         evt_name: str,
@@ -2441,6 +2486,7 @@ class TendencyComputer:
         clim_ds = self._get_clim(chunks={"day": 1, "hour": 1})
 
         # ── Which dh have an existing NPZ that still needs PPVI fields? ──
+        piece_keys = self._ppvi_piece_keys()
         todo: list[tuple[int, pd.Timestamp, Path]] = []
         for dh in self.cfg.rel_hours:
             ts = base_ts + pd.Timedelta(hours=dh)
@@ -2449,7 +2495,7 @@ class TendencyComputer:
                 continue
             if self.cfg.skip_existing:
                 with np.load(fp, allow_pickle=True) as z:
-                    if "u_rot_anom_ppvi_250_3d" in z.files:
+                    if all(k in z.files for k in piece_keys):
                         continue
             todo.append((dh, ts, fp))
         if not todo:
@@ -2485,8 +2531,11 @@ class TendencyComputer:
                 new = self._ppvi_compute_keys(
                     store, ts, ds, clim_ds, cplev, geom)
                 store.update(new)
-                if "u_rot_anom_ppvi_250_3d" not in store:
-                    raise RuntimeError("PPVI produced no per-level keys")
+                missing = [k for k in piece_keys if k not in store]
+                if missing:
+                    raise RuntimeError(
+                        f"PPVI produced no {self.cfg.ppvi_pieces} keys "
+                        f"(missing {missing[:3]})")
                 with tempfile.NamedTemporaryFile(
                     mode="wb", suffix=".npz", dir=str(fp.parent),
                     delete=False,
