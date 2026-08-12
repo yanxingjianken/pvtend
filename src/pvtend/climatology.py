@@ -180,20 +180,31 @@ def load_climatology(
     clim_path: str | Path,
     engine: str = "netcdf4",
     prefer_smooth: bool = False,
+    chunks=None,
 ) -> xr.Dataset:
-    """Load climatology, auto-detecting file layout.
+    """Load a climatology, auto-detecting the file layout.
 
-    Supports three layouts (most → least granular):
+    Layouts, in the order tried:
 
-    1. **Per-var-per-month** files: raw ``{stem}_{month}_{var}.nc``
-       (or smoothed ``*_smooth.nc`` if *prefer_smooth* is True)
-    2. **Per-variable** files: ``{stem}_{var}.nc``
-    3. **Single merged** file
+    1. **Single merged** file
+    2. **Per-var-per-month** files ``{stem}_{month}_{var}.nc``
+    3. **Per-variable** files ``{stem}_{var}.nc``
+
+    This is a thin wrapper over :func:`pvtend.tendency.load_climatology`, which
+    is the implementation the pipeline itself runs. The two used to be separate
+    functions of the same name -- and only the pipeline's took ``chunks``, so
+    reaching for this one in a worker silently loaded the whole climatology
+    unchunked (~19 GB/worker on the CESM file) instead of releasing each slice.
 
     Args:
-        clim_path: Path to climatology file or directory stem.
+        clim_path: Climatology file, or the directory stem for the multi-file
+            layouts (the loader appends ``_{month}_{var}.nc``).
         engine: NetCDF engine.
-        prefer_smooth: If True, prefer smoothed files; if False, prefer raw.
+        prefer_smooth: Prefer smoothed ``*_smooth.nc`` per-var-per-month files.
+            Legacy path, kept for API compatibility; nothing in the pipeline
+            writes or reads smoothed climatologies.
+        chunks: Dask chunk spec, e.g. ``{"day": 1, "hour": 1}``. Pass it in any
+            long-lived worker; see the wrapped function for why.
 
     Returns:
         ``xr.Dataset`` with climatology fields.
@@ -203,63 +214,19 @@ def load_climatology(
     """
     clim_path = Path(clim_path)
 
-    # Direct file
-    if clim_path.is_file():
-        ds = xr.open_dataset(clim_path, chunks=None, engine=engine)
-        # The CESM climatology is a single slot-indexed file still carrying CAM
-        # names and the archive's 0…360 longitude. It must be put on the same
-        # footing as the state, because xarray aligns on coordinate *values*:
-        # ``pv − pv_bar`` against a 0…360 bar would go NaN over the western
-        # hemisphere rather than raise.
-        if "slot" in ds.dims:
-            from .tendency import cesm_to_pipeline_names
-            ds = cesm_to_pipeline_names(ds)
-        return ds
-
-    # Directory with per-var-per-month files
-    parent = clim_path.parent if clim_path.suffix else clim_path
-    stem = clim_path.stem.replace("_allvars", "") if clim_path.suffix else ""
-
-    if parent.is_dir():
-        if prefer_smooth:
-            # Try smoothed per-variable-per-month files first
-            pvm_files = sorted(parent.glob(f"{stem}*_smooth.nc"))
-            if pvm_files:
-                return xr.open_mfdataset(
-                    [str(f) for f in pvm_files],
-                    chunks=None,
-                    engine=engine,
-                    combine="by_coords",
-                    join="outer",
-                )
-
-        # Try raw per-variable-per-month files (exclude _smooth)
-        raw_files = sorted(
-            f for f in parent.glob(f"{stem}_*.nc")
-            if "_smooth" not in f.stem and "_allvars" not in f.stem
-        )
-        if raw_files:
+    if prefer_smooth and not clim_path.is_file():
+        parent = clim_path.parent if clim_path.suffix else clim_path
+        stem = clim_path.stem.replace("_allvars", "") if clim_path.suffix else ""
+        smooth = sorted(parent.glob(f"{stem}*_smooth.nc"))
+        if smooth:
             return xr.open_mfdataset(
-                [str(f) for f in raw_files],
-                chunks=None,
-                engine=engine,
-                combine="by_coords",
-                join="outer",
+                [str(f) for f in smooth], chunks=chunks, engine=engine,
+                combine="by_coords", join="outer",
             )
 
-        # If prefer_smooth was False and no raw files, try smooth as fallback
-        if not prefer_smooth:
-            pvm_files = sorted(parent.glob(f"{stem}*_smooth.nc"))
-            if pvm_files:
-                return xr.open_mfdataset(
-                    [str(f) for f in pvm_files],
-                    chunks=None,
-                    engine=engine,
-                    combine="by_coords",
-                    join="outer",
-                )
+    from .tendency import load_climatology as _load_climatology
 
-    raise FileNotFoundError(f"Climatology not found at {clim_path}")
+    return _load_climatology(clim_path, engine=engine, chunks=chunks)
 
 
 # ═══════════════════════════════════════════════════════════════

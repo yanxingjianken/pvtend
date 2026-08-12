@@ -85,3 +85,38 @@ class TestHelmholtzClimatologyRoundTrip:
     def test_load_missing_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError, match="Helmholtz climatology not found"):
             load_helmholtz_climatology(tmp_path, month=1, clim_stem="no_such")
+
+
+class TestLoadClimatologyIsOneImplementation:
+    """``pvtend.climatology.load_climatology`` and
+    ``pvtend.tendency.load_climatology`` were two functions of the same name.
+    Only the pipeline's took ``chunks``, so picking the other one in a worker
+    quietly loaded the climatology unchunked. They are now one.
+    """
+
+    def test_chunks_is_accepted(self, tmp_path):
+        """The whole point of the merge: the exported name honours chunks."""
+        from pvtend.climatology import load_climatology
+        with pytest.raises(FileNotFoundError):
+            load_climatology(tmp_path / "nope.nc", chunks={"day": 1})
+
+    def test_both_names_agree_on_a_missing_file(self, tmp_path):
+        from pvtend.climatology import load_climatology as via_climatology
+        from pvtend.tendency import load_climatology as via_tendency
+        msgs = []
+        for fn in (via_climatology, via_tendency):
+            with pytest.raises(FileNotFoundError) as e:
+                fn(tmp_path / "nope.nc")
+            msgs.append(str(e.value))
+        assert msgs[0] == msgs[1]
+
+    def test_package_export_is_the_merged_one(self, tmp_path):
+        import pvtend
+        with pytest.raises(FileNotFoundError, match="Climatology missing"):
+            pvtend.load_climatology(tmp_path / "nope.nc", chunks={"day": 1})
+
+    def test_single_file_round_trips(self, tmp_path):
+        from pvtend.climatology import load_climatology
+        p = tmp_path / "clim.nc"
+        xr.Dataset({"pv": ("x", np.arange(4.0))}).to_netcdf(p)
+        assert "pv" in load_climatology(p)
