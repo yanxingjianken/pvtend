@@ -150,3 +150,78 @@ class TestInvertAnisotropic:
         # fix prevented the all-NaN blow-up the old anisotropic path produced.
         p250 = res["psi_pieces"]["6"][6]
         assert np.isfinite(p250).mean() > 0.5
+
+
+# --- planetary/eddy scale split -------------------------------------------
+
+class TestScaleSplit:
+    """The split must be exactly additive, and must not need tuning."""
+
+    @staticmethod
+    def _field(seed=0):
+        import numpy as np
+        rng = np.random.default_rng(seed)
+        NL, NY, NX = 9, 60, 288
+        q = rng.standard_normal((NL, NY, NX)) * 0.4
+        jj, ii = np.meshgrid(np.arange(NY), np.arange(NX), indexing="ij")
+        blob = -3.0 * np.exp(-(((jj - 25) / 6.) ** 2
+                               + (((ii - 100 + 144) % 288 - 144) / 10.) ** 2))
+        q[4:9] += blob
+        th = rng.standard_normal((NY, NX)) * 2.0
+        return q, th
+
+    def test_pieces_sum_back_exactly(self):
+        """Pass D is linear in its source, so the split is only legitimate if
+        the pieces sum to the unsplit anomaly to machine precision."""
+        import numpy as np
+        from pvtend.ppvi import scale_split as ss
+
+        q, th = self._field()
+        upper, top = [4, 5, 6, 7], 8
+        out = ss.split_at_box_minimum(q, th, upper, top,
+                                      np.arange(5, 55), np.arange(60, 150))
+        np.testing.assert_allclose((out["q_p"] + out["q_e"])[upper], q[upper],
+                                   atol=1e-12)
+        np.testing.assert_allclose(out["th_p"] + out["th_e"], th, atol=1e-12)
+
+    def test_box_minimum_seed_never_needs_a_threshold(self):
+        """The box holds a tracked anticyclone, so its minimum is negative and
+        the flood fill is unconditional — there is no threshold to tune."""
+        import numpy as np
+        from pvtend.ppvi import scale_split as ss
+
+        q, th = self._field(seed=3)
+        upper, top = [4, 5, 6, 7], 8
+        bl, bo = np.arange(5, 55), np.arange(60, 150)
+        out = ss.split_at_box_minimum(q, th, upper, top, bl, bo)
+        assert out["seed_source"] == "box_min"
+        lev, j, i = out["seed"]
+        assert out["mask"][lev, j, i], "the seed must lie inside its own object"
+
+    def test_object_cannot_leave_the_box(self):
+        """Cropping before the flood fill is what stops the k<=4 negative side
+        linking through the subtropics into a hemispheric blob."""
+        import numpy as np
+        from pvtend.ppvi import scale_split as ss
+
+        q, th = self._field(seed=5)
+        upper, top = [4, 5, 6, 7], 8
+        bl, bo = np.arange(5, 55), np.arange(60, 150)
+        out = ss.split_at_box_minimum(q, th, upper, top, bl, bo)
+        outside = np.ones(q.shape[-1], bool)
+        outside[bo] = False
+        assert not out["mask"][..., outside].any()
+
+    def test_planetary_part_is_wavenumber_limited(self):
+        """The re-filter after masking is the point: q'_k4 * M is not itself
+        k<=4, because a sharp mask edge puts power back into every wavenumber."""
+        import numpy as np
+        from pvtend.ppvi import scale_split as ss
+
+        q, th = self._field(seed=7)
+        upper, top = [4, 5, 6, 7], 8
+        out = ss.split_at_box_minimum(q, th, upper, top,
+                                      np.arange(5, 55), np.arange(60, 150))
+        F = np.abs(np.fft.rfft(out["q_p"][upper], axis=-1)) ** 2
+        keep = F[..., ss.KMIN:ss.KMAX + 1].sum()
+        assert keep / F.sum() > 0.999
