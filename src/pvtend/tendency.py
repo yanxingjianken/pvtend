@@ -526,6 +526,17 @@ def open_cesm_years_ds(
         raise FileNotFoundError(
             f"No CESM files for member {member}, years {year_keys} in {data_dir}")
 
+    # Callers name dimensions the pipeline's way, but `chunks` is applied to
+    # the RAW file, whose dims are still CAM's, so {"valid_time": 1} matched
+    # nothing and the axis fell back to the file's on-disk chunking. On this
+    # archive that happens to be one timestep anyway, so the request was
+    # honoured by luck rather than by asking -- which is not something to rely
+    # on when the chunking of a future archive is the only thing between a
+    # worker and a 7 GB member-year.
+    if isinstance(chunks, dict) and chunks:
+        _raw_of = {v: k for k, v in _CESM_COORDS.items()}
+        chunks = {_raw_of.get(k, k): v for k, v in chunks.items()}
+
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*separate the stored chunks.*")
         ds = xr.open_mfdataset(
@@ -602,8 +613,20 @@ def fill_window_below_ground(ds: xr.Dataset) -> xr.Dataset:
 _FILE_KEY_PAD_H: int = 48
 
 
-def open_source_ds(cfg, base_ts: pd.Timestamp, chunks=None) -> xr.Dataset:
-    """Open the time window for whichever source ``cfg.source`` names."""
+#: Every variable the tendency budget needs. The PPVI pass needs only four of
+#: them, which on ERA5 is four monthly files instead of seven.
+_SOURCE_VARS = ["u", "v", "w", "pv", "z", "t", "q"]
+
+
+def open_source_ds(cfg, base_ts: pd.Timestamp, chunks=None,
+                   var_list: list[str] | None = None) -> xr.Dataset:
+    """Open the time window for whichever source ``cfg.source`` names.
+
+    Args:
+        var_list: Variables to open. ERA5 stores one file per (variable, month)
+            so a shorter list is less to open; the CESM archive holds every
+            variable in one file per year, where it makes no difference.
+    """
     hmin = int(min(cfg.rel_hours)) - _FILE_KEY_PAD_H
     hmax = int(max(cfg.rel_hours)) + _FILE_KEY_PAD_H
     if getattr(cfg, "source", "era5") == "cesm":
@@ -614,7 +637,7 @@ def open_source_ds(cfg, base_ts: pd.Timestamp, chunks=None) -> xr.Dataset:
             year_keys_for_window(base_ts, hmin, hmax),
             engine=cfg.engine, chunks=chunks)
     return open_months_ds(
-        cfg.data_dir, ["u", "v", "w", "pv", "z", "t", "q"],
+        cfg.data_dir, list(var_list) if var_list else _SOURCE_VARS,
         month_keys_for_window(base_ts, hmin, hmax),
         engine=cfg.engine, chunks=chunks)
 
@@ -2544,15 +2567,17 @@ class TendencyComputer:
             return 0
 
         # ── Load only z, t, u, v for the window ──
-        month_keys = month_keys_for_window(
-            base_ts, hmin=min(self.cfg.rel_hours),
-            hmax=max(self.cfg.rel_hours))
+        # Via open_source_ds, not open_months_ds: the latter is the ERA5
+        # one-file-per-(variable, month) layout, so on CESM -- one file per
+        # (member, year) -- this whole append path failed every event with
+        # "No files for z in months [(1985, 2)]", making `pvtend-pipeline ppvi
+        # --skip-existing` unusable on exactly the catalogue it exists to fill.
         # Lazy open (per-timestep chunks): a PPVI worker only reads the few
         # timesteps it inverts, not the whole ~15 GB month — this keeps
         # per-worker RSS at ~1-2 GB so many workers fit under the 2 TB cap.
-        ds = open_months_ds(
-            self.cfg.data_dir, ["z", "t", "u", "v"], month_keys,
-            engine=self.cfg.engine, chunks={"valid_time": 1})
+        ds = open_source_ds(
+            self.cfg, base_ts, chunks={"valid_time": 1},
+            var_list=["z", "t", "u", "v"])
         cplev = _plev_name(clim_ds)
         geom = self._ppvi_geom(ds, inv_lon_half)
         dt_index = pd.to_datetime(ds.valid_time.values)

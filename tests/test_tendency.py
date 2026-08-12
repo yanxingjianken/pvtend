@@ -348,3 +348,68 @@ class TestCircNearestLon:
         lon360 = np.arange(0.0, 360.0, 1.25)
         assert lon360[_circ_nearest_lon(lon360, -0.4)] == pytest.approx(0.0)
         assert lon360[_circ_nearest_lon(lon360, 359.8)] == pytest.approx(0.0)
+
+
+class TestOpenSourceDsDispatch:
+    """`compute_ppvi_for_event` used to open its window with open_months_ds,
+    which is the ERA5 one-file-per-(variable, month) layout. On CESM -- one file
+    per (member, year) -- every event died with "No files for z in months
+    [(1985, 2)]", so `pvtend-pipeline ppvi --skip-existing` could not append to
+    the very catalogue it exists to fill.
+    """
+
+    @staticmethod
+    def _cfg(**kw):
+        return TendencyConfig(rel_hours=[0], engine="netcdf4", **kw)
+
+    def test_cesm_goes_to_the_year_reader(self, monkeypatch, tmp_path):
+        import pvtend.tendency as T
+        seen = {}
+        monkeypatch.setattr(T, "open_cesm_years_ds",
+                            lambda *a, **k: seen.update(args=a, kw=k) or "CESM")
+        monkeypatch.setattr(T, "open_months_ds",
+                            lambda *a, **k: pytest.fail("used the ERA5 reader"))
+        got = T.open_source_ds(
+            self._cfg(source="cesm", member=91, data_dir=tmp_path),
+            pd.Timestamp("1985-02-08"), var_list=["z", "t", "u", "v"])
+        assert got == "CESM"
+        assert seen["args"][1] == 91
+
+    def test_era5_still_goes_to_the_month_reader(self, monkeypatch, tmp_path):
+        import pvtend.tendency as T
+        seen = {}
+        monkeypatch.setattr(T, "open_months_ds",
+                            lambda *a, **k: seen.update(args=a) or "ERA5")
+        got = T.open_source_ds(self._cfg(source="era5", data_dir=tmp_path),
+                               pd.Timestamp("2010-06-15"))
+        assert got == "ERA5"
+        assert seen["args"][1] == ["u", "v", "w", "pv", "z", "t", "q"]
+
+    def test_var_list_narrows_the_era5_open(self):
+        import pvtend.tendency as T
+        seen = {}
+        orig = T.open_months_ds
+        try:
+            T.open_months_ds = lambda *a, **k: seen.update(args=a) or "ERA5"
+            T.open_source_ds(self._cfg(source="era5", data_dir=Path(".")),
+                             pd.Timestamp("2010-06-15"),
+                             var_list=["z", "t", "u", "v"])
+        finally:
+            T.open_months_ds = orig
+        assert seen["args"][1] == ["z", "t", "u", "v"]
+
+    def test_cesm_chunk_keys_are_translated_to_raw_dims(self, monkeypatch, tmp_path):
+        """`chunks` is applied to the raw file, whose dims are still CAM's."""
+        import pvtend.tendency as T
+        (tmp_path / "lens2_smbb_m91_1985_plev.nc").write_bytes(b"")
+        seen = {}
+
+        def _capture(*a, **k):
+            seen.update(k)
+            raise RuntimeError("stop here")
+
+        monkeypatch.setattr(T.xr, "open_mfdataset", _capture)
+        with pytest.raises(RuntimeError, match="stop here"):
+            T.open_cesm_years_ds(tmp_path, 91, [1985],
+                                 chunks={"valid_time": 1, "latitude": 4})
+        assert seen["chunks"] == {"time": 1, "lat": 4}
