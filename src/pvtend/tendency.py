@@ -203,6 +203,30 @@ def _find_per_var_month_files(parent: Path, stem: str) -> list[Path]:
     return files
 
 
+def _clim_chunks(clim_path: Path, chunks, engine: str):
+    """Translate a chunk request onto whatever dimensions this climatology has.
+
+    The per-event chunking exists to stop a long-lived worker retaining every
+    slice it has ever touched. Callers ask for it as ``{"day": 1, "hour": 1}``,
+    which are dimensions of the ERA5 climatology — but on the CESM one they are
+    *coordinates along* ``slot`` and not dimensions at all, so the request
+    matches nothing and the 11.2 GB file is read unchunked. Each new slot then
+    stays in the backend cache, and a worker grows until the job is killed with
+    no traceback (measured: a survey died after 7 events at 48 GB).
+
+    Returns the equivalent request for the layout at hand: ``{"slot": 1}`` for
+    the CESM file, the caller's own spec filtered to real dimensions otherwise.
+    """
+    if not isinstance(chunks, dict) or not chunks:
+        return chunks
+    with xr.open_dataset(clim_path, engine=engine) as probe:
+        dims = set(probe.dims)
+    if "slot" in dims:
+        return {"slot": 1}
+    kept = {k: v for k, v in chunks.items() if k in dims}
+    return kept or None
+
+
 def load_climatology(
     clim_path: Path, engine: str = "netcdf4", chunks=None,
 ) -> xr.Dataset:
@@ -226,8 +250,9 @@ def load_climatology(
             "ignore", message=".*separate the stored chunks.*")
         if clim_path.is_file():
             _log(f"Loading climatology from single file: {clim_path}")
-            ds = xr.open_dataset(clim_path, chunks=chunks, engine=engine,
-                                 lock=False)
+            ds = xr.open_dataset(clim_path, chunks=_clim_chunks(clim_path, chunks,
+                                                               engine),
+                                 engine=engine, lock=False)
             # The CESM climatology is a single slot-indexed file still carrying
             # CAM names and the archive's 0…360 longitude. It has to be put on
             # the same footing as the state: `clim_bar` looks up "pv", and
