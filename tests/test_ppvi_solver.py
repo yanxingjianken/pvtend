@@ -248,3 +248,116 @@ class TestScaleSplit:
         tight = ss.split_at_box_minimum(q, th, upper, top, bl, bo, frac=0.7)
         loose = ss.split_at_box_minimum(q, th, upper, top, bl, bo, frac=0.0)
         assert tight["mask"].sum() < out["mask"].sum() < loose["mask"].sum()
+
+
+# ── the wrap seam ────────────────────────────────────────────────────
+class TestFillSeamColumns:
+    """pvpialln flags all four lateral boundaries (wuppvi.f:93-102).  On a pass
+    over the whole circle the first and last columns are *neighbours* across the
+    dateline, so the anomaly comes back with a notch there and zonal_filter
+    transforms across it.
+    """
+
+    @staticmethod
+    def _wave(nx=288, k=3):
+        lam = np.linspace(0, 2 * np.pi, nx, endpoint=False)
+        return np.sin(k * lam)[None, None, :] * np.ones((2, 3, 1))
+
+    def test_flagged_columns_are_replaced(self):
+        from pvtend.ppvi.scale_split import fill_seam_columns
+        q = self._wave().copy()
+        q[..., 0] = 0.0
+        q[..., -1] = 0.0
+        out = fill_seam_columns(q)
+        assert np.abs(out[..., 0]).min() > 0
+        assert np.abs(out[..., -1]).min() > 0
+
+    def test_interior_is_untouched(self):
+        from pvtend.ppvi.scale_split import fill_seam_columns
+        q = self._wave().copy()
+        q[..., 0] = q[..., -1] = 0.0
+        np.testing.assert_array_equal(fill_seam_columns(q)[..., 1:-1], q[..., 1:-1])
+
+    def test_recovers_a_smooth_wave_closely(self):
+        """The notch is the error; the fill should mostly remove it."""
+        from pvtend.ppvi.scale_split import fill_seam_columns
+        truth = self._wave()
+        notched = truth.copy()
+        notched[..., 0] = notched[..., -1] = 0.0
+        err_before = np.abs(notched - truth).max()
+        err_after = np.abs(fill_seam_columns(notched) - truth).max()
+        assert err_after < 0.25 * err_before
+
+    def test_planetary_amplitude_stops_being_inflated(self):
+        """The reason this matters: k<=4 power from a notch that is not real."""
+        from pvtend.ppvi.scale_split import fill_seam_columns, zonal_filter
+        truth = self._wave(k=3)
+        notched = truth.copy()
+        notched[..., 0] = notched[..., -1] = 0.0
+        rms = lambda a: float(np.sqrt(np.mean(a ** 2)))
+        e_notched = rms(zonal_filter(notched) - zonal_filter(truth))
+        e_filled = rms(zonal_filter(fill_seam_columns(notched)) - zonal_filter(truth))
+        assert e_filled < e_notched
+
+    def test_returns_a_copy(self):
+        from pvtend.ppvi.scale_split import fill_seam_columns
+        q = self._wave().copy()
+        fill_seam_columns(q)
+        assert q[..., 0] == pytest.approx(self._wave()[..., 0])
+
+    def test_degenerate_width_is_a_noop(self):
+        from pvtend.ppvi.scale_split import fill_seam_columns
+        q = np.ones((1, 1, 3))
+        np.testing.assert_array_equal(fill_seam_columns(q), q)
+
+
+class TestDatelineBoxIsContiguous:
+    """`split_at_box_minimum` floods with ndimage.label, which is not periodic.
+    A box spanning the dateline must therefore arrive ordered around the circle,
+    not sorted by index, or the object is cut in half and a false adjacency is
+    created between longitudes 240 deg apart.
+    """
+
+    NLON, DLON, LON_HALF = 288, 1.25, 60.0
+
+    def _box(self, clon):
+        from pvtend.tendency import _circ_nearest_lon, _wrapped_lon_index
+        lon = np.arange(-180.0, 180.0, self.DLON)
+        return lon, _wrapped_lon_index(
+            _circ_nearest_lon(lon, clon),
+            LON_PAD=int(round(self.LON_HALF / self.DLON)), nlon=self.NLON)
+
+    def test_box_is_circularly_contiguous_at_the_dateline(self):
+        _, box = self._box(175.0)
+        step = np.diff(box) % self.NLON
+        assert set(np.unique(step)) == {1}, "columns must be adjacent on the circle"
+
+    def test_box_holds_the_right_longitudes(self):
+        lon, box = self._box(175.0)
+        d = np.abs((lon[box] - 175.0 + 180.0) % 360.0 - 180.0)
+        assert d.max() <= self.LON_HALF + 0.5 * self.DLON
+
+    def test_a_seam_crossing_object_stays_one_component(self):
+        from pvtend.ppvi.scale_split import component_containing
+        lon, box = self._box(178.0)
+        q = np.zeros((1, 3, self.NLON))
+        blob = np.abs((lon - 178.0 + 180.0) % 360.0 - 180.0) <= 10.0
+        q[:, :, blob] = -1.0
+        sub = q[:, :, box] < -0.5
+        seed = int(np.nonzero(box == int(np.nonzero(blob)[0][len(np.nonzero(blob)[0]) // 2]))[0][0])
+        comp = component_containing(sub, 0, 1, seed)
+        assert comp.sum() == sub.sum(), "the blob must not be split by the seam"
+
+    def test_sorted_box_would_have_split_it(self):
+        """Guard the guard: the old boolean-mask ordering really does fail."""
+        from pvtend.ppvi.scale_split import component_containing
+        lon = np.arange(-180.0, 180.0, self.DLON)
+        old_box = np.nonzero(
+            np.abs((lon - 178.0 + 180.0) % 360.0 - 180.0) <= self.LON_HALF)[0]
+        q = np.zeros((1, 3, self.NLON))
+        blob = np.abs((lon - 178.0 + 180.0) % 360.0 - 180.0) <= 10.0
+        q[:, :, blob] = -1.0
+        sub = q[:, :, old_box] < -0.5
+        seed = int(np.nonzero(old_box == int(np.nonzero(blob)[0][0]))[0][0])
+        comp = component_containing(sub, 0, 1, seed)
+        assert comp.sum() < sub.sum(), "expected the old ordering to split the object"

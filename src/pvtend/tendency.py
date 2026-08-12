@@ -283,7 +283,7 @@ def load_climatology(
 
         per_var = sorted(
             f for f in parent.glob(f"{stem}_*.nc")
-            if "_smoothed" not in f.stem and "_allvars" not in f.stem
+            if "_smooth" not in f.stem and "_allvars" not in f.stem
         )
         if per_var:
             _log(f"Loading climatology from {len(per_var)} per-variable files")
@@ -2233,12 +2233,25 @@ class TendencyComputer:
         q_e, tht_e = _pass_ab(ds, False)
         q_m, tht_m = _pass_ab(clim_ds, True)
         q_anom, th_anom = q_e - q_m, tht_e - tht_m
+        # This pass spans the whole circle, so its first and last columns are
+        # neighbours -- and pvpialln flags both as missing, leaving a notch at
+        # the dateline for zonal_filter to transform across. Only Q is flagged;
+        # the boundary theta is not, so th_anom needs no equivalent.
+        q_anom = scale_split.fill_seam_columns(q_anom)
 
         clat, clon = float(store["center_lat"]), float(store["center_lon"])
         box_lat = np.nonzero(np.abs(band_lats - clat) <= self.cfg.lat_half)[0]
-        box_lon = np.nonzero(
-            np.abs((lon_all - clon + 180.0) % 360.0 - 180.0)
-            <= self.cfg.lon_half)[0]
+        # The box columns must be ordered AROUND THE CIRCLE, not by index. A
+        # boolean mask over a -180..180 axis returns sorted indices, so a box
+        # spanning the dateline arrives as [0..k, m..nlon-1]: the flood fill in
+        # split_at_box_minimum sees the two halves of the object at opposite
+        # ends of its sub-array (ndimage.label is not periodic) and invents an
+        # adjacency in the middle between longitudes 240 deg apart. 31,082 of
+        # the 85,425 catalogue events have a box that crosses the seam.
+        # _wrapped_lon_index gives the same columns in circular order.
+        box_lon = _wrapped_lon_index(
+            _circ_nearest_lon(lon_all, clon),
+            LON_PAD=int(round(self.cfg.lon_half / dlon)), nlon=nlon)
 
         out = scale_split.split_at_box_minimum(
             q_anom, th_anom, scale_split.UPPER_INTERIOR_IDX,
@@ -2297,6 +2310,16 @@ class TendencyComputer:
             ilon_c, LON_PAD=inv_lon_pad, nlon=nlon)
 
         # ── Extract event + climatological-mean cubes (NL, ny, nx) ──
+        # Both are indexed POSITIONALLY, by the same band_idx / lon_idx_inv, so
+        # the two grids have to be element-identical -- and band_idx is now
+        # deliberately non-monotonic on a south->north archive, which makes a
+        # silent mismatch harder to spot in the output than it already was.
+        for _ax in ("latitude", "longitude"):
+            if not np.array_equal(ds[_ax].values, clim_ds[_ax].values):
+                raise ValueError(
+                    f"climatology {_ax} grid differs from the state's; the PPVI "
+                    f"cubes are indexed positionally and would be misaligned "
+                    f"(state n={ds.sizes[_ax]}, clim n={clim_ds.sizes[_ax]})")
         mo, dy, hr = int(ts.month), int(ts.day), int(ts.hour)
 
         def _ev(var):
@@ -2328,7 +2351,7 @@ class TendencyComputer:
         # after which q_p / q_e are cropped back onto the inversion box.
         pieces = PIECES
         qp_anoms = th_anoms = None
-        if getattr(self.cfg, "ppvi_pieces", "per_level") == "scale":
+        if self.cfg.ppvi_pieces == "scale":
             pieces = scale_split.PIECES_SCALE
             qp_anoms, th_anoms, split_diag = self._scale_split_sources(
                 ds, clim_ds, cplev, ts, geom, store, lon_idx_inv)
@@ -2367,6 +2390,19 @@ class TendencyComputer:
 
         vr_mask = row_for >= 0
         vc_mask = col_for >= 0
+        # An empty match is how this failed silently for the whole of the CESM
+        # port: _crop then returns its np.full(nan) untouched, every PPVI key
+        # comes out 100 % NaN, and nothing raises -- so the NPZ is written,
+        # looks complete, and --skip-existing never revisits it.  Refuse.
+        if not vr_mask.any() or not vc_mask.any():
+            raise RuntimeError(
+                "PPVI crop matched no band "
+                f"{'rows' if not vr_mask.any() else 'columns'}: patch lat "
+                f"{np.nanmin(lat_vec):.2f}..{np.nanmax(lat_vec):.2f} vs band "
+                f"{band_lats.min():.2f}..{band_lats.max():.2f} "
+                f"(dlat={dlat:.4f}), patch centre lon {center_lon:.2f}. "
+                "Every cropped field would be NaN."
+            )
         rr = row_for[vr_mask]
         cc = col_for[vc_mask]
         ridx = np.where(vr_mask)[0]
@@ -2442,7 +2478,7 @@ class TendencyComputer:
         from .ppvi import PIECES
         from .ppvi import scale_split
 
-        if getattr(self.cfg, "ppvi_pieces", "per_level") == "scale":
+        if self.cfg.ppvi_pieces == "scale":
             names: list = list(scale_split.PIECES_SCALE)
         else:
             names = [self._WU_PLEVS[int(n) - 1] for n in PIECES]
