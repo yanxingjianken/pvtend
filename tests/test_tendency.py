@@ -413,3 +413,54 @@ class TestOpenSourceDsDispatch:
             T.open_cesm_years_ds(tmp_path, 91, [1985],
                                  chunks={"valid_time": 1, "latitude": 4})
         assert seen["chunks"] == {"time": 1, "lat": 4}
+
+
+class TestArchiveSplitKeys:
+    """The archive-PV split keys (pv_anom_p/e) added 2026-08-19."""
+
+    def test_track_id_parser_handles_both_schemes(self):
+        from pathlib import Path
+        from pvtend.classify import _parse_track_id
+        assert _parse_track_id(
+            Path("track_m091_t00002_1985020800_dh+0.npz")) == "m091_t00002"
+        assert _parse_track_id(
+            Path("track_1234_2001010100_dh+0.npz")) == 1234
+        # the member prefix must survive: a bare int would collide across
+        # members (every member has a t00002)
+        a = _parse_track_id(Path("track_m091_t00002_x_dh+0.npz"))
+        b = _parse_track_id(Path("track_m092_t00002_x_dh+0.npz"))
+        assert a != b
+
+    def test_arch_keys_identity_and_shapes(self):
+        """p + e == stored total exactly; mask uint8; wavg keys present."""
+        import pvtend.tendency as T
+        ny, nx, nlev = 21, 33, 9
+        levels = np.array([1000, 850, 700, 500, 400, 300, 250, 200, 100])
+        band_lats = 80.0 - np.arange(60) * 0.9375          # N->S band
+        lat_vec = 60.0 - np.arange(ny) * 0.9375            # patch rows in band
+        rng = np.random.default_rng(0)
+        total = rng.standard_normal((nlev, ny, nx))
+        store = dict(
+            pv_anom_3d=total,
+            lat_vec=lat_vec,
+            levels=levels,
+            wavg_levels=np.array([400, 300, 250, 200]),
+            center_lon=100.0,
+            z_3d=np.linspace(100, 16000, nlev)[:, None, None]
+            * np.ones((nlev, ny, nx)),
+        )
+        geom = dict(band_lats=band_lats, dlat=0.9375, dlon=1.25,
+                    lon_all=np.arange(0.0, 360.0, 1.25), nlon=288)
+        arch = dict(
+            q_p=rng.standard_normal((nlev, len(band_lats), 288)),
+            mask=(rng.random((nlev, len(band_lats), 288)) > 0.9),
+            q_min=-5.0, thresh=-1.75)
+        cfg = T.TendencyConfig(source="cesm", member=91)
+        comp = T.TendencyComputer.__new__(T.TendencyComputer)
+        comp.cfg = cfg
+        new = comp._arch_keys_from_split(arch, store, geom)
+        assert new["pv_split_mask_3d"].dtype == np.uint8
+        s = new["pv_anom_p_3d"] + new["pv_anom_e_3d"]
+        np.testing.assert_allclose(s, total, atol=1e-12)
+        assert new["pv_anom_p"].shape == (ny, nx)
+        assert np.isfinite(new["pv_anom_p"]).all()

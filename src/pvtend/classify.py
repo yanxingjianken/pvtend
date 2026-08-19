@@ -48,13 +48,20 @@ from .rwb import (
 )
 
 # ── regex helpers ────────────────────────────────────────────────────
-_TRACK_RE = re.compile(r"track_(\d+)_")
+# Accepts both naming schemes: ERA5 ``track_1234_...`` (numeric id) and
+# CESM ``track_m091_t00002_...``.  The CESM id keeps its member prefix as a
+# STRING -- a bare int would collide across members (every member has a
+# t00002) and silently merge different events into one trackset entry.
+_TRACK_RE = re.compile(r"track_((?:m\d+_t)?\d+)_")
 _DH_RE = re.compile(r"^dh=([+\-]?\d+)$")
 
 
-def _parse_track_id(fp: Path) -> int | None:
+def _parse_track_id(fp: Path) -> int | str | None:
     m = _TRACK_RE.search(fp.name)
-    return int(m.group(1)) if m else None
+    if not m:
+        return None
+    g = m.group(1)
+    return g if g.startswith("m") else int(g)
 
 
 def _parse_dh(dirname: str) -> int | None:

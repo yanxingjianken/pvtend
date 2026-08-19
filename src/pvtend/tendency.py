@@ -2315,7 +2315,60 @@ class TendencyComputer:
         diag = dict(q_min=out["q_min"], thresh=out["thresh_used"],
                     mask_frac=float(out["mask"][scale_split.UPPER_INTERIOR_IDX].mean()),
                     top_frac=out["top_frac"])
+
+        diag["arch_split"] = self._archive_split_band(
+            ds, clim_ds, cplev, ts, geom, clat, clon)
         return qp_anoms, th_anoms, diag
+
+    def _archive_split_band(self, ds, clim_ds, cplev, ts, geom, clat, clon):
+        """Planetary/eddy split of the ARCHIVE PV anomaly on the Wu band.
+
+        Same algorithm and parameters as the production wind split
+        (split_near_centre: global k1-4 zonal filter, near-centre seed,
+        frac of the local minimum), applied to the archive PV anomaly.
+        One convention for both the writer and the retrofit of pre-existing
+        NPZ: the mask is seeded on the ARCHIVE anomaly itself -- a Wu-seeded
+        mask cannot be reproduced on existing files without re-running pass
+        A/B per event, and the frac-of-local-min contour is scale-relative,
+        so the difference between the two seeds is second order.
+
+        Needs only the ``pv`` variable of both datasets; NO Fortran.
+        """
+        from .ppvi import scale_split
+        band_idx, band_lats = geom["band_idx"], geom["band_lats"]
+        dlat, dlon = geom["dlat"], geom["dlon"]
+        lon_all = geom["lon_all"]
+        plev = geom["plev"]
+        mo, dy, hr = int(ts.month), int(ts.day), int(ts.hour)
+
+        def _band(src, is_clim):
+            if is_clim:
+                base = (src["pv"].isel(slot=noleap_slot_scalar(ts))
+                        if "slot" in src.dims
+                        else src["pv"].sel(month=mo, day=dy, hour=hr))
+                base = base.sel({cplev: self._WU_PLEVS})
+            else:
+                base = src["pv"].sel(valid_time=ts).sel({plev: self._WU_PLEVS})
+            return np.ascontiguousarray(
+                base.isel(latitude=band_idx).values.astype(np.float64))
+
+        pva_band = _band(ds, False) - _band(clim_ds, True)
+        box_lat = np.nonzero(np.abs(band_lats - clat) <= self.cfg.lat_half)[0]
+        box_lon = _wrapped_lon_index(
+            _circ_nearest_lon(lon_all, clon),
+            LON_PAD=int(round(self.cfg.lon_half / dlon)),
+            nlon=geom["nlon"])
+        centre_row = int(np.argmin(np.abs(band_lats - clat)))
+        arch = scale_split.split_near_centre(
+            pva_band, np.zeros_like(pva_band[0]),
+            scale_split.UPPER_INTERIOR_IDX, scale_split.TOP_IDX,
+            box_lat, box_lon,
+            centre_lat=centre_row,
+            centre_lon=_circ_nearest_lon(lon_all, clon),
+            halo_lat=int(round(SEED_HALO_LAT / dlat)),
+            halo_lon=int(round(SEED_HALO_LON / dlon)))
+        return dict(q_p=arch["q_p"], mask=arch["mask"],
+                    q_min=arch["q_min"], thresh=arch["thresh_used"])
 
     def _ppvi_compute_keys(
         self, store: dict, ts: pd.Timestamp, ds: xr.Dataset,
@@ -2398,10 +2451,12 @@ class TendencyComputer:
         # after which q_p / q_e are cropped back onto the inversion box.
         pieces = PIECES
         qp_anoms = th_anoms = None
+        _arch_split = None
         if self.cfg.ppvi_pieces == "scale":
             pieces = scale_split.PIECES_SCALE
             qp_anoms, th_anoms, split_diag = self._scale_split_sources(
                 ds, clim_ds, cplev, ts, geom, store, lon_idx_inv)
+            _arch_split = split_diag.pop("arch_split", None)
             store.update({f"ppvi_split_{k}": v for k, v in split_diag.items()})
 
         # ── Run the Wu piecewise inversion ──
@@ -2510,8 +2565,144 @@ class TendencyComputer:
         new["u_rot_anom_residual_ppvi"] = _wavg(resid_u)
         new["v_rot_anom_residual_ppvi"] = _wavg(resid_v)
         new["pv_anom_wu_3d"] = _pad_levels(pv_anom_wu_c)
+
+        # ── archive-PV planetary/eddy split, persisted (scale mode only) ──
+        if _arch_split is not None and "pv_anom_3d" in store:
+            new.update(self._arch_keys_from_split(_arch_split, store, geom))
         new["pv_anom_wu"] = _wavg(pv_anom_wu_c)
         return new
+
+    def _arch_keys_from_split(self, arch, store: dict, geom: dict) -> dict:
+        """Patch-cropped archive-split keys from a band-global split result.
+
+        Self-contained (store + geom only) so the writer and the retrofit
+        produce byte-identical keys.  Conventions: p is zero outside the
+        upper interior levels and outside the Wu band rows; e is the STORED
+        total minus p, so ``pv_anom_p_3d + pv_anom_e_3d == pv_anom_3d``
+        exactly on disk wherever the total is finite.  Units follow the
+        stored archive PV (PVU on this catalogue).
+        """
+        lat_vec = np.asarray(store["lat_vec"], dtype=float)
+        levels = [int(v) for v in np.asarray(store["levels"])]
+        total3d = np.asarray(store["pv_anom_3d"], dtype=float)
+        yp, xp = total3d.shape[1], total3d.shape[2]
+        row_for = _band_row_index(lat_vec, geom["band_lats"], geom["dlat"])
+        ilon_c = _circ_nearest_lon(geom["lon_all"], float(store["center_lon"]))
+        lon_idx_patch = _wrapped_lon_index(
+            ilon_c, LON_PAD=(xp - 1) // 2, nlon=geom["nlon"])
+        vr = row_for >= 0
+        rr, ridx = row_for[vr], np.where(vr)[0]
+        wu_pos = [levels.index(pl) for pl in self._WU_PLEVS]
+
+        def _crop_pad(cube):
+            pat = np.full((len(levels), yp, xp), np.nan, dtype=float)
+            if rr.size:
+                out = np.full((cube.shape[0], yp, xp), np.nan, dtype=float)
+                out[:, ridx, :] = cube[:, rr][:, :, lon_idx_patch]
+                for k, pos in enumerate(wu_pos):
+                    pat[pos] = out[k]
+            return pat
+
+        p_pat = np.nan_to_num(_crop_pad(np.asarray(arch["q_p"], float)), nan=0.0)
+        m_pat = np.nan_to_num(_crop_pad(np.asarray(arch["mask"], float)), nan=0.0)
+
+        wavg_levels = [int(v) for v in np.asarray(store["wavg_levels"])]
+        widx = [levels.index(pl) for pl in wavg_levels]
+        z3 = np.asarray(store["z_3d"], dtype=float)[widx] / z_divisor(self.cfg)
+        wt = np.exp(-z3 / H_SCALE)
+
+        def _wavg2(cube):
+            arr = cube[widx]
+            num = np.nansum(arr * wt, axis=0)
+            den = np.nansum(np.where(np.isfinite(arr), wt, 0.0), axis=0)
+            out2 = np.full(num.shape, np.nan)
+            m = den > 0
+            out2[m] = num[m] / den[m]
+            return out2
+
+        e3d = total3d - p_pat
+        return {
+            "pv_anom_p_3d": p_pat,
+            "pv_anom_e_3d": e3d,
+            "pv_split_mask_3d": m_pat.astype(np.uint8),
+            "pv_anom_p": _wavg2(p_pat),
+            "pv_anom_e": _wavg2(e3d),
+            "ppvi_split_arch_q_min": arch["q_min"],
+            "ppvi_split_arch_thresh": arch["thresh"],
+        }
+
+    def append_archive_split_for_event(
+        self,
+        evt_name: str,
+        track_id: int,
+        lat0: float,
+        lon0: float,
+        base_ts: pd.Timestamp,
+        *,
+        inv_lon_half: float = 90.0,
+    ) -> int:
+        """Append ONLY the archive-PV split keys to existing NPZ (no Fortran).
+
+        The cheap retrofit for catalogues whose PPVI keys predate the
+        pv_anom_p/e persistence: global k1-4 filter + near-centre mask on the
+        archive PV anomaly, cropped to the patch (see _arch_keys_from_split).
+        Skip sentinel: ``pv_anom_p_3d``.
+        """
+        _log(f"\n--- q-split (append) for event: {track_id} "
+             f"at ({lat0}, {lon0}) ---")
+        clim_ds = self._get_clim(chunks={"day": 1, "hour": 1})
+        todo: list[tuple[int, pd.Timestamp, Path]] = []
+        for dh in self.cfg.rel_hours:
+            ts = base_ts + pd.Timedelta(hours=dh)
+            fp = self._out_path(evt_name, dh, track_id, ts)
+            if not fp.exists():
+                continue
+            if self.cfg.skip_existing:
+                with np.load(fp, allow_pickle=True) as z:
+                    if "pv_anom_p_3d" in z.files:
+                        continue
+            todo.append((dh, ts, fp))
+        if not todo:
+            _log(f"-> Event {track_id}: no existing NPZ needs the q-split.")
+            return 0
+
+        ds = open_source_ds(self.cfg, base_ts, chunks={"valid_time": 1},
+                            var_list=["pv"])
+        cplev = _plev_name(clim_ds)
+        geom = self._ppvi_geom(ds, inv_lon_half)
+        dt_index = pd.to_datetime(ds.valid_time.values)
+        updated = 0
+        for dh, ts, fp in todo:
+            if ts not in dt_index:
+                continue
+            tmp_name = None
+            try:
+                with np.load(fp, allow_pickle=True) as z:
+                    store = {k: z[k] for k in z.files}
+                arch = self._archive_split_band(
+                    ds, clim_ds, cplev, ts, geom,
+                    float(store["center_lat"]), float(store["center_lon"]))
+                store.update(self._arch_keys_from_split(arch, store, geom))
+                with tempfile.NamedTemporaryFile(
+                    mode="wb", suffix=".npz", dir=str(fp.parent),
+                    delete=False,
+                ) as tf:
+                    tmp_name = tf.name
+                    np.savez_compressed(tf, **store)
+                os.replace(tmp_name, str(fp))
+                tmp_name = None
+                updated += 1
+            except Exception as exc:  # noqa: BLE001 - log & continue
+                if tmp_name and os.path.exists(tmp_name):
+                    os.unlink(tmp_name)
+                _log(f"-> q-split dh={dh:+d} FAILED: {exc!r}")
+            gc.collect()
+        try:
+            ds.close()
+        except Exception:  # noqa: BLE001
+            pass
+        _log(f"-> Event {track_id}: q-split appended to {updated} NPZ(s).")
+        return updated
 
     def _ppvi_piece_keys(self) -> list[str]:
         """The ``u_rot_anom_ppvi_*_3d`` keys this run's mode writes.
@@ -2601,7 +2792,7 @@ class TendencyComputer:
         # per-worker RSS at ~1-2 GB so many workers fit under the 2 TB cap.
         ds = open_source_ds(
             self.cfg, base_ts, chunks={"valid_time": 1},
-            var_list=["z", "t", "u", "v"])
+            var_list=["z", "t", "u", "v", "pv"])   # pv: archive-split keys
         cplev = _plev_name(clim_ds)
         geom = self._ppvi_geom(ds, inv_lon_half)
         dt_index = pd.to_datetime(ds.valid_time.values)

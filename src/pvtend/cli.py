@@ -245,6 +245,36 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_ppvi_pieces_arg(ppvi)
 
+
+    # ── qsplit ───────────────────────────────────────────────────
+    qsplit = sub.add_parser(
+        "qsplit",
+        help="Append the archive-PV planetary/eddy split (pv_anom_p/e keys) "
+             "to existing NPZ in place. No inversion -- cheap retrofit for "
+             "catalogues whose PPVI predates pv_anom_p/e persistence.",
+    )
+    for _a, _kw in [
+        (("--event-type",), dict(required=True, choices=["blocking", "prp"])),
+        (("--events-csv",), dict(required=True, type=Path)),
+        (("--source",), dict(default="era5", choices=["era5", "cesm"])),
+        (("--member",), dict(type=int, default=None)),
+        (("--era5-dir",), dict(required=True, type=Path)),
+        (("--clim-path",), dict(required=True, type=Path)),
+        (("--out-dir",), dict(required=True, type=Path)),
+        (("--track-file",), dict(type=Path, default=None)),
+        (("--dh-range",), dict(default="0:1:1")),
+        (("--inv-lon-half",), dict(type=float, default=90.0)),
+        (("--center-mode",), dict(default="eulerian",
+                                  choices=["eulerian", "lagrangian"])),
+        (("--n-workers",), dict(type=int, default=1)),
+        (("--year-range",), dict(default=None)),
+        (("--stages",), dict(nargs="+",
+                             default=["onset", "peak", "decay"])),
+        (("--skip-existing",), dict(action="store_true")),
+        (("--max-tasks-per-child",), dict(type=int, default=None)),
+        (("--clim-helmholtz-dir",), dict(type=Path, default=None)),
+    ]:
+        qsplit.add_argument(*_a, **_kw)
     # ── clim-helmholtz ───────────────────────────────────────────
     clim_helm = sub.add_parser(
         "clim-helmholtz",
@@ -500,6 +530,18 @@ def _ppvi_one_event(arg_tuple):
             _WORKER_COMPUTER, evt_name, track_id, lat0, lon0, base_ts,
             _WORKER_INV_LON_HALF)
     except Exception as exc:
+        print(f"    ERROR [{track_id} {evt_name}]: {exc}", flush=True)
+        return 0
+
+
+def _qsplit_one_event(arg_tuple):
+    """Pool worker for the qsplit subcommand (archive-split append only)."""
+    evt_name, track_id, lat0, lon0, base_ts = arg_tuple
+    try:
+        return _WORKER_COMPUTER.append_archive_split_for_event(
+            evt_name=evt_name, track_id=track_id, lat0=lat0, lon0=lon0,
+            base_ts=base_ts, inv_lon_half=_WORKER_INV_LON_HALF)
+    except Exception as exc:  # noqa: BLE001 - log & continue, pool stays up
         print(f"    ERROR [{track_id} {evt_name}]: {exc}", flush=True)
         return 0
 
@@ -894,6 +936,66 @@ def _cmd_ppvi(args: argparse.Namespace) -> None:
 
 
 
+def _cmd_qsplit(args: argparse.Namespace) -> None:
+    """Execute the ``qsplit`` subcommand (archive-split append only)."""
+    from pvtend.tendency import TendencyComputer, TendencyConfig
+
+    dh_values = _parse_dh_range(args.dh_range)
+    if args.source == "cesm" and args.member is None:
+        raise SystemExit("--source cesm requires --member")
+
+    config = TendencyConfig(
+        event_type=args.event_type,
+        data_dir=args.era5_dir,
+        source=args.source,
+        member=args.member,
+        clim_path=args.clim_path,
+        output_dir=args.out_dir,
+        csv_path=args.events_csv,
+        track_file=args.track_file or Path(""),
+        rel_hours=dh_values,
+        center_mode=args.center_mode,
+        skip_existing=args.skip_existing,
+        n_workers=args.n_workers,
+        clim_helmholtz_dir=(
+            args.clim_helmholtz_dir
+            if args.clim_helmholtz_dir is not None
+            else args.clim_path
+            if args.clim_path.is_dir()
+            else args.clim_path.parent
+        ),
+    )
+    computer = TendencyComputer(config)
+    event_args = _load_event_args(args.events_csv, args.year_range,
+                                  args.stages)
+    print(f"[pvtend] q-split for {len(event_args)} events, "
+          f"dh={dh_values[0]}..{dh_values[-1]}")
+    if config.n_workers > 1:
+        _pin_threads_for_pool()
+        print(f"[pvtend] Using {config.n_workers} parallel workers "
+              f"(fault-tolerant pool)")
+        n_total, _q = _run_resilient_pool(
+            event_args, config.n_workers,
+            _init_ppvi_worker, (config, args.inv_lon_half),
+            _qsplit_one_event,
+            failures_path=args.out_dir / "qsplit_failures.txt",
+            unit="NPZ",
+            max_tasks_per_child=args.max_tasks_per_child)
+    else:
+        n_total = 0
+        for i, (evt_name, track_id, lat0, lon0, base_ts) in enumerate(
+                event_args):
+            try:
+                n_total += computer.append_archive_split_for_event(
+                    evt_name=evt_name, track_id=track_id, lat0=lat0,
+                    lon0=lon0, base_ts=base_ts,
+                    inv_lon_half=args.inv_lon_half)
+            except Exception as exc:  # noqa: BLE001
+                print(f"    ERROR: {exc}")
+                continue
+    print(f"[pvtend] Done — q-split appended to {n_total} NPZ files.")
+
+
 def _cmd_clim_helmholtz(args: argparse.Namespace) -> None:
     """Execute the ``clim-helmholtz`` subcommand."""
     import numpy as np
@@ -1113,6 +1215,7 @@ def main(argv: list[str] | None = None) -> int:
     dispatch = {
         "compute": _cmd_compute,
         "ppvi": _cmd_ppvi,
+        "qsplit": _cmd_qsplit,
         "clim-helmholtz": _cmd_clim_helmholtz,
         "classify": _cmd_classify,
         "composite": _cmd_composite,
