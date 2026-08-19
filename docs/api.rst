@@ -327,6 +327,12 @@ the ``residual``.
 :math:`\{1000,850,700,500,400,300,250,200,100\}` hPa:
 
 * ``u_rot_anom_ppvi_{L}`` / ``v_rot_anom_ppvi_{L}`` (and ``_3d``) — rotational
+* ``pv_anom_p(_3d)`` / ``pv_anom_e(_3d)`` — planetary/eddy split of the
+  **archived** PV anomaly (scale mode; k1–4 zonal filter + near-centre
+  object mask, seeded on the archive anomaly). ``p + e`` equals
+  ``pv_anom(_3d)`` exactly on disk. ``pv_split_mask_3d`` (uint8) stores
+  the object mask; ``ppvi_split_arch_{q_min,thresh}`` the contour
+  scalars. New in v2.17.
   wind induced by inverting *only* level ``L``'s PV/θ piece;
 * ``u/v_rot_anom_residual_ppvi`` — observed minus :math:`\sum_L` pieces;
 * ``pv_anom_wu`` — the Wu PV anomaly that is inverted.
