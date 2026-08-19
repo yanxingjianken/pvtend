@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import dask
 import numpy as np
 import pytest
+
+# PyPI netCDF4 wheels bundle an HDF5 built without thread safety; dask's default
+# threaded scheduler then segfaults inside concurrent netCDF4 reads (e.g. any
+# `.load()` of an open_mfdataset result). Nothing in the suite tests scheduler
+# concurrency, so run all dask graphs synchronously.
+dask.config.set(scheduler="synchronous")
 
 
 @pytest.fixture
