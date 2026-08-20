@@ -178,3 +178,47 @@ class TestPPVIPiecesFlag:
         with pytest.raises(SystemExit):
             _build_parser().parse_args(
                 [cmd, *self.BASE, "--ppvi-pieces", "lower_middle_upper"])
+
+
+class TestDispatchReachable:
+    """Every dispatch key must name a real subcommand, and vice versa.
+
+    ``clim-helmholtz`` was deleted from the parser in f421e06 as collateral of
+    removing the adjacent one-time ``qsplit`` retrofit, while its handler and
+    its dispatch entry both survived — so the subcommand looked present in the
+    source and in the README, and only failed at argparse's invalid-choice at
+    the moment someone tried to rebuild a Helmholtz climatology. Nothing in the
+    suite noticed, because every test named its subcommand explicitly. This
+    couples the two lists so the next accidental deletion fails here.
+    """
+
+    def _choices(self):
+        import argparse
+        sub = next(a for a in _build_parser()._subparsers._group_actions
+                   if isinstance(a, argparse._SubParsersAction))
+        return set(sub.choices)
+
+    def _dispatch_keys(self):
+        import inspect
+        import re
+        from pvtend.cli import main as _main
+        src = inspect.getsource(_main)
+        body = src.split("dispatch = {", 1)[1].split("}", 1)[0]
+        return set(re.findall(r'"([^"]+)":', body))
+
+    def test_every_dispatch_key_is_a_subcommand(self):
+        missing = self._dispatch_keys() - self._choices()
+        assert not missing, (
+            f"handler(s) unreachable from the CLI: {sorted(missing)} — "
+            f"the dispatch entry exists but argparse rejects the name")
+
+    def test_every_subcommand_has_a_handler(self):
+        orphan = self._choices() - self._dispatch_keys()
+        assert not orphan, (
+            f"subcommand(s) with no handler: {sorted(orphan)}")
+
+    def test_clim_helmholtz_parses(self):
+        args = _build_parser().parse_args(
+            ["clim-helmholtz", "--clim-dir", "/d/clim", "--output-dir", "/d/out"])
+        assert args.command == "clim-helmholtz"
+        assert args.clim_stem == "era5_hourly_clim_1990-2020"

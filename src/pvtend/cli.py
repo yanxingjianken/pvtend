@@ -245,6 +245,30 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_ppvi_pieces_arg(ppvi)
 
+    # ── clim-helmholtz ───────────────────────────────────────────
+    # Restored in 2.17.2: the block sat directly below the one-time `qsplit`
+    # retrofit and was deleted with it in f421e06, leaving _cmd_clim_helmholtz
+    # and its dispatch entry reachable only in principle -- `pvtend-pipeline
+    # clim-helmholtz` failed on argparse's invalid-choice. The README's CLI
+    # bullet never stopped listing it, and the ERA5 climatology directory it
+    # produces (*_u_helmholtz.nc / *_v_helmholtz.nc, fed back through
+    # --clim-helmholtz-dir) is still what the pipeline consumes.
+    clim_helm = sub.add_parser(
+        "clim-helmholtz",
+        help="Pre-compute Helmholtz decomposition of climatological wind → NetCDFs.",
+    )
+    clim_helm.add_argument(
+        "--clim-dir", required=True, type=Path,
+        help="Directory with per-variable-per-month climatology NetCDFs.",
+    )
+    clim_helm.add_argument(
+        "--output-dir", required=True, type=Path,
+        help="Output directory for the 24 Helmholtz climatology files.",
+    )
+    clim_helm.add_argument(
+        "--clim-stem", type=str, default="era5_hourly_clim_1990-2020",
+        help="Filename stem for the climatology files (default: era5_hourly_clim_1990-2020).",
+    )
 
     # ── classify ─────────────────────────────────────────────────
     classify = sub.add_parser(
