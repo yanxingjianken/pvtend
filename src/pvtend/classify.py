@@ -104,10 +104,24 @@ class ClassifyConfig:
 
 # ── Excluded track loader ─────────────────────────────────────────────
 
-def _load_excluded(p: Path | None) -> set[int]:
-    ids: set[int] = set()
+def _load_excluded(p: Path | None) -> set[int | str]:
+    """Track ids to exclude. Numeric ids load as int (ERA5); ids like
+    ``m091_t00002`` load as str — mirroring ``_parse_track_id``."""
+    ids: set[int | str] = set()
     if p is None or not p.exists():
         return ids
+
+    def _add(tok: str) -> None:
+        tok = tok.strip()
+        if not tok:
+            return
+        try:
+            ids.add(int(tok))
+        except ValueError:
+            m = re.search(r"m\d+_t\d+", tok)
+            if m:
+                ids.add(m.group(0))
+
     try:
         with open(p, "r", newline="") as f:
             sniff = f.read(1024)
@@ -119,14 +133,14 @@ def _load_excluded(p: Path | None) -> set[int]:
                 if col is not None:
                     for row in reader:
                         try:
-                            ids.add(int(row[col]))
-                        except (ValueError, KeyError):
+                            _add(row[col])
+                        except KeyError:
                             pass
             else:
                 for line in f:
-                    m = re.search(r"\d+", line)
+                    m = re.search(r"m\d+_t\d+", line) or re.search(r"\d+", line)
                     if m:
-                        ids.add(int(m.group(0)))
+                        _add(m.group(0))
     except Exception:
         pass
     return ids

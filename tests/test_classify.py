@@ -99,6 +99,18 @@ class TestLoadExcluded:
         f.write_text("10\n20\n30\n")
         assert _load_excluded(f) == {10, 20, 30}
 
+    def test_cesm_string_ids_csv(self, tmp_path):
+        """CESM ids like m091_t00002 must load as str, not be int()-dropped."""
+        f = tmp_path / "exclude.csv"
+        f.write_text("track_id,reason\nm091_t00002,omega\n123,blowup\n")
+        assert _load_excluded(f) == {"m091_t00002", 123}
+
+    def test_cesm_string_ids_plain_and_timestamped(self, tmp_path):
+        """Headerless lines; a trailing timestamp normalises to the bare id."""
+        f = tmp_path / "exclude.txt"
+        f.write_text("m091_t00002\nm095_t00443_1985020800\n77\n")
+        assert _load_excluded(f) == {"m091_t00002", "m095_t00443", 77}
+
 
 # ── Single-level bay classifier ─────────────────────────────────────
 
