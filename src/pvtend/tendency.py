@@ -2608,7 +2608,19 @@ class TendencyComputer:
 
         wavg_levels = [int(v) for v in np.asarray(store["wavg_levels"])]
         widx = [levels.index(pl) for pl in wavg_levels]
-        z3 = np.asarray(store["z_3d"], dtype=float)[widx] / z_divisor(self.cfg)
+        # NO z_divisor here. Unlike `_ppvi_compute_keys`, which crops `z_e`
+        # straight off the dataset (still geopotential, m^2/s^2) and must
+        # divide, `store["z_3d"]` is written as `z_m_3d`, which was ALREADY
+        # divided at the point it was built. Dividing a second time made the
+        # ERA5 weights exp(-z/gH) instead of exp(-z/H) -- z/9.81 is ~1 km where
+        # the real height is ~10 km, so exp() barely varies and the vertical
+        # average collapsed to nearly flat (measured: 0.394/0.333/0.273 correct
+        # vs 0.339/0.334/0.327 shipped, 13.8% off the dominant weight). It also
+        # broke the documented on-disk identity, because the stored 2-D
+        # `pv_anom` is built by `vwm` with the correct weights, so
+        # `pv_anom_p + pv_anom_e` no longer summed to it. CESM was immune only
+        # because `z_divisor` returns 1.0 there.
+        z3 = np.asarray(store["z_3d"], dtype=float)[widx]
         wt = np.exp(-z3 / H_SCALE)
 
         def _wavg2(cube):

@@ -464,3 +464,71 @@ class TestArchiveSplitKeys:
         np.testing.assert_allclose(s, total, atol=1e-12)
         assert new["pv_anom_p"].shape == (ny, nx)
         assert np.isfinite(new["pv_anom_p"]).all()
+
+
+# ── vertical-weight convention of the archive split ──────────────────
+
+_ARCHIVE = Path("/net/flood/data2/users/x_yan/pvtend/outputs/blocking")
+
+
+def _one_real_npz() -> Path | None:
+    """A real catalogue NPZ, or None where the archive is not mounted."""
+    if not _ARCHIVE.is_dir():
+        return None
+    return next(iter(sorted(_ARCHIVE.glob("*/dh=*/track_*.npz"))), None)
+
+
+@pytest.mark.skipif(_one_real_npz() is None,
+                    reason="local ERA5 NPZ catalogue not mounted")
+class TestWavgWeightConvention:
+    """``store["z_3d"]`` is height in metres — never divide it by g again.
+
+    ``_arch_keys_from_split`` used to build its ``exp(-z/H)`` weights from
+    ``store["z_3d"] / z_divisor(cfg)``. But ``z_3d`` is written as ``z_m_3d``,
+    which was already divided where it was built, so on ERA5 the weights came
+    out as ``exp(-z/gH)``: z/9.81 is ~1 km where the height is ~10 km, exp()
+    barely varies over the layer, and the weighted average collapsed to nearly
+    flat. CESM never showed it because ``z_divisor`` returns 1.0 there.
+
+    The test is anchored on a real NPZ rather than a constructed one because
+    the whole point is the *units actually on disk*, which a fixture would
+    simply restate. Weighting ``pv_anom_3d`` with the stored ``z_3d`` must
+    reproduce the stored 2-D ``pv_anom`` exactly — that is the same
+    ``exp(-z/H)`` average the writer applies — and the doubly-divided form
+    must not.
+    """
+
+    @staticmethod
+    def _wavg(a3, z3):
+        from pvtend.constants import H_SCALE
+        wt = np.exp(-z3 / H_SCALE)
+        num = np.nansum(a3 * wt, axis=0)
+        den = np.nansum(np.where(np.isfinite(a3), wt, 0.0), axis=0)
+        out = np.full(num.shape, np.nan)
+        m = den > 0
+        out[m] = num[m] / den[m]
+        return out
+
+    def _parts(self):
+        with np.load(_one_real_npz(), allow_pickle=True) as z:
+            lev = [int(v) for v in z["levels"]]
+            widx = [lev.index(int(p)) for p in z["wavg_levels"]]
+            return (np.asarray(z["pv_anom_3d"], float)[widx],
+                    np.asarray(z["z_3d"], float)[widx],
+                    np.asarray(z["pv_anom"], float))
+
+    def test_z_3d_is_height_not_geopotential(self):
+        _, z3, _ = self._parts()
+        # Geopotential would be ~g x larger; 300-200 hPa heights are ~9-13 km.
+        assert np.nanmax(z3) < 3.0e4
+
+    def test_stored_z_reproduces_the_stored_2d_field(self):
+        a3, z3, stored = self._parts()
+        assert np.allclose(self._wavg(a3, z3), stored,
+                           equal_nan=True, rtol=1e-6, atol=1e-9)
+
+    def test_dividing_by_g_again_does_not(self):
+        from pvtend.constants import G0
+        a3, z3, stored = self._parts()
+        assert not np.allclose(self._wavg(a3, z3 / G0), stored,
+                               equal_nan=True, rtol=1e-6, atol=1e-9)
