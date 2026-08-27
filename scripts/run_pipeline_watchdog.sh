@@ -9,7 +9,7 @@
 # Usage:
 #   scripts/run_pipeline_watchdog.sh \
 #       --workers 96 \
-#       --output-root /net/flood/data2/users/x_yan/pvtend/outputs/blocking \
+#       --output-root /net/flood/data2/users/x_yan/pvtend/outputs/era5_blocking \
 #       --era5-root  /net/flood/data2/users/x_yan/era \
 #       --clim-dir   /net/flood/data2/users/x_yan/era/clim \
 #       --csv        /path/to/tempest_blocking.csv \
@@ -41,13 +41,13 @@ TS="$(date +%Y%m%d_%H%M%S)"
 PIPELINE_LOG="$LOG_DIR/pipeline_${TS}.log"
 WATCHDOG_LOG="$LOG_DIR/watchdog_${TS}.log"
 
-echo "[watchdog] starting pvtend-pipeline compute --workers $WORKERS"
+echo "[watchdog] starting pvtend-pipeline compute --n-workers $WORKERS"
 echo "[watchdog]   pipeline log  : $PIPELINE_LOG"
 echo "[watchdog]   watchdog log  : $WATCHDOG_LOG"
 echo "[watchdog]   orphan timeout: $ORPHAN_TIMEOUT s"
 
 # Launch pipeline in background; capture group PID for clean shutdown.
-pvtend-pipeline compute --workers "$WORKERS" "${PIPELINE_ARGS[@]}" \
+pvtend-pipeline compute --n-workers "$WORKERS" "${PIPELINE_ARGS[@]}" \
     > "$PIPELINE_LOG" 2>&1 &
 PIPELINE_PID=$!
 echo "[watchdog] pipeline PID = $PIPELINE_PID" | tee -a "$WATCHDOG_LOG"
