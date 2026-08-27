@@ -468,7 +468,7 @@ class TestArchiveSplitKeys:
 
 # ── vertical-weight convention of the archive split ──────────────────
 
-_ARCHIVE = Path("/net/flood/data2/users/x_yan/pvtend/outputs/blocking")
+_ARCHIVE = Path("/net/flood/data2/users/x_yan/pvtend/outputs/era5_blocking")
 
 
 def _one_real_npz() -> Path | None:

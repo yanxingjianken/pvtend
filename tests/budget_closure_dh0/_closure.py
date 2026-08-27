@@ -69,10 +69,10 @@ ERA5_PRODUCTS = [
 CESM_TERMS = ["lin_adv", "baroclinic", "rot_nl", "div", "vertical", "mean_adv"]
 
 DATASETS = {
-    "era5_blocking":  dict(dirname="blocking",      kind="era5"),
-    "era5_prp":       dict(dirname="prp",           kind="era5"),
-    "cesm2_blocking": dict(dirname="cesm_blocking", kind="cesm2"),
-    "cesm2_prp":      dict(dirname="cesm_prp",      kind="cesm2"),
+    "era5_blocking":  dict(dirname="era5_blocking",       kind="era5"),
+    "era5_prp":       dict(dirname="era5_prp",            kind="era5"),
+    "cesm2_blocking": dict(dirname="cesm_daily_blocking", kind="cesm2"),
+    "cesm2_prp":      dict(dirname="cesm_daily_prp",      kind="cesm2"),
 }
 
 
@@ -80,7 +80,7 @@ DATASETS = {
 def list_events(dataset, stage, dh="dh=+0"):
     """Event npz paths for one (dataset, stage). Layout is outputs/<dir>/<stage>/<dh>/track_*.npz."""
     #: `track_*.npz` NOT `*.npz`: the ERA5 trees carry leftover `tmp*.npz` from interrupted writes
-    #: (38 of them under outputs/blocking). Globbing `*.npz` picks those up and they raise
+    #: (38 of them under outputs/era5_blocking). Globbing `*.npz` picks those up and they raise
     #: BadZipFile — they are not corrupt data, they are incomplete temp files.
     d = OUT / DATASETS[dataset]["dirname"] / stage / dh
     return sorted(glob.glob(str(d / "track_*.npz")))

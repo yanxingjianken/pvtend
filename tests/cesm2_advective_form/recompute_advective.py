@@ -18,7 +18,7 @@ one off in turn so the responsible one is identified rather than guessed.
                      are then up to 18 h apart.
 
 VARIANTS COMPUTED (all at 250 hPa, on the same events)
-    stored      the budget as delivered, read back from outputs/cesm_blocking
+    stored      the budget as delivered, read back from outputs/cesm_daily_blocking
     adv_ppvi    advective form, PPVI wind          -> isolates A
     adv_model   advective form, ACTUAL model wind  -> isolates A+B  (this is the ERA5 recipe)
     flux_model  flux form, actual model wind       -> isolates B alone
@@ -38,7 +38,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-sys.path.insert(0, "/net/flood/data2/users/x_yan/cesm-blocking/08_triad_resonance")
+sys.path.insert(0, "/net/flood/data2/users/x_yan/archive/cesm_blocking_analysis/08_triad_resonance")
 import build_pvbudget_15deg as Bg                                     # noqa: E402
 
 HERE = Path(__file__).resolve().parent

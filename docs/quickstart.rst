@@ -173,6 +173,27 @@ The full production pipeline is a **three-pass** workflow:
        --n-workers 48 \
        --skip-existing
 
+   # ── Pass 0, CESM2-LENS2 variant (6-hourly, noleap) ───────────────
+   # Same pipeline, --source cesm. --era5-dir points at the member-year
+   # archive (lens2_smbb_m{member}_{year}_plev.nc; CAM names U,V,OMEGA,
+   # PV[PVU→SI on read],Z3,T,Q + PS); --clim-path at the single
+   # slot-indexed climatology, which must carry the folded Helmholtz
+   # bars u/v_rot_bar + u/v_div_bar (no --clim-helmholtz-dir needed).
+   # One event CSV per member; --member selects the archive file and is
+   # cross-checked against the CSV's m{member}_t{track} ids.
+   pvtend-pipeline compute \
+       --event-type blocking \
+       --source cesm \
+       --member 91 \
+       --events-csv events_blocking_m091.csv \
+       --era5-dir /path/to/cesm_archive/ \
+       --clim-path /path/to/clim/LENS2_smbb91_100_wu9_clim_6hourly.nc \
+       --out-dir /path/to/output/ \
+       --dh-range='0:1' \
+       --stages onset peak decay \
+       --n-workers 64 \
+       --skip-existing
+
    # ── Pass 1: RWB classification ───────────────────────────────────
    #   Detects overturning Z contours on multiple pressure levels and
    #   classifies each event-stage as AWB / CWB / Omega (both) / NEUTRAL.

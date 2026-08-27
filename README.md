@@ -212,7 +212,7 @@ micromamba run -n blocking python website/upload_to_hf.py --clean-figures
 
 ```mermaid
 graph TD
-    A[outputs/blocking and outputs/prp NPZ patches] --> B[outputs/blowup_scan exclude CSVs]
+    A[outputs/era5_blocking and outputs/era5_prp NPZ patches] --> B[outputs/blowup_scan exclude CSVs]
     A --> C[rwb_variant_tracksets_wavg.pkl]
     B --> D[website/build_and_export_clusters.py]
     C --> D
@@ -238,11 +238,11 @@ All four scripts write PNG and PDF files into `paper/generals_paper_1/figures/`,
 
 ```mermaid
 graph TD
-    A[outputs/blocking/composite_blocking.pkl] --> B[_paper_budget.py]
+    A[outputs/era5_blocking/composite_blocking.pkl] --> B[_paper_budget.py]
     B --> C[fig5_beta_closure_qg_onset_wavg.py]
     B --> D[fig6_beta_stacked_qg_wavg.py]
     B --> M[fig8_gamma_rwb_awb_cwb_onset_wavg.py]
-    E[outputs/blocking and outputs/prp event NPZs] --> B
+    E[outputs/era5_blocking and outputs/era5_prp event NPZs] --> B
     F[p99.9 exclude CSVs] --> B
     B --> G[fig7_ax_bootstrap_blocking_vs_prp_qg_wavg.py]
     G --> H[scripts/cache/bootstrap NPZ]
