@@ -11,6 +11,7 @@ computation in the step2 tendency analysis.
 
 from __future__ import annotations
 
+import functools
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -382,6 +383,11 @@ def load_helmholtz_climatology(
 ) -> dict[str, np.ndarray]:
     """Load pre-computed Helmholtz-decomposed climatological wind fields.
 
+    Cached per process (two months): the two files behind one month
+    materialize to ~1.6 GB, and the caller's cache is event-scoped, so an
+    uncached load re-reads the pair for every event a worker processes.
+    Callers must treat the returned arrays as read-only.
+
     Args:
         clim_dir: Directory containing Helmholtz climatology files.
         month: Month number (1–12).
@@ -396,6 +402,14 @@ def load_helmholtz_climatology(
     Raises:
         FileNotFoundError: If the Helmholtz climatology files are missing.
     """
+    return _load_helmholtz_cached(str(clim_dir), int(month),
+                                  str(clim_stem), str(engine))
+
+
+@functools.lru_cache(maxsize=2)
+def _load_helmholtz_cached(
+    clim_dir: str, month: int, clim_stem: str, engine: str,
+) -> dict[str, np.ndarray]:
     clim_dir = Path(clim_dir)
 
     month3 = MONTH_ABBREVS[month - 1]

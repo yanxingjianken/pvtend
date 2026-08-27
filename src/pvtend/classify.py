@@ -28,6 +28,7 @@ Or programmatically::
 from __future__ import annotations
 
 import csv
+import functools
 import pickle
 import re
 from collections import defaultdict
@@ -85,6 +86,9 @@ class ClassifyConfig:
         classify_threshold: Number of levels that must agree.
         rwb_cfg: Fine-grained RWB bay-detection settings.
         exclude_file: Optional CSV listing track IDs to skip.
+        n_workers: Parallel worker processes for the per-file
+            classification loop (1 = serial). Files are independent, so
+            this only shards the loop; results are merged in the parent.
     """
 
     npz_dir: Path = Path(".")
@@ -100,6 +104,7 @@ class ClassifyConfig:
         default_factory=lambda: RWBConfig(area_min_deg2=20.0, try_levels=400)
     )
     exclude_file: Path | None = None
+    n_workers: int = 1
 
 
 # ── Excluded track loader ─────────────────────────────────────────────
@@ -414,6 +419,45 @@ class ClassifyResult:
 
 # ── Main entry point ──────────────────────────────────────────────────
 
+def _classify_one_file(item, *, classify_levels, threshold, rwb_cfg,
+                       need_3d, need_wavg):
+    """Classify a single NPZ; picklable unit for the run_pass1 pool.
+
+    Returns ``(tid, awb, cwb, h_scale, status)`` with status ``"ok"``,
+    ``"noz"`` (file lacks the requested Z fields — not an error) or
+    ``"fail"``.
+    """
+    fp, tid = item
+    try:
+        with np.load(fp, allow_pickle=False) as Z:
+            h_scale = float(Z["H_SCALE"]) if "H_SCALE" in Z.files else None
+            x_rel = Z["X_rel"]
+            y_rel = Z["Y_rel"]
+
+            z3d = None
+            levels_file = None
+            z2d_wavg = None
+            if need_3d and "z_3d" in Z.files:
+                z3d = Z["z_3d"]
+                levels_file = np.asarray(Z["levels"], dtype=float)
+            if need_wavg and "z" in Z.files:
+                z2d_wavg = Z["z"]
+
+            if z3d is None and z2d_wavg is None:
+                return (tid, False, False, h_scale, "noz")
+
+            awb, cwb = _classify_multilevel(
+                z3d, levels_file, x_rel, y_rel,
+                classify_levels=classify_levels,
+                threshold=threshold,
+                cfg=rwb_cfg,
+                z2d_wavg=z2d_wavg,
+            )
+            return (tid, awb, cwb, h_scale, "ok")
+    except Exception:
+        return (tid, False, False, None, "fail")
+
+
 def run_pass1(cfg: ClassifyConfig) -> ClassifyResult:
     """Run Pass-1 RWB classification from NPZ files.
 
@@ -462,45 +506,43 @@ def run_pass1(cfg: ClassifyConfig) -> ClassifyResult:
         npz_files = sorted(dh0_dir.glob("*.npz"))
         n_ok = n_fail = 0
 
+        todo = []
         for fp in npz_files:
             tid = _parse_track_id(fp)
             if tid is None or tid in excluded:
                 continue
             stage_all[evt].add(tid)
-            try:
-                with np.load(fp, allow_pickle=False) as Z:
-                    if h_scale is None and "H_SCALE" in Z.files:
-                        h_scale = float(Z["H_SCALE"])
-                    x_rel = Z["X_rel"]
-                    y_rel = Z["Y_rel"]
+            todo.append((fp, tid))
 
-                    z3d = None
-                    levels_file = None
-                    z2d_wavg = None
-                    if _need_3d and "z_3d" in Z.files:
-                        z3d = Z["z_3d"]
-                        levels_file = np.asarray(Z["levels"], dtype=float)
-                    if _need_wavg and "z" in Z.files:
-                        z2d_wavg = Z["z"]
+        work = functools.partial(
+            _classify_one_file,
+            classify_levels=cfg.classify_levels,
+            threshold=cfg.classify_threshold,
+            rwb_cfg=cfg.rwb_cfg,
+            need_3d=_need_3d,
+            need_wavg=_need_wavg,
+        )
+        if cfg.n_workers > 1:
+            from concurrent.futures import ProcessPoolExecutor
+            with ProcessPoolExecutor(max_workers=cfg.n_workers) as ex:
+                results = ex.map(work, todo, chunksize=16)
+                results = list(results)
+        else:
+            results = map(work, todo)
 
-                    if z3d is None and z2d_wavg is None:
-                        continue
-
-                    awb, cwb = _classify_multilevel(
-                        z3d, levels_file, x_rel, y_rel,
-                        classify_levels=cfg.classify_levels,
-                        threshold=cfg.classify_threshold,
-                        cfg=cfg.rwb_cfg,
-                        z2d_wavg=z2d_wavg,
-                    )
-                    if awb:
-                        stage_awb[evt].add(tid)
-                    if cwb:
-                        stage_cwb[evt].add(tid)
-                    n_ok += 1
-            except Exception:
+        for tid, awb, cwb, hs, status in results:
+            if status == "fail":
                 n_fail += 1
                 continue
+            if h_scale is None and hs is not None:
+                h_scale = hs
+            if status == "noz":
+                continue
+            if awb:
+                stage_awb[evt].add(tid)
+            if cwb:
+                stage_cwb[evt].add(tid)
+            n_ok += 1
 
         print(f"[classify] {evt}: ok={n_ok}  fail={n_fail}", flush=True)
 
