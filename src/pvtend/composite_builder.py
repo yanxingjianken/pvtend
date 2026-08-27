@@ -308,7 +308,7 @@ class CompositeResult:
         }:
             # exp(−z/H) weighted average over 300, 250, 200 hPa
             # (matches tendency.py vwm — canonical pvtend recipe)
-            from .constants import WAVG_LEVELS as _WL, H_SCALE as _HS, G0 as _G0
+            from .constants import WAVG_LEVELS as _WL, H_SCALE as _HS
             wavg_hpa = np.asarray(_WL, dtype=float)
             levels_arr = np.asarray(self.levels, dtype=float)
             indices = [int(np.nanargmin(np.abs(levels_arr - lv)))
@@ -318,7 +318,12 @@ class CompositeResult:
             z3d = self.mean_3d(z_name, stage, dh, variant=variant)
             if z3d is None:
                 raise ValueError("Need z_3d for wavg")
-            z_m = z3d[indices] / _G0  # geopotential → metres
+            # The stored z_3d is already geopotential HEIGHT in metres for
+            # both sources (tendency.py writes z / z_divisor); dividing by
+            # g again flattened the exp(−z/H) weights by ~13.8% at the
+            # dominant level — the same convention bug e45795f fixed on the
+            # write side.
+            z_m = z3d[indices]
             h = float(self.h_scale) if self.h_scale is not None else _HS
             wt = np.exp(-z_m / h)
             num = np.nansum(slices * wt, axis=0)

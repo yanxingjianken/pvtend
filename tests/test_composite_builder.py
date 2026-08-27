@@ -153,6 +153,50 @@ class TestCompositeResult:
         dhs = sample_result.available_dh("onset")
         assert dhs == [0]
 
+    def test_reduce_2d_wavg_uses_stored_metres(self):
+        """reduce_2d(wavg) weights with z_3d as-is — z_3d is already metres.
+
+        Same convention as TestWavgWeightConvention on the write side:
+        dividing the stored height by g again flattens exp(-z/H) to
+        near-uniform weights.
+        """
+        from pvtend.constants import WAVG_LEVELS, H_SCALE, G0
+
+        levels = np.array([1000.0] + [float(p) for p in WAVG_LEVELS])
+        nlev = len(levels)
+        shape = (nlev, 5, 7)
+        # heights in metres, monotone with level; distinct field values
+        z = np.array([100.0, 7200.0, 9200.0, 10400.0, 11800.0])
+        z_3d = np.broadcast_to(z[:, None, None], shape).astype(float)
+        pv_3d = np.broadcast_to(
+            np.arange(1.0, nlev + 1)[:, None, None], shape).astype(float)
+        valid = np.ones(shape, dtype=np.uint16)
+
+        res = CompositeResult(
+            levels=levels,
+            x_rel=np.linspace(-3, 3, 7),
+            y_rel=np.linspace(-2, 2, 5),
+            h_scale=None,
+            stages=["onset"],
+            fields_3d=["z_3d", "pv_3d"],
+            sums={"onset": {0: {"z_3d": z_3d.copy(), "pv_3d": pv_3d.copy()}}},
+            valids={"onset": {0: {"z_3d": valid, "pv_3d": valid}}},
+            counts={"onset": {0: 1}},
+            sums_v={}, valids_v={}, counts_v={},
+            variant_names=["original"],
+        )
+        out = res.reduce_2d("pv_3d", "onset", 0, level_mode="wavg")
+
+        idx = [int(np.argmin(np.abs(levels - lv))) for lv in WAVG_LEVELS]
+        wt = np.exp(-z[idx] / H_SCALE)
+        expect = float((np.arange(1.0, nlev + 1)[idx] * wt).sum() / wt.sum())
+        np.testing.assert_allclose(out, expect, rtol=1e-12)
+
+        wt_bad = np.exp(-(z[idx] / G0) / H_SCALE)
+        flat = float((np.arange(1.0, nlev + 1)[idx] * wt_bad).sum()
+                     / wt_bad.sum())
+        assert not np.isclose(expect, flat, rtol=1e-3)
+
     def test_save_load_roundtrip(self, sample_result, tmp_path):
         pkl_path = tmp_path / "composite.pkl"
         sample_result.save(pkl_path)
