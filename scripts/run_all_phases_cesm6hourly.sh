@@ -28,9 +28,12 @@ shopt -s lastpipe
 
 # ---- Config ----------------------------------------------------------
 ROOT="${ROOT:-/net/flood/data2/users/x_yan/pvtend}"
-ARCHIVE="${ARCHIVE:-$ROOT/archive/cesm2_lens2_wu9_nh}"
-CLIM="${CLIM:-$ROOT/clim/LENS2_smbb91_100_wu9_clim_6hourly_1985_2014.nc}"
-CAT="${CAT:-$ROOT/catalogues/events}"
+# Data home of the smbb m91-100 6-hourly branch (pvtend/ holds only the
+# package + outputs/ + paper/; inputs live with the other CESM data).
+C6H="${C6H:-/net/flood/data2/users/x_yan/cesm-blocking/cesm_6hourly}"
+ARCHIVE="${ARCHIVE:-$C6H/cesm2_lens2_wu9_nh}"
+CLIM="${CLIM:-$C6H/clim/LENS2_smbb91_100_wu9_clim_6hourly_1985_2014.nc}"
+CAT="${CAT:-$C6H/catalogues/events}"
 OUT_BLK="${OUT_BLK:-$ROOT/outputs/cesm6hourly_blocking}"
 OUT_PRP="${OUT_PRP:-$ROOT/outputs/cesm6hourly_prp}"
 EXC_DIR="${EXC_DIR:-$ROOT/outputs/blowup_scan}"

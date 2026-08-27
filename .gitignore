@@ -62,11 +62,8 @@ test_fields.py
 # Paper (local only, not tracked)
 paper/
 
-# Transferred data + reference code vaults (local only)
+# Globus landing dir; contents move to cesm-blocking/cesm_6hourly/ on arrival
 archive/
-catalogues/
-clim/
-code/
 
 # Website export data (large JSON files, hosted on HF)
 website/
