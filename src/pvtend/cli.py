@@ -155,6 +155,11 @@ def _build_parser() -> argparse.ArgumentParser:
              "winds (u/v_rot_anom_ppvi_{L}) in each NPZ written from scratch "
              "(default: enabled).  Use --no-with-ppvi to skip.",
     )
+    compute.add_argument(
+        "--max-tasks-per-child", type=int, default=16,
+        help="Recycle each worker process after this many events to cap "
+             "per-event memory growth (0 = never recycle).  Default 16.",
+    )
     _add_ppvi_pieces_arg(compute)
 
     # ── ppvi ─────────────────────────────────────────────────────
@@ -310,6 +315,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--exclude-file", type=Path, default=None,
         help="CSV listing track IDs to exclude.",
     )
+    classify.add_argument(
+        "--n-workers", type=int, default=1,
+        help="Parallel worker processes for the per-file classification "
+             "loop (NPZ-tree mode only; default 1 = serial).",
+    )
 
     # ── composite ────────────────────────────────────────────────
     composite = sub.add_parser(
@@ -335,6 +345,11 @@ def _build_parser() -> argparse.ArgumentParser:
     composite.add_argument(
         "--exclude-file", type=Path, default=None,
         help="CSV listing track IDs to exclude.",
+    )
+    composite.add_argument(
+        "--n-workers", type=int, default=None,
+        help="Parallel workers for composite accumulation (default: the "
+             "PVTEND_COMPOSITE_WORKERS env var, else serial).",
     )
 
     # ── decompose ────────────────────────────────────────────────
@@ -430,7 +445,16 @@ def _pin_threads_for_pool() -> None:
     import os
     for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
-        os.environ.setdefault(_v, "1")
+        # Assigned unconditionally: an inherited OMP_NUM_THREADS=8 from a
+        # login profile would put N_workers × 8 threads on the node, the
+        # exact oversubscription this function exists to prevent. Only the
+        # pool path calls this, so single-process tooling is unaffected.
+        os.environ[_v] = "1"
+    # HDF5's own fcntl locking goes through NFS lockd — one extra lock
+    # round-trip per open across every worker, plus the spurious
+    # "unable to lock file" failure mode. Nothing in the pipeline writes an
+    # input .nc concurrently, so the locks protect nothing here.
+    os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
 
 # Whether the compute pool also computes PPVI fields (set per-run).
@@ -445,12 +469,29 @@ def _init_worker(cfg, also_ppvi=True):
         threadpool_limits(1)
     except Exception:
         pass
+    try:  # bound xarray's global open-file-handle cache so a long-lived
+        # worker doesn't accumulate ~100 MB/handle across thousands of
+        # per-event opens (mirrors the ppvi initializer).
+        import xarray as _xr
+        _xr.set_options(file_cache_maxsize=32)
+    except Exception:
+        pass
+    try:  # one process = one thread is the design of this pool; dask's
+        # default threaded scheduler would spin cpu_count() threads per
+        # worker and hit the lock=False netCDF handles concurrently.
+        import dask
+        dask.config.set(scheduler="synchronous")
+    except Exception:
+        pass
     _WORKER_CFG = cfg
     _WORKER_ALSO_PPVI = also_ppvi
     from pvtend.tendency import TendencyComputer
     _WORKER_COMPUTER = TendencyComputer(cfg)
-    try:  # warm the climatology once per worker (not once per event)
-        _WORKER_COMPUTER._get_clim()
+    try:  # warm the climatology once per worker (not once per event),
+        # small-chunked: ``_get_clim`` honours chunks only on this first
+        # call, and an unchunked warm pins the whole CESM slot file in the
+        # backend cache (filtered to a no-op on the ERA5 layout).
+        _WORKER_COMPUTER._get_clim(chunks={"day": 1, "hour": 1})
     except Exception:
         pass
 
@@ -486,6 +527,11 @@ def _init_ppvi_worker(cfg, inv_lon_half):
         # per-event ERA5 opens (this was the dominant per-worker RSS growth).
         import xarray as _xr
         _xr.set_options(file_cache_maxsize=32)
+    except Exception:
+        pass
+    try:  # one process = one thread (see _init_worker)
+        import dask
+        dask.config.set(scheduler="synchronous")
     except Exception:
         pass
     _WORKER_CFG = cfg
@@ -747,6 +793,27 @@ def _load_event_args(events_csv: Path, year_range, stages):
     return event_args
 
 
+def _assert_member_matches_events(event_args, member) -> None:
+    """Refuse a --member that contradicts the event CSV's own track ids.
+
+    The member selects the archive file while the CSV supplies the events;
+    every timestamp exists in every member, so running member 92 against the
+    m091 catalogue would silently write member-92 fields under m091 ids.
+    Only m-prefixed (CESM) string ids carry the member and can be checked.
+    """
+    if member is None:
+        return
+    want = f"m{int(member):03d}_"
+    bad = sorted({str(tid).split("_")[0] for _, tid, *_ in event_args
+                  if isinstance(tid, str) and tid.startswith("m")
+                  and not str(tid).startswith(want)})
+    if bad:
+        raise SystemExit(
+            f"--member {member} but the events CSV carries track ids for "
+            f"member(s) {bad} — wrong per-member CSV?"
+        )
+
+
 def _cmd_compute(args: argparse.Namespace) -> None:
     """Execute the ``compute`` subcommand."""
     from pvtend.tendency import TendencyComputer, TendencyConfig
@@ -790,6 +857,7 @@ def _cmd_compute(args: argparse.Namespace) -> None:
 
     event_args = _load_event_args(args.events_csv, args.year_range,
                                   args.stages)
+    _assert_member_matches_events(event_args, getattr(args, "member", None))
 
     print(f"[pvtend] Processing {len(event_args)} events, "
           f"dh={dh_values[0]}..{dh_values[-1]}, qg_method={qg}, "
@@ -797,6 +865,12 @@ def _cmd_compute(args: argparse.Namespace) -> None:
 
     if config.n_workers > 1:
         _pin_threads_for_pool()
+        if args.with_ppvi:
+            # Build the f2py extension once in the parent; otherwise every
+            # spawned worker races to build into the same directory on the
+            # first run after a wuppvi.f change.
+            from pvtend.ppvi._ext import load_ext
+            load_ext()
         print(f"[pvtend] Using {config.n_workers} parallel workers "
               f"(fault-tolerant pool)")
         n_total, _quarantined = _run_resilient_pool(
@@ -804,7 +878,8 @@ def _cmd_compute(args: argparse.Namespace) -> None:
             _init_worker, (config, args.with_ppvi),
             _process_one_event,
             failures_path=args.out_dir / "compute_failures.txt",
-            unit="NPZ")
+            unit="NPZ",
+            max_tasks_per_child=args.max_tasks_per_child)
     else:
         n_total = 0
         for i, (evt_name, track_id, lat0, lon0, base_ts) in enumerate(
@@ -864,6 +939,7 @@ def _cmd_ppvi(args: argparse.Namespace) -> None:
 
     event_args = _load_event_args(args.events_csv, args.year_range,
                                   args.stages)
+    _assert_member_matches_events(event_args, getattr(args, "member", None))
 
     print(f"[pvtend] PPVI for {len(event_args)} events, "
           f"dh={dh_values[0]}..{dh_values[-1]}, "
@@ -1028,6 +1104,7 @@ def _cmd_classify(args: argparse.Namespace) -> None:
         classify_threshold=threshold,
         rwb_cfg=RWBConfig(area_min_deg2=20.0, try_levels=400),
         exclude_file=args.exclude_file,
+        n_workers=args.n_workers,
     )
     result = run_pass1(cfg)
     result.save(cfg.output_path)
@@ -1053,11 +1130,14 @@ def _cmd_composite(args: argparse.Namespace) -> None:
         rwb = ClassifyResult.load(args.rwb_pkl)
         print(f"[pvtend] Loaded RWB variants from {args.rwb_pkl}")
 
-    cfg = CompositeConfig(
+    cfg_kwargs = dict(
         npz_dir=args.npz_dir,
         stages=args.stages,
         exclude_file=args.exclude_file,
     )
+    if args.n_workers is not None:
+        cfg_kwargs["n_workers"] = args.n_workers
+    cfg = CompositeConfig(**cfg_kwargs)
     result = build_composites(cfg, rwb)
     result.save(args.pkl_out)
 

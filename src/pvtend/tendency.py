@@ -415,6 +415,16 @@ def cesm_to_pipeline_names(ds: xr.Dataset) -> xr.Dataset:
     if "longitude" in ds.coords:
         ds = ds.assign_coords(
             longitude=((ds.longitude + 180) % 360) - 180).sortby("longitude")
+    # The CESM archive and its slot climatology store PV in PVU; the rest of
+    # the pipeline (and every ERA5 field) is SI [K m² kg⁻¹ s⁻¹]. Convert at
+    # this shared boundary so state and climatology stay consistent and all
+    # NPZ keys match the ERA5 convention. Guarded on the units attribute so
+    # an already-SI archive is never converted twice.
+    if "pv" in ds.variables and \
+            str(ds["pv"].attrs.get("units", "")).upper() == "PVU":
+        attrs = dict(ds["pv"].attrs, units="K m**2 kg**-1 s**-1")
+        ds["pv"] = ds["pv"] * 1.0e-6
+        ds["pv"].attrs = attrs
     return ds
 
 
@@ -546,6 +556,16 @@ def open_cesm_years_ds(
 
     ds = ds[[v for v in _CESM_RENAME if v in ds.variables]]
     ds = cesm_to_pipeline_names(ds)
+
+    # The subset above silently drops absent variables; downstream the first
+    # symptom would be a bare KeyError deep in the derivative chain. Fail at
+    # the boundary with the archive's actual contents instead.
+    missing = [v for v in _CESM_RENAME.values() if v not in ds.variables]
+    if missing:
+        raise KeyError(
+            f"CESM archive {fns[0]} lacks pipeline variables {missing} "
+            f"(expected CAM names {list(_CESM_RENAME)})"
+        )
 
     # noleap CFTimeIndex -> DatetimeIndex; see the docstring for the leap seam.
     idx = ds.indexes.get("valid_time")
@@ -845,6 +865,7 @@ def _qg_diabatic_adiabatic_on_patch(
     center_lat: float,
     qg_method: str = "log20",
     nh_data: dict | None = None,
+    phi_factor: float = 1.0,
 ) -> None:
     """QG omega + 4-way adiabatic/diabatic decomposition on the event patch.
 
@@ -903,7 +924,12 @@ def _qg_diabatic_adiabatic_on_patch(
             out[si, valid, :] = arr_sv[ki]
         return out
 
-    z_sv = pick(cube3d["z"])
+    # The geostrophic wind and the SIP solver need geopotential Φ [m²/s²].
+    # ``phi_factor`` supplies it from whatever ``z`` the archive stores
+    # (identity on ERA5 geopotential; ×g on CESM Z3 height). ``cube3d["z"]``
+    # itself keeps the archive convention — the height consumers divide by
+    # ``z_divisor`` instead.
+    z_sv = pick(cube3d["z"]) * phi_factor
     t_sv = pick(cube3d["t"])
     w_sv = pick(cube3d["w"])
 
@@ -983,7 +1009,7 @@ def _qg_diabatic_adiabatic_on_patch(
             out = out[:, ::-1, :]
         return np.nan_to_num(out, nan=0.0)
 
-    z_nh = _prep(nh_data["z"])
+    z_nh = _prep(nh_data["z"]) * phi_factor
     t_nh = _prep(nh_data["t"])
     w_nh = _prep(nh_data["w"])
     u_nh = _prep(nh_data["u"])
@@ -1223,6 +1249,19 @@ def with_derivs_for_window(
     ds["f"] = 2 * OMEGA_E * np.sin(ds["latitude_rad"])
 
     # --- climatology ---
+    # The climatology must sit on the state's exact spatial coordinates:
+    # the *_bar assignments below go through xarray alignment, which fills
+    # non-matching coordinate values with NaN instead of raising. (The PPVI
+    # path carries the same guard in ``_ppvi_compute_keys``.)
+    for _coord in ("latitude", "longitude", "pressure_level"):
+        if _coord in ds.coords and _coord in clim_ds.coords:
+            if not np.array_equal(
+                    np.asarray(ds[_coord].values, dtype=float),
+                    np.asarray(clim_ds[_coord].values, dtype=float)):
+                raise ValueError(
+                    f"climatology {_coord} axis differs from the state's — "
+                    "aligning would silently NaN every *_bar field"
+                )
     CLIM = clim_ds
     for v in ("pv", "u", "v", "w", "z", "t"):
         ds[f"{v}_bar"] = clim_bar(CLIM, v, ds)
@@ -1231,6 +1270,15 @@ def with_derivs_for_window(
     ds["u_anom"] = ds["u"] - ds["u_bar"]
     ds["v_anom"] = ds["v"] - ds["v_bar"]
     ds["w_anom"] = ds["w"] - ds["w_bar"]
+
+    # Materialize the window (state + the just-sampled *_bar slices) once.
+    # Left lazy, every derived field and every dh iteration re-reads and
+    # re-computes the whole chain — and dask-backed bars from a chunked
+    # climatology would send np.gradient down dask's per-chunk path, which
+    # rejects the size-1 time chunks the slot sampling produces. Loading
+    # here also releases the climatology slices a chunked clim was opened
+    # to release (the point of the {"slot": 1} worker warm).
+    ds = ds.load()
 
     # --- grid spacings ---
     dy_m = 2 * np.pi * R_EARTH / 360
@@ -1630,7 +1678,12 @@ class TendencyComputer:
         _log(f"\n--- Processing event: {track_id} "
              f"at ({lat0}, {lon0}) ---")
 
-        clim_ds = self._get_clim()
+        # Chunked so the CESM slot climatology releases each accessed slot
+        # instead of retaining it in the backend cache; ``_get_clim`` honours
+        # chunks only on the first call, so this site must agree with the
+        # worker initializer (a bare first call here would pin the whole
+        # 11.2 GB file per worker). Filtered to a no-op on the ERA5 layout.
+        clim_ds = self._get_clim(chunks={"day": 1, "hour": 1})
 
         # ── Event-level skip: all NPZs already exist? ──
         if self.cfg.skip_existing:
@@ -1743,7 +1796,8 @@ class TendencyComputer:
                 cube3d, lat_vec_full, lon_unwrapped,
                 plevs_hpa, center_lat=current_lat,
                 qg_method=self.cfg.qg_omega_method,
-                nh_data=nh_data)
+                nh_data=nh_data,
+                phi_factor=G0 / z_divisor(self.cfg))
 
             # NaN safety: 0-fill these solver-output fields ONLY as input sanitization before the
             # nansum-based vertical mean `vwm` below — never 0-fill before a statistical mean
@@ -1775,6 +1829,12 @@ class TendencyComputer:
                 return out
 
             vw = partial(vwm, z_m_3d=z_m_3d, wavg_idx=wavg_idx)
+
+            def _absmax(arr):
+                """Patch- and level-wide |max| for the blowup-scan scalars."""
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    return np.float32(np.nanmax(np.abs(arr)))
 
             # ────────────────────────────────────────────
             #  3-D cross terms (53-term v2.0 catalog)
@@ -1948,6 +2008,26 @@ class TendencyComputer:
                         np.nanmax(np.abs(cube3d["w_qg_diabatic"][_lvl300]))),
                     max_abs_w_lhr_moist_300=np.float32(
                         np.nanmax(np.abs(cube3d["w_lhr_moist"][_lvl300]))),
+                    # ── All-level blowup-scan scalars ──
+                    # Level-wide companions to the *_300 keys, plus the
+                    # divergent-wind branches; consumed by
+                    # scripts/aggregate_qg_blowup.py --fields all.
+                    max_abs_w_adiabatic=_absmax(cube3d["w_adiabatic"]),
+                    max_abs_w_diabatic=_absmax(cube3d["w_diabatic"]),
+                    max_abs_w_qg_diabatic=_absmax(cube3d["w_qg_diabatic"]),
+                    max_abs_w_lhr_moist=_absmax(cube3d["w_lhr_moist"]),
+                    max_abs_u_div_anom=_absmax(cube3d["u_div_anom"]),
+                    max_abs_v_div_anom=_absmax(cube3d["v_div_anom"]),
+                    max_abs_u_div_adiabatic=_absmax(cube3d["u_div_adiabatic"]),
+                    max_abs_v_div_adiabatic=_absmax(cube3d["v_div_adiabatic"]),
+                    max_abs_u_div_diabatic=_absmax(cube3d["u_div_diabatic"]),
+                    max_abs_v_div_diabatic=_absmax(cube3d["v_div_diabatic"]),
+                    max_abs_u_div_qg_diabatic=_absmax(
+                        cube3d["u_div_qg_diabatic"]),
+                    max_abs_v_div_qg_diabatic=_absmax(
+                        cube3d["v_div_qg_diabatic"]),
+                    max_abs_u_div_lhr_moist=_absmax(cube3d["u_div_lhr_moist"]),
+                    max_abs_v_div_lhr_moist=_absmax(cube3d["v_div_lhr_moist"]),
                     u_div_lhr_moist=vw(cube3d["u_div_lhr_moist"]),
                     v_div_lhr_moist=vw(cube3d["v_div_lhr_moist"]),
                     q=vw(cube3d["q"]),
@@ -2137,8 +2217,10 @@ class TendencyComputer:
                     _log(f"  PPVI (inline) dh={dh:+d} FAILED: {exc!r}")
 
             with tempfile.NamedTemporaryFile(
+                # .npz.tmp so a worker killed between savez and replace can
+                # never leave a partial file matching glob("*.npz")
                 dir=out_fp.parent, prefix=out_fp.stem + ".",
-                suffix=".npz", delete=False,
+                suffix=".npz.tmp", delete=False,
             ) as tf:
                 tmp_name = tf.name
                 np.savez_compressed(tf, **record)
@@ -2757,7 +2839,7 @@ class TendencyComputer:
                         f"PPVI produced no {self.cfg.ppvi_pieces} keys "
                         f"(missing {missing[:3]})")
                 with tempfile.NamedTemporaryFile(
-                    mode="wb", suffix=".npz", dir=str(fp.parent),
+                    mode="wb", suffix=".npz.tmp", dir=str(fp.parent),
                     delete=False,
                 ) as tf:
                     tmp_name = tf.name
