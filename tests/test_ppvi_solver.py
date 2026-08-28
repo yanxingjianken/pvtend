@@ -458,3 +458,127 @@ class TestSeedNearCentre:
         with pytest.raises(ValueError, match="no negative"):
             seed_near_centre(q, self.UPPER, bl, bo, centre_lat=20, centre_lon=10,
                              halo_lat=4, halo_lon=4)
+
+
+# ── wall piece (lateral-boundary contribution, scale-mode production) ──
+@pytest.mark.skipif(not _ext_available(),
+                    reason="locally built _wuppvi extension unavailable")
+class TestWallPiece:
+    """The zero-source ibc=1 solve isolates the shared wall response W.
+
+    On a cropped window the lateral ψ′ boundary values carry the far-field
+    (outside-PV) flow. With ibc=1 every piece solve carries those values, so
+    the corrected decomposition is piece_k(ibc=1) − W, with W stored once —
+    the construction the production scale mode uses.
+    """
+
+    @staticmethod
+    def _states():
+        nl, ny, nx = 9, 40, 50
+        dlat = dlon = 1.5
+        lat_n = 78.5
+        latv = lat_n - np.arange(ny) * dlat
+        p = np.asarray(PR) * 1000.0
+        T_prof = np.array([288., 279., 269., 252., 240., 229., 222., 217., 210.])
+        Rd, g = 287.05, 9.80665
+        Hp = np.empty(nl)
+        Hp[0] = 100.0
+        for k in range(1, nl):
+            Hp[k] = Hp[k - 1] + Rd * 0.5 * (T_prof[k] + T_prof[k - 1]) / g \
+                * np.log(p[k - 1] / p[k])
+        ones = np.ones((ny, nx))
+        H_m = Hp[:, None, None] * ones
+        T_m = T_prof[:, None, None] * ones
+        U_m = np.broadcast_to(
+            10.0 * np.cos(np.deg2rad(latv))[None, :, None],
+            (nl, ny, nx)).astype(float).copy()
+        V_m = np.zeros((nl, ny, nx))
+        # Dynamically consistent perturbation with a deliberate nonzero
+        # lateral-boundary component: streamfunction = centred vortex + a
+        # meridional ramp (band-mean zonal-flow anomaly reaching the walls),
+        # winds geostrophic from it, H from f0*psi/g, T hydrostatic from H.
+        xg = np.exp(-((np.arange(nx) - nx / 2) ** 2) / 60.0)[None, :]
+        yg = np.exp(-((latv - latv[ny // 2]) ** 2) / 100.0)[:, None]
+        ramp = np.linspace(0.0, 1.0, ny)[:, None]
+        psi2d = 4.0e6 * (xg * yg + 0.5 * ramp)          # [m^2/s]
+        vshape = np.linspace(0.2, 1.0, nl)[:, None, None]
+        psi = vshape * psi2d[None, :, :]
+        dy = dlat * 111.2e3
+        dx = dlon * 111.2e3 * np.cos(np.deg2rad(latv))[None, :, None]
+        up = -np.gradient(psi, axis=1) / (-dy)          # rows run N->S
+        vp = np.gradient(psi, axis=2) / dx
+        f0 = 2 * 7.292e-5 * np.sin(np.deg2rad(latv))[None, :, None]
+        Hp3 = f0 * psi / g
+        lnp = np.log(p)
+        Tp = np.zeros_like(Hp3)
+        for k in range(1, nl - 1):
+            Tp[k] = -(g / Rd) * (Hp3[k + 1] - Hp3[k - 1]) / (lnp[k + 1] - lnp[k - 1])
+        Tp[0], Tp[-1] = Tp[1], Tp[-2]
+        H_e = H_m + Hp3
+        T_e = T_m + Tp
+        U_e = U_m + up
+        V_e = V_m + vp
+        zhdr = np.array([latv[-1], 0.0, latv[0], (nx - 1) * dlon,
+                         dlat, dlon, nx, ny], dtype=np.float32)
+        return H_m, T_m, U_m, V_m, H_e, T_e, U_e, V_e, zhdr
+
+    _PIECES = {"low": [1, 2, 3, 4], "up": [5, 6, 7, 8, 9]}
+
+    @classmethod
+    def _invert(cls, ibc, with_wall):
+        from pvtend.ppvi.solver import invert_piecewise, PassDParams
+        H_m, T_m, U_m, V_m, H_e, T_e, U_e, V_e, zhdr = cls._states()
+        pieces = dict(cls._PIECES)
+        qp = th = None
+        if with_wall:
+            pieces["wall"] = [2]
+            qp = {"wall": np.zeros_like(H_m)}
+            th = {"wall": np.zeros(H_m.shape[1:] + (2,))}
+        return invert_piecewise(
+            H_m, T_m, U_m, V_m, H_e, T_e, U_e, V_e, zhdr,
+            pieces=pieces, qp_anoms=qp, th_anoms=th,
+            pd=PassDParams(ibc=ibc))
+
+    def test_zero_source_ibc0_solve_is_zero(self):
+        res = self._invert(ibc=0, with_wall=True)
+        wall = res["psi_pieces"]["wall"]
+        ref = res["psi_pieces"]["up"]
+        assert np.nanmax(np.abs(wall)) < 1e-3 * np.nanmax(np.abs(ref))
+
+    def test_wall_correction_improves_closure(self):
+        """The corrected sum Σpieces(ibc=1) − (N−1)·W beats ibc=0 against the
+        constructed truth, and recovers the band-mean flow ibc=0 cannot carry.
+
+        The constructed perturbation is known exactly (geostrophic winds from
+        the prescribed streamfunction), so closure is measured against truth,
+        not against another solve.
+        """
+        from pvtend.ppvi.winds import psi_to_winds
+        H_m, T_m, U_m, V_m, H_e, T_e, U_e, V_e, zhdr = self._states()
+        ny = H_m.shape[1]
+        dlat = dlon = 1.5
+        latv = 78.5 - np.arange(ny) * dlat
+        res0 = self._invert(ibc=0, with_wall=False)
+        res1 = self._invert(ibc=1, with_wall=True)
+        W = res1["psi_pieces"]["wall"]
+        assert np.nanmax(np.abs(W)) > 0
+        n = len(self._PIECES)
+        s0 = sum(res0["psi_pieces"][k] for k in self._PIECES)
+        s1c = sum(res1["psi_pieces"][k] for k in self._PIECES) - (n - 1) * W
+        u_t = U_e - U_m
+        u0, _ = psi_to_winds(s0, latv, dlat, dlon)
+        u1, _ = psi_to_winds(s1c, latv, dlat, dlon)
+        core = (slice(2, 7), slice(8, -8), slice(8, -8))
+
+        def _nrms(a):
+            return float(np.sqrt(np.nanmean((a[core] - u_t[core]) ** 2))
+                         / np.sqrt(np.nanmean(u_t[core] ** 2)))
+
+        # measured on this fixture: 0.30 → 0.06
+        assert _nrms(u1) < 0.15
+        assert _nrms(u1) < 0.5 * _nrms(u0)
+        # band-mean (ramp) flow: ibc=0 loses it entirely (measured −8%),
+        # the corrected sum restores it (measured 102%)
+        mt = float(np.nanmean(u_t[core]))
+        assert abs(float(np.nanmean(u0[core])) / mt) < 0.5
+        assert 0.7 < float(np.nanmean(u1[core])) / mt < 1.3

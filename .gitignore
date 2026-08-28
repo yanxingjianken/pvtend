@@ -70,3 +70,6 @@ Thumbs.db
 
 # Run logs (ppvi mass runs etc.) — not code
 logs/
+
+# Method experiments (local only)
+experiments/

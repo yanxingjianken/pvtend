@@ -2534,17 +2534,45 @@ class TendencyComputer:
         pieces = PIECES
         qp_anoms = th_anoms = None
         _arch_split = None
+        pd_params = None
         if self.cfg.ppvi_pieces == "scale":
-            pieces = scale_split.PIECES_SCALE
             qp_anoms, th_anoms, split_diag = self._scale_split_sources(
                 ds, clim_ds, cplev, ts, geom, store, lon_idx_inv)
             _arch_split = split_diag.pop("arch_split", None)
             store.update({f"ppvi_split_{k}": v for k, v in split_diag.items()})
+            # ── Wall piece: the lateral-boundary (far-field) contribution ──
+            # The fixed Wu band crops the domain, so PV outside the window
+            # induces flow inside it only through the lateral ψ′ boundary
+            # values. With ibc=0 (homogeneous Dirichlet) that flow is lost —
+            # it leaks into the residual as zonally uniform stripes hugging
+            # the band-edge rows, and the piece sum cannot carry band-mean
+            # anomaly flow. With ibc=1 EVERY piece solve carries the full
+            # perturbation on the walls, so the shared wall response W must
+            # be counted once, not N times:
+            #     corrected piece_k = piece_k(ibc=1) − W
+            #     total = Σ corrected pieces + W  (W stored as piece "wall")
+            # W itself is the zero-source solve below: zero PV and boundary-θ
+            # anomaly overrides (its level list is never a source), walls at
+            # the full perturbation — the pure wall-forced harmonic response.
+            pieces = dict(scale_split.PIECES_SCALE, wall=[2])
+            qp_anoms = dict(qp_anoms, wall=np.zeros_like(H_m))
+            th_anoms = dict(th_anoms,
+                            wall=np.zeros(H_m.shape[1:] + (2,)))
+            from .ppvi.solver import PassDParams
+            pd_params = PassDParams(ibc=1)
 
         # ── Run the Wu piecewise inversion ──
         res = invert_piecewise(
             H_m, t_m, u_m, v_m, H_e, t_e, u_e, v_e, zhdr,
-            pieces=pieces, qp_anoms=qp_anoms, th_anoms=th_anoms)
+            pieces=pieces, qp_anoms=qp_anoms, th_anoms=th_anoms,
+            pd=pd_params)
+
+        # Assign the wall response once (see the wall-piece note above).
+        if "wall" in pieces:
+            _W = res["psi_pieces"]["wall"]
+            for _n in pieces:
+                if _n != "wall":
+                    res["psi_pieces"][_n] = res["psi_pieces"][_n] - _W
 
         # Rotational winds per piece on the inversion grid (NL, ny, nx).
         piece_u: dict[str, np.ndarray] = {}
@@ -2738,7 +2766,7 @@ class TendencyComputer:
         from .ppvi import scale_split
 
         if self.cfg.ppvi_pieces == "scale":
-            names: list = list(scale_split.PIECES_SCALE)
+            names: list = list(scale_split.PIECES_SCALE) + ["wall"]
         else:
             names = [self._WU_PLEVS[int(n) - 1] for n in PIECES]
         return [f"u_rot_anom_ppvi_{n}_3d" for n in names]

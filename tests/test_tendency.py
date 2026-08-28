@@ -305,10 +305,11 @@ class TestPPVIPieceKeys:
         assert "u_rot_anom_ppvi_250_3d" in keys
         assert "u_rot_anom_ppvi_1000_3d" in keys
 
-    def test_scale_covers_the_four_scale_pieces(self):
+    def test_scale_covers_the_four_scale_pieces_plus_wall(self):
         assert set(self._keys("scale")) == {
             "u_rot_anom_ppvi_surface_3d", "u_rot_anom_ppvi_lower_3d",
-            "u_rot_anom_ppvi_upper_p_3d", "u_rot_anom_ppvi_upper_e_3d"}
+            "u_rot_anom_ppvi_upper_p_3d", "u_rot_anom_ppvi_upper_e_3d",
+            "u_rot_anom_ppvi_wall_3d"}
 
     def test_scale_claims_no_per_level_key(self):
         """The exact confusion behind the bug."""
