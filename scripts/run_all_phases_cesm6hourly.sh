@@ -43,6 +43,11 @@ LOG_DIR="${LOG_DIR:-$TMP/pvtend_cesm6h}"
 
 MEMBERS="${MEMBERS:-91 92 93 94 95 96 97 98 99 100}"
 WORKERS="${WORKERS:-64}"
+# scale = surface/lower/upper_p/upper_e, matching the Derecho production append
+# (pbs_npz/run_ppvi_append.pbs PIECES=scale) and the fig4 key contract
+# (u_block/u_eddy/u_low/u_sr + pv_anom_p/e). per_level can be appended later
+# via the ppvi subcommand if per-level attribution is needed.
+PPVI_PIECES="${PPVI_PIECES:-scale}"
 export PVTEND_COMPOSITE_WORKERS="${PVTEND_COMPOSITE_WORKERS:-16}"
 CLASSIFY_WORKERS="${CLASSIFY_WORKERS:-16}"
 ORPHAN_TIMEOUT="${ORPHAN_TIMEOUT:-1800}"   # 30 min truly idle → kill
@@ -267,6 +272,7 @@ for m in $MEMBERS; do
                     --stages $stage \
                     --dh-range='0:1' \
                     --qg-method log20 \
+                    --ppvi-pieces $PPVI_PIECES \
                     --n-workers $WORKERS \
                     --skip-existing && \
                  { n=\$(find '$out/$stage/dh=+0' -name 'track_${m03}_*.npz' 2>/dev/null | wc -l); \
