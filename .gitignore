@@ -61,10 +61,6 @@ test_fields.py
 
 # Paper (local only, not tracked)
 paper/
-
-# Globus landing dir; contents move to cesm-blocking/cesm_6hourly/ on arrival
-archive/
-
 # Website export data (large JSON files, hosted on HF)
 website/
 
