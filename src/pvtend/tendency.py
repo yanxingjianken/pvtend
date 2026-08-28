@@ -2674,6 +2674,25 @@ class TendencyComputer:
         new["v_rot_anom_residual_ppvi_3d"] = _pad_levels(resid_v)
         new["u_rot_anom_residual_ppvi"] = _wavg(resid_u)
         new["v_rot_anom_residual_ppvi"] = _wavg(resid_v)
+
+        # ── PPVI blowup watch ──
+        # A diverged Wu SOR solve returns no error and writes a
+        # complete-looking NPZ, so magnitude is the only signal. These
+        # scalars are the third blowup family alongside the omega branches
+        # and the divergent winds, and let the aggregator flag such an
+        # inversion from a scalar read instead of the whole cube. Peak over
+        # all 9 Wu levels of each stored piece and of the residual.
+        def _absmax(a):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                return np.float32(np.nanmax(np.abs(a)))
+
+        for n in pieces:
+            L = WU_PLEVS[int(n) - 1] if n.isdigit() else n
+            new[f"max_abs_u_rot_anom_ppvi_{L}"] = _absmax(piece_u_c[n])
+            new[f"max_abs_v_rot_anom_ppvi_{L}"] = _absmax(piece_v_c[n])
+        new["max_abs_u_rot_anom_residual_ppvi"] = _absmax(resid_u)
+        new["max_abs_v_rot_anom_residual_ppvi"] = _absmax(resid_v)
         new["pv_anom_wu_3d"] = _pad_levels(pv_anom_wu_c)
 
         # ── archive-PV planetary/eddy split, persisted (scale mode only) ──

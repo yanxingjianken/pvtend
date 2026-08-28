@@ -7,13 +7,14 @@ per-track maximum exceeds the per-field threshold in any scanned field.
 
 Three field groups (select with --fields):
 
-  ppvi     u/v_rot_anom_ppvi_{surface,lower,upper_p,upper_e,wall}_3d
-           u/v_rot_anom_residual_ppvi_3d
+  ppvi     max_abs_{u,v}_rot_anom_ppvi_{surface,lower,upper_p,upper_e,wall}
+           max_abs_{u,v}_rot_anom_residual_ppvi
            Peak magnitude of each PPVI piece and of the inversion residual,
            over all 9 levels. Catches a diverged SOR solve, which the solver
            reports no error for and which otherwise enters the composites as
            a plausible-looking field. Cut 300 m/s (real events: p99.9 =
-           221 m/s; diverged solves: 8 000-24 000 m/s).
+           221 m/s; diverged solves: 8 000-24 000 m/s). NPZs written before
+           these scalars existed fall back to reducing the cubes.
 
   omega    max_abs_w_{adiabatic,diabatic,qg_diabatic,lhr_moist}
            All-level solver-omega maxima (falls back to the legacy
@@ -75,11 +76,22 @@ _DIV_FIELDS = {
 #: store, the all-level p99.9 of real events is 221 m/s, while the diverged
 #: solves reach 8 000–24 000 m/s.
 _PPVI_BLOWUP_MS = 300.0
+_PPVI_PARTS = ("surface", "lower", "upper_p", "upper_e", "wall")
 _PPVI_FIELDS = {
-    **{f"{c}_rot_anom_ppvi_{p}_3d": _PPVI_BLOWUP_MS
-       for c in ("u", "v")
-       for p in ("surface", "lower", "upper_p", "upper_e", "wall")},
-    **{f"{c}_rot_anom_residual_ppvi_3d": _PPVI_BLOWUP_MS for c in ("u", "v")},
+    **{f"max_abs_{c}_rot_anom_ppvi_{p}": _PPVI_BLOWUP_MS
+       for c in ("u", "v") for p in _PPVI_PARTS},
+    **{f"max_abs_{c}_rot_anom_residual_ppvi": _PPVI_BLOWUP_MS
+       for c in ("u", "v")},
+}
+
+#: Scalar → cube to fall back on for NPZs written before the PPVI blowup
+#: scalars existed. Reading the cube and reducing it gives the same number at
+#: the cost of the full array read, so an older store still gets scanned.
+_CUBE_FALLBACK = {
+    **{f"max_abs_{c}_rot_anom_ppvi_{p}": f"{c}_rot_anom_ppvi_{p}_3d"
+       for c in ("u", "v") for p in _PPVI_PARTS},
+    **{f"max_abs_{c}_rot_anom_residual_ppvi":
+       f"{c}_rot_anom_residual_ppvi_3d" for c in ("u", "v")},
 }
 
 _GROUPS = {
@@ -119,14 +131,13 @@ def _read_one(fp: Path, stage: str, npz_dir: Path,
             missing = 0
             for key in fields:
                 if key in z.files:
-                    v = z[key]
-                    # embedded scalars come through as 0-d; the PPVI group
-                    # names whole cubes, reduced here to their peak magnitude
-                    rec[key] = (float(v) if v.ndim == 0
-                                else float(np.nanmax(np.abs(v))))
+                    rec[key] = float(z[key])
                 elif key + "_300" in z.files:
                     # pre-v2.18 NPZ: only the 300-hPa omega scalars exist
                     rec[key] = float(z[key + "_300"])
+                elif _CUBE_FALLBACK.get(key) in z.files:
+                    # pre-v2.20 NPZ: no PPVI scalar, reduce the cube instead
+                    rec[key] = float(np.nanmax(np.abs(z[_CUBE_FALLBACK[key]])))
                 else:
                     rec[key] = np.nan
                     missing += 1

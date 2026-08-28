@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pvtend"
-version = "2.19.0"
+version = "2.20.0"
 authors = [
     { name = "Xingjian Yan" },
     { name = "Talia Tamarin-Brodsky" },
