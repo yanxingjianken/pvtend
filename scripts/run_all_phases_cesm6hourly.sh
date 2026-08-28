@@ -42,7 +42,7 @@ STATE="${STATE:-$TMP/pvtend_cesm6h.state}"
 LOG_DIR="${LOG_DIR:-$TMP/pvtend_cesm6h}"
 
 MEMBERS="${MEMBERS:-91 92 93 94 95 96 97 98 99 100}"
-WORKERS="${WORKERS:-64}"
+WORKERS="${WORKERS:-128}"
 # scale = surface/lower/upper_p/upper_e, matching the Derecho production append
 # (pbs_npz/run_ppvi_append.pbs PIECES=scale) and the fig4 key contract
 # (u_block/u_eddy/u_low/u_sr + pv_anom_p/e). per_level can be appended later
@@ -252,33 +252,37 @@ if errors:
 print('PREFLIGHT OK')
 PYEOF"
 
-# ── p6: compute, sequential members for resumability ──────────────────
-for m in $MEMBERS; do
-    m03=$(printf "m%03d" "$m")
-    for evt in blocking prp; do
-        out="$OUT_BLK"; [[ $evt == prp ]] && out="$OUT_PRP"
+# ── p6: compute, one (event-type, stage) block at a time ──────────────
+# Block order puts the two peak sets first, then the two onset sets, so the
+# peak analysis can start while onset is still generating; decay follows.
+# Members run sequentially inside a block: --skip-existing then makes a
+# resume cheap, and only one member-year archive file is open at a time.
+COMPUTE_BLOCKS="${COMPUTE_BLOCKS:-blocking:peak prp:peak blocking:onset prp:onset blocking:decay prp:decay}"
+for block in $COMPUTE_BLOCKS; do
+    evt="${block%%:*}"; stage="${block##*:}"
+    out="$OUT_BLK"; [[ $evt == prp ]] && out="$OUT_PRP"
+    for m in $MEMBERS; do
+        m03=$(printf "m%03d" "$m")
         csv="$CAT/events_${evt}_${m03}.csv"
-        for stage in onset peak decay; do
-            run_stage "p6_cesm_${evt}_${m03}_${stage}" \
-                "compute $evt/$stage member $m (dh=0, PPVI inline)" \
-                "$PIPELINE compute \
-                    --event-type $evt \
-                    --source cesm \
-                    --member $m \
-                    --events-csv '$csv' \
-                    --era5-dir '$ARCHIVE' \
-                    --clim-path '$CLIM' \
-                    --out-dir '$out' \
-                    --stages $stage \
-                    --dh-range='0:1' \
-                    --qg-method log20 \
-                    --ppvi-pieces $PPVI_PIECES \
-                    --n-workers $WORKERS \
-                    --skip-existing && \
-                 { n=\$(find '$out/$stage/dh=+0' -name 'track_${m03}_*.npz' 2>/dev/null | wc -l); \
-                   echo \"[verify] $evt/$stage $m03 NPZ count=\$n\"; \
-                   [ \"\$n\" -gt 0 ]; }"
-        done
+        run_stage "p6_cesm_${evt}_${m03}_${stage}" \
+            "compute $evt/$stage member $m (dh=0, PPVI inline)" \
+            "$PIPELINE compute \
+                --event-type $evt \
+                --source cesm \
+                --member $m \
+                --events-csv '$csv' \
+                --era5-dir '$ARCHIVE' \
+                --clim-path '$CLIM' \
+                --out-dir '$out' \
+                --stages $stage \
+                --dh-range='0:1' \
+                --qg-method log20 \
+                --ppvi-pieces $PPVI_PIECES \
+                --n-workers $WORKERS \
+                --skip-existing && \
+             { n=\$(find '$out/$stage/dh=+0' -name 'track_${m03}_*.npz' 2>/dev/null | wc -l); \
+               echo \"[verify] $evt/$stage $m03 NPZ count=\$n\"; \
+               [ \"\$n\" -gt 0 ]; }"
     done
 done
 
