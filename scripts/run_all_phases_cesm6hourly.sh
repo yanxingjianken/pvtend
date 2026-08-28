@@ -50,6 +50,19 @@ WORKERS="${WORKERS:-128}"
 PPVI_PIECES="${PPVI_PIECES:-scale}"
 export PVTEND_COMPOSITE_WORKERS="${PVTEND_COMPOSITE_WORKERS:-16}"
 CLASSIFY_WORKERS="${CLASSIFY_WORKERS:-16}"
+# The adiabatic/diabatic divergent-wind cutoffs shipped with the aggregator are
+# calibrated on ERA5, where 50 m/s sits above the healthy population. On CESM
+# f09 the same fields reach p98 = 86 m/s with no sign of solver trouble, so 50
+# cuts into real events: it flags 19.2% of the catalogue where the diverged
+# population is ~1.1%. Between 150 and 1000 m/s the flagged count is flat at
+# ~110 tracks, i.e. the physical tail and the blown-up solves are cleanly
+# separated; 100 m/s is the conservative end of that gap. The other families
+# (omega 25 Pa/s, qg_diabatic, lhr_moist, Helmholtz anomaly, PPVI 300 m/s) are
+# well placed on CESM as shipped and are left alone.
+DIV_CUTS="${DIV_CUTS:---field-threshold max_abs_u_div_adiabatic=100 \
+             --field-threshold max_abs_v_div_adiabatic=100 \
+             --field-threshold max_abs_u_div_diabatic=100 \
+             --field-threshold max_abs_v_div_diabatic=100}"
 ORPHAN_TIMEOUT="${ORPHAN_TIMEOUT:-1800}"   # 30 min truly idle → kill
 CHECK_INTERVAL="${CHECK_INTERVAL:-120}"
 RELAUNCH_DELAY="${RELAUNCH_DELAY:-30}"
@@ -291,7 +304,7 @@ for evt in blocking prp; do
     out="$OUT_BLK"; [[ $evt == prp ]] && out="$OUT_PRP"
     run_stage "p7_excl_cesm_${evt}" "blowup scan → exclude_tracks_cesm6hourly_${evt}" \
         "$PY $ROOT/scripts/aggregate_qg_blowup.py \
-             --npz-dir '$out' --fields all \
+             --npz-dir '$out' --fields all $DIV_CUTS \
              --out '$EXC_DIR/exclude_tracks_cesm6hourly_${evt}.csv' \
              --report '$EXC_DIR/blowup_report_cesm6hourly_${evt}.csv'"
 done
