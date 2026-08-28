@@ -5,7 +5,15 @@ Scans the scalar blowup metrics embedded in every NPZ under
 *npz_dir*/{onset,peak,decay}/dh=*/ and emits a CSV of tracks whose
 per-track maximum exceeds the per-field threshold in any scanned field.
 
-Two field groups (select with --fields):
+Three field groups (select with --fields):
+
+  ppvi     u/v_rot_anom_ppvi_{surface,lower,upper_p,upper_e,wall}_3d
+           u/v_rot_anom_residual_ppvi_3d
+           Peak magnitude of each PPVI piece and of the inversion residual,
+           over all 9 levels. Catches a diverged SOR solve, which the solver
+           reports no error for and which otherwise enters the composites as
+           a plausible-looking field. Cut 300 m/s (real events: p99.9 =
+           221 m/s; diverged solves: 8 000-24 000 m/s).
 
   omega    max_abs_w_{adiabatic,diabatic,qg_diabatic,lhr_moist}
            All-level solver-omega maxima (falls back to the legacy
@@ -60,10 +68,25 @@ _DIV_FIELDS = {
     f"max_abs_{c}_div_{b}": t
     for c in ("u", "v") for b, t in _DIV_THRESH.items()
 }
+#: PPVI piece and residual fields, checked as whole cubes rather than as
+#: embedded scalars: a diverged SOR solve reports no error and writes a
+#: complete-looking NPZ, so the only signal is the magnitude itself. The cut is
+#: far above any balanced wind — measured over the CESM 6-hourly blocking-peak
+#: store, the all-level p99.9 of real events is 221 m/s, while the diverged
+#: solves reach 8 000–24 000 m/s.
+_PPVI_BLOWUP_MS = 300.0
+_PPVI_FIELDS = {
+    **{f"{c}_rot_anom_ppvi_{p}_3d": _PPVI_BLOWUP_MS
+       for c in ("u", "v")
+       for p in ("surface", "lower", "upper_p", "upper_e", "wall")},
+    **{f"{c}_rot_anom_residual_ppvi_3d": _PPVI_BLOWUP_MS for c in ("u", "v")},
+}
+
 _GROUPS = {
     "omega": _OMEGA_FIELDS,
     "divwind": _DIV_FIELDS,
-    "all": {**_OMEGA_FIELDS, **_DIV_FIELDS},
+    "ppvi": _PPVI_FIELDS,
+    "all": {**_OMEGA_FIELDS, **_DIV_FIELDS, **_PPVI_FIELDS},
 }
 
 # ERA5 ids are bare ints; CESM ids are m<member>_t<track> strings.
@@ -96,7 +119,11 @@ def _read_one(fp: Path, stage: str, npz_dir: Path,
             missing = 0
             for key in fields:
                 if key in z.files:
-                    rec[key] = float(z[key])
+                    v = z[key]
+                    # embedded scalars come through as 0-d; the PPVI group
+                    # names whole cubes, reduced here to their peak magnitude
+                    rec[key] = (float(v) if v.ndim == 0
+                                else float(np.nanmax(np.abs(v))))
                 elif key + "_300" in z.files:
                     # pre-v2.18 NPZ: only the 300-hPa omega scalars exist
                     rec[key] = float(z[key + "_300"])
@@ -155,9 +182,10 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--npz-dir", required=True, type=Path)
     ap.add_argument("--fields", default="omega",
-                    help="Field group to scan: omega | divwind | all, "
-                         "or a comma-separated list of explicit "
-                         "max_abs_* key names (default: omega).")
+                    help="Field group to scan: omega | divwind | ppvi | all, "
+                         "or a comma-separated list of explicit key names "
+                         "(default: omega). 'ppvi' reads the piece/residual "
+                         "cubes and flags diverged inversions by magnitude.")
     ap.add_argument("--threshold", type=float, default=None,
                     help="Override the omega threshold [Pa/s] "
                          f"(default {_OMEGA_THRESH}).")
@@ -219,8 +247,16 @@ def main() -> None:
     # a track is excluded if ANY field exceeds its threshold; the CSV row
     # names the worst offender by threshold ratio
     ratio = per_track / pd.Series(fields)
-    worst_field = ratio.idxmax(axis=1)
-    worst_ratio = ratio.max(axis=1)
+    # A track with no scanned field present at all (e.g. inline PPVI failed,
+    # so the base NPZ carries no piece keys) cannot be judged: idxmax raises
+    # on an all-NA row. Report those separately instead of crashing the scan.
+    judged = ratio.dropna(how="all")
+    n_unjudged = len(ratio) - len(judged)
+    if n_unjudged:
+        print(f"[aggregate_qg_blowup] {n_unjudged} track(s) had none of the "
+              f"scanned fields and were not judged")
+    worst_field = judged.idxmax(axis=1)
+    worst_ratio = judged.max(axis=1)
     bad_ids = worst_ratio.index[worst_ratio > 1.0]
 
     out_rows = []
@@ -231,7 +267,8 @@ def main() -> None:
             "field": f,
             "max_val": per_track.loc[tid, f],
             "threshold": fields[f],
-            "reason": "omega" if f in _OMEGA_FIELDS else "divwind",
+            "reason": ("omega" if f in _OMEGA_FIELDS
+                       else "ppvi" if f in _PPVI_FIELDS else "divwind"),
         })
     bad = pd.DataFrame(out_rows,
                        columns=["track_id", "field", "max_val",
