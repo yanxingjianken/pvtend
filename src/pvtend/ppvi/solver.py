@@ -76,7 +76,14 @@ class PassCParams:
 
 @dataclass(frozen=True)
 class PassDParams:
-    """qinvertp21 (pass D, perturbation inversion) parameters."""
+    """qinvertp21 (pass D, perturbation inversion) parameters.
+
+    ``ibc`` selects the lateral boundary condition of every piece solve:
+    0 homogeneous Dirichlet, 1 full perturbation on the walls, 2 walls and
+    first guess from per-piece fields (nesting) — with ``ibc=2`` the caller
+    must hand :func:`invert_piecewise` a ``bc_fields`` entry (or the
+    ``bc_residual`` role) for every piece.
+    """
 
     omegs: float = 1.85
     omegah: float = 1.4
@@ -232,6 +239,8 @@ def invert_piecewise(
     pab: PassABParams | None = None,
     pc: PassCParams | None = None,
     pd: PassDParams | None = None,
+    bc_fields: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
+    bc_residual: str | None = None,
 ) -> dict:
     """Run the full Wu piecewise PV inversion on a mean + event state.
 
@@ -281,6 +290,19 @@ def invert_piecewise(
             (required for terrain-following model data such as CESM f09; a
             no-op on already-filled ERA5 pressure-level data).
         pab, pc, pd: Solver parameter overrides for passes A/B, C, D.
+        bc_fields: Per-piece lateral boundary condition + first guess for
+            ``pd.ibc == 2`` (nesting): mapping name → ``(HP0, SP0)`` cubes
+            ``(NL, NY, NX)`` in the pass-D OUTPUT units — ``HP0`` in metres
+            (``H_pieces`` convention), ``SP0`` in ψ/1e5 (``SP_pieces``
+            convention) — so an outer-domain piece solution, subset to this
+            window, feeds back verbatim. The boundary ring supplies the fixed
+            Dirichlet values; the interior is only the SOR first guess.
+        bc_residual: With ``pd.ibc == 2``, the name of the one piece whose
+            boundary fields are not given explicitly but computed as
+            ``full perturbation − Σ bc_fields``: the wall/remainder piece.
+            Guarantees the piece boundary values telescope exactly to the
+            full perturbation, so the nested pieces + wall still sum to the
+            all-sources inversion.
 
     Returns:
         Dict with keys:
@@ -386,6 +408,36 @@ def invert_piecewise(
     HP_pieces: dict[str, np.ndarray] = {}
     qp_anoms = qp_anoms or {}
     th_anoms = th_anoms or {}
+
+    # ── ibc=2 nesting: per-piece boundary/guess fields ───────────────
+    zeros_bc = np.zeros_like(np.asarray(MBIN))
+    bc_core: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    if int(pd.ibc) == 2:
+        bc_fields = bc_fields or {}
+        missing = [n for n in pieces
+                   if n not in bc_fields and n != bc_residual]
+        if missing:
+            raise ValueError(
+                f"pd.ibc=2 needs bc_fields for every piece (or the "
+                f"bc_residual role); missing {missing}")
+        for n, (hp0, sp0) in bc_fields.items():
+            bc_core[n] = (_to_core(hp0), _to_core(sp0))
+        if bc_residual is not None:
+            # Whatever boundary flow the explicit pieces do not carry is
+            # this piece's, so the walls telescope to the full perturbation
+            # exactly: HP_full = H_bal − MBIN [m], SP_full = SI_bal − SBIN
+            # [ψ/1e5] (the same subtraction qinvertp does internally).
+            hp_res = np.asarray(H_bal) - np.asarray(MBIN)
+            sp_res = np.asarray(SI_bal) - np.asarray(SBIN)
+            for n, (hp0, sp0) in bc_core.items():
+                hp_res = hp_res - hp0
+                sp_res = sp_res - sp0
+            bc_core[bc_residual] = (
+                np.asfortranarray(hp_res, dtype=np.float32),
+                np.asfortranarray(sp_res, dtype=np.float32))
+    elif bc_fields or bc_residual:
+        raise ValueError("bc_fields/bc_residual are only meaningful with "
+                         "PassDParams(ibc=2)")
     for name, levels in pieces.items():
         nmlv = len(levels)
         qlv = np.zeros(NL, dtype=np.int32)
@@ -412,12 +464,13 @@ def invert_piecewise(
             TH_use = np.asfortranarray(THBIN + t, dtype=np.float32)
         else:
             TH_use = THPIN
+        hp0, sp0 = bc_core.get(name, (zeros_bc, zeros_bc))
         HPOUT, SPOUT = ext.qinvertp_core(
             MBIN, SBIN, H_bal, SI_bal, QBIN, QP_use, THBIN, TH_use,
             zhdr_d, PR, qlv, int(nmlv),
             np.float32(pd.omegs), np.float32(pd.omegah), np.float32(pd.part),
             np.float32(pd.thrsh), np.float32(pd.tscal), np.float32(pd.qscal),
-            int(pd.inlin), int(pd.ibc),
+            int(pd.inlin), int(pd.ibc), hp0, sp0,
         )
         SP = _from_core(SPOUT)
         HP = _from_core(HPOUT)

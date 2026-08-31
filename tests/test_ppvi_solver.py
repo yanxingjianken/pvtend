@@ -582,3 +582,114 @@ class TestWallPiece:
         mt = float(np.nanmean(u_t[core]))
         assert abs(float(np.nanmean(u0[core])) / mt) < 0.5
         assert 0.7 < float(np.nanmean(u1[core])) / mt < 1.3
+
+
+class TestNestedBC:
+    """ibc=2: per-piece lateral boundary values via ``bc_fields``.
+
+    The nesting workflow feeds outer-domain piece solutions in as inner
+    walls; these tests validate the plumbing with same-domain identities
+    that hold regardless of any outer solve:
+
+    - zero bc + zero source => identically (near-)zero solution;
+    - ``bc_residual`` alone reproduces the ibc=1 full-perturbation walls;
+    - handing the corrected ibc=1 pieces (whose walls are zero) back as
+      bc reproduces the ibc=0 pieces, with the residual piece equal to W —
+      and the piece sum still telescopes to the all-sources solution.
+    """
+
+    @staticmethod
+    def _rel(a, b):
+        return float(np.sqrt(np.nanmean((a - b) ** 2))
+                     / np.sqrt(np.nanmean(b ** 2)))
+
+    def test_ibc2_zero_bc_zero_source_is_zero(self):
+        from pvtend.ppvi.solver import invert_piecewise, PassDParams
+        H_m, T_m, U_m, V_m, H_e, T_e, U_e, V_e, zhdr = \
+            TestWallPiece._states()
+        z = np.zeros_like(H_m)
+        res = invert_piecewise(
+            H_m, T_m, U_m, V_m, H_e, T_e, U_e, V_e, zhdr,
+            pieces={"wall": [2]},
+            qp_anoms={"wall": np.zeros_like(H_m)},
+            th_anoms={"wall": np.zeros(H_m.shape[1:] + (2,))},
+            pd=PassDParams(ibc=2), bc_fields={"wall": (z, z)})
+        scale = np.nanmax(np.abs(res["psi_total"]))
+        assert np.nanmax(np.abs(res["psi_pieces"]["wall"])) < 1e-3 * scale
+
+    def test_bc_residual_alone_matches_ibc1(self):
+        from pvtend.ppvi.solver import invert_piecewise, PassDParams
+        args = TestWallPiece._states()
+        pieces = {"all": list(range(1, 10))}
+        r1 = invert_piecewise(*args, pieces=pieces, pd=PassDParams(ibc=1))
+        r2 = invert_piecewise(*args, pieces=pieces, pd=PassDParams(ibc=2),
+                              bc_fields={}, bc_residual="all")
+        assert self._rel(r2["psi_pieces"]["all"],
+                         r1["psi_pieces"]["all"]) < 0.02
+
+    def test_raw_piece_bc_reproduces_ibc1(self):
+        """Feeding each raw ibc=1 piece back as its own ibc=2 bc must
+        reproduce that piece: identical walls and identical first guess
+        give the identical SOR trajectory. Pins the per-piece bc routing
+        exactly, independent of how deeply the fixture converges."""
+        from pvtend.ppvi.solver import invert_piecewise, PassDParams
+        args = TestWallPiece._states()
+        H_m = args[0]
+        pieces = dict(TestWallPiece._PIECES)
+        pieces["wall"] = [2]
+        qp = {"wall": np.zeros_like(H_m)}
+        th = {"wall": np.zeros(H_m.shape[1:] + (2,))}
+        r1 = invert_piecewise(*args, pieces=pieces, qp_anoms=qp,
+                              th_anoms=th, pd=PassDParams(ibc=1))
+        raw = {n: (r1["H_pieces"][n], r1["SP_pieces"][n]) for n in pieces}
+        r2 = invert_piecewise(*args, pieces=pieces, qp_anoms=qp,
+                              th_anoms=th, pd=PassDParams(ibc=2),
+                              bc_fields=raw)
+        for n in pieces:
+            assert self._rel(r2["psi_pieces"][n],
+                             r1["psi_pieces"][n]) < 0.02, n
+
+    def test_corrected_piece_bc_superposes(self):
+        """Corrected ibc=1 pieces (raw − W) have zero walls, so handing
+        them back as bc should reproduce the ibc=0 pieces, with the
+        residual piece equal to W. On this synthetic fixture independent
+        solves agree only to the SOR convergence floor (~10 %, the same
+        order as the TestWallPiece closure thresholds), so this is a
+        superposition sanity bound, not an exact-path check — that is
+        test_raw_piece_bc_reproduces_ibc1."""
+        from pvtend.ppvi.solver import invert_piecewise, PassDParams
+        args = TestWallPiece._states()
+        H_m = args[0]
+        pieces = dict(TestWallPiece._PIECES)
+        pieces["wall"] = [2]
+        qp = {"wall": np.zeros_like(H_m)}
+        th = {"wall": np.zeros(H_m.shape[1:] + (2,))}
+        r1 = invert_piecewise(*args, pieces=pieces, qp_anoms=qp,
+                              th_anoms=th, pd=PassDParams(ibc=1))
+        W_h = r1["H_pieces"]["wall"]
+        W_s = r1["SP_pieces"]["wall"]
+        corr = {n: (r1["H_pieces"][n] - W_h, r1["SP_pieces"][n] - W_s)
+                for n in TestWallPiece._PIECES}
+        r0 = invert_piecewise(*args, pieces=dict(TestWallPiece._PIECES),
+                              pd=PassDParams(ibc=0))
+        r2 = invert_piecewise(*args, pieces=pieces, qp_anoms=qp,
+                              th_anoms=th, pd=PassDParams(ibc=2),
+                              bc_fields=corr, bc_residual="wall")
+        for n in TestWallPiece._PIECES:
+            assert self._rel(r2["psi_pieces"][n],
+                             r0["psi_pieces"][n]) < 0.20, n
+        assert self._rel(r2["psi_pieces"]["wall"],
+                         r1["psi_pieces"]["wall"]) < 0.25
+
+    def test_bc_without_ibc2_raises(self):
+        from pvtend.ppvi.solver import invert_piecewise, PassDParams
+        import pytest
+        args = TestWallPiece._states()
+        z = np.zeros_like(args[0])
+        with pytest.raises(ValueError, match="ibc=2"):
+            invert_piecewise(*args, pieces={"all": [1]},
+                             pd=PassDParams(ibc=1),
+                             bc_fields={"all": (z, z)})
+        with pytest.raises(ValueError, match="missing"):
+            invert_piecewise(*args, pieces={"a": [1], "b": [2]},
+                             pd=PassDParams(ibc=2), bc_fields={})

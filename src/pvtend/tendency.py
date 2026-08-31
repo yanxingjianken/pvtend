@@ -188,6 +188,19 @@ class TendencyConfig:
     #: into a planetary (zonal k≤4, confined to the tracked object) and an eddy
     #: part. Both are kept: existing analyses read the per-level keys.
     ppvi_pieces: str = "per_level"
+    #: Nested lateral boundary conditions for the scale-piece PPVI. When on,
+    #: the same pieces are first solved on a zonally wider window (same fixed
+    #: latitude band; ``inv_lon_half + ppvi_nested_lon_margin`` per side,
+    #: capped just under the full circle) with the production ibc=1 + wall
+    #: method, and each outer corrected piece then supplies the inner walls
+    #: for that piece (``ibc=2``). The stored ``wall`` piece becomes the
+    #: remainder the outer domain could not attribute — smaller, never zero.
+    #: The N/S band edges are unchanged (the band exists for ellipticity), so
+    #: nesting is zonal only. Requires ``ppvi_pieces == "scale"``. Roughly
+    #: doubles the PPVI cost per event.
+    ppvi_nested: bool = False
+    #: Extra zonal half-width of the outer nesting window, degrees per side.
+    ppvi_nested_lon_margin: float = 60.0
     qg_omega_method: str = "log20"
     center_mode: str = "eulerian"
     skip_existing: bool = True
@@ -2504,20 +2517,20 @@ class TendencyComputer:
                     f"(state n={ds.sizes[_ax]}, clim n={clim_ds.sizes[_ax]})")
         mo, dy, hr = int(ts.month), int(ts.day), int(ts.hour)
 
-        def _ev(var):
+        def _ev(var, idx=lon_idx_inv):
             return (ds[var].sel(valid_time=ts)
                     .sel({plev: WU_PLEVS})
-                    .isel(latitude=band_idx, longitude=lon_idx_inv)
+                    .isel(latitude=band_idx, longitude=idx)
                     .values.astype(np.float64))
 
-        def _mn(var):
+        def _mn(var, idx=lon_idx_inv):
             # Same layout dispatch as `clim_bar`, on a single timestamp.
             if "slot" in clim_ds.dims:
                 base = clim_ds[var].isel(slot=noleap_slot_scalar(ts))
             else:
                 base = clim_ds[var].sel(month=mo, day=dy, hour=hr)
             return (base.sel({cplev: WU_PLEVS})
-                    .isel(latitude=band_idx, longitude=lon_idx_inv)
+                    .isel(latitude=band_idx, longitude=idx)
                     .values.astype(np.float64))
 
         z_e, t_e, u_e, v_e = _ev("z"), _ev("t"), _ev("u"), _ev("v")
@@ -2535,9 +2548,33 @@ class TendencyComputer:
         qp_anoms = th_anoms = None
         _arch_split = None
         pd_params = None
+        bc_fields = bc_residual = None
+        nested = bool(self.cfg.ppvi_nested)
+        if nested and self.cfg.ppvi_pieces != "scale":
+            raise ValueError("ppvi_nested requires ppvi_pieces='scale' "
+                             f"(got {self.cfg.ppvi_pieces!r})")
         if self.cfg.ppvi_pieces == "scale":
+            src_idx = lon_idx_inv
+            if nested:
+                # Outer nesting window: same latitude band, zonally wider by
+                # the configured margin, capped just below the full circle
+                # (the window must stay a proper sector — a self-overlapping
+                # wrapped index would alias columns).
+                pad_out = min(
+                    inv_lon_pad
+                    + int(round(self.cfg.ppvi_nested_lon_margin / dlon)),
+                    (nlon - 1) // 2)
+                if pad_out <= inv_lon_pad:
+                    raise ValueError(
+                        f"ppvi_nested_lon_margin="
+                        f"{self.cfg.ppvi_nested_lon_margin} adds no columns "
+                        f"at dlon={dlon} (inner pad {inv_lon_pad}, capped "
+                        f"outer pad {pad_out})")
+                lon_idx_out = _wrapped_lon_index(
+                    ilon_c, LON_PAD=pad_out, nlon=nlon)
+                src_idx = lon_idx_out
             qp_anoms, th_anoms, split_diag = self._scale_split_sources(
-                ds, clim_ds, cplev, ts, geom, store, lon_idx_inv)
+                ds, clim_ds, cplev, ts, geom, store, src_idx)
             _arch_split = split_diag.pop("arch_split", None)
             store.update({f"ppvi_split_{k}": v for k, v in split_diag.items()})
             # ── Wall piece: the lateral-boundary (far-field) contribution ──
@@ -2555,20 +2592,69 @@ class TendencyComputer:
             # anomaly overrides (its level list is never a source), walls at
             # the full perturbation — the pure wall-forced harmonic response.
             pieces = dict(scale_split.PIECES_SCALE, wall=[2])
+            from .ppvi.solver import PassDParams
+            if nested:
+                # ── Outer pass: production ibc=1 + wall on the wide window,
+                # then each corrected outer piece hands its central-columns
+                # subset to the inner solve as that piece's ibc=2 walls. The
+                # inner "wall" piece takes the residual boundary values
+                # (full inner perturbation − Σ outer-piece walls), so the
+                # nested pieces still telescope to the all-sources
+                # inversion; what changes is that boundary-forced flow the
+                # OUTER window can attribute to a piece now lands in that
+                # piece instead of in "wall".
+                z_eo, t_eo, u_eo, v_eo = (_ev(v, lon_idx_out)
+                                          for v in ("z", "t", "u", "v"))
+                z_mo, t_mo, u_mo, v_mo = (_mn(v, lon_idx_out)
+                                          for v in ("z", "t", "u", "v"))
+                H_eo, H_mo = z_eo / _zd, z_mo / _zd
+                nx_out = 2 * pad_out + 1
+                zhdr_out = np.array(
+                    [geom["lat_s_act"], 0.0, geom["lat_n_act"],
+                     (nx_out - 1) * dlon, dlat, dlon, nx_out,
+                     len(band_lats)], dtype=np.float32)
+                qp_out = dict(qp_anoms, wall=np.zeros_like(H_mo))
+                th_out = dict(th_anoms,
+                              wall=np.zeros(H_mo.shape[1:] + (2,)))
+                res_o = invert_piecewise(
+                    H_mo, t_mo, u_mo, v_mo, H_eo, t_eo, u_eo, v_eo,
+                    zhdr_out, pieces=pieces, qp_anoms=qp_out,
+                    th_anoms=th_out, pd=PassDParams(ibc=1))
+                off = pad_out - inv_lon_pad
+                sl = np.s_[:, :, off:off + (2 * inv_lon_pad + 1)]
+                _Wh = res_o["HP_pieces"]["wall"]
+                _Ws = res_o["SP_pieces"]["wall"]
+                bc_fields = {
+                    n: ((res_o["HP_pieces"][n] - _Wh)[sl],
+                        (res_o["SP_pieces"][n] - _Ws)[sl])
+                    for n in pieces if n != "wall"}
+                bc_residual = "wall"
+                pd_params = PassDParams(ibc=2)
+                # Inner sources are the central columns of the wide-window
+                # source arrays (the split is computed on the full circle
+                # and subset, so this is exact, not an approximation).
+                qp_anoms = {n: a[:, :, off:off + (2 * inv_lon_pad + 1)]
+                            for n, a in qp_anoms.items()}
+                th_anoms = {n: a[:, off:off + (2 * inv_lon_pad + 1), :]
+                            for n, a in th_anoms.items()}
+                store["ppvi_nested_lon_half"] = np.float32(pad_out * dlon)
+            else:
+                pd_params = PassDParams(ibc=1)
             qp_anoms = dict(qp_anoms, wall=np.zeros_like(H_m))
             th_anoms = dict(th_anoms,
                             wall=np.zeros(H_m.shape[1:] + (2,)))
-            from .ppvi.solver import PassDParams
-            pd_params = PassDParams(ibc=1)
 
         # ── Run the Wu piecewise inversion ──
         res = invert_piecewise(
             H_m, t_m, u_m, v_m, H_e, t_e, u_e, v_e, zhdr,
             pieces=pieces, qp_anoms=qp_anoms, th_anoms=th_anoms,
-            pd=pd_params)
+            pd=pd_params, bc_fields=bc_fields, bc_residual=bc_residual)
 
         # Assign the wall response once (see the wall-piece note above).
-        if "wall" in pieces:
+        # Not with nesting: each ibc=2 piece already owns exactly its
+        # outer-attributed boundary response, and "wall" is the separate
+        # residual solve — subtracting it again would double-count.
+        if "wall" in pieces and not nested:
             _W = res["psi_pieces"]["wall"]
             for _n in pieces:
                 if _n != "wall":

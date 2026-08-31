@@ -657,13 +657,20 @@ c    THPIN(NY,NX,2) - total boundary theta [K]        (event_q.out)
 c    ZHDR(8), PR(NL)
 c    QLV(NL), NMLV  - this piece's level list and length
 c    OMEGAS,OMEGAH,PRT,THRSH,TSCAL,QSCAL - SOR / scale params
-c    INLIN (1=nonlinear coeffs), IBC (0=Dirichlet, 1=full-pert BC)
+c    INLIN (1=nonlinear coeffs), IBC (0=Dirichlet, 1=full-pert BC,
+c      2=lateral boundary values + initial guess from HP0IN/SP0IN)
+c    HP0IN, SP0IN (NY,NX,NL) - IBC=2 boundary/guess fields in the
+c      qinvertp OUTPUT units (HP0IN metres, SP0IN psi/1e5): the
+c      boundary ring supplies the fixed lateral Dirichlet values, the
+c      interior the SOR first guess (the array analogue of the
+c      original qinvertp21 IGFIL nesting file). Ignored unless IBC=2.
 c  Outputs:
 c    HPOUT, SPOUT (NY,NX,NL)  - balanced piece geopotential / streamfn
 c ---------------------------------------------------------------------
       SUBROUTINE QINVERTP_CORE(MBIN, SBIN, MPIN, SIPIN, QBIN, QPIN,
      +   THBIN, THPIN, ZHDR, PR, QLV, NMLV, OMEGAS, OMEGAH, PRT,
-     +   THRSH, TSCAL, QSCAL, INLIN, IBC, HPOUT, SPOUT, NY, NX)
+     +   THRSH, TSCAL, QSCAL, INLIN, IBC, HP0IN, SP0IN,
+     +   HPOUT, SPOUT, NY, NX)
 
       PARAMETER (NL=9)
       INTEGER NY, NX
@@ -672,11 +679,13 @@ c ---------------------------------------------------------------------
       REAL THBIN(NY,NX,2), THPIN(NY,NX,2), ZHDR(8), PR(NL)
       INTEGER QLV(NL), NMLV, INLIN, IBC
       REAL OMEGAS, OMEGAH, PRT, THRSH, TSCAL, QSCAL
+      REAL HP0IN(NY,NX,NL), SP0IN(NY,NX,NL)
       REAL HPOUT(NY,NX,NL), SPOUT(NY,NX,NL)
 
 cf2py intent(in) MBIN, SBIN, MPIN, SIPIN, QBIN, QPIN
 cf2py intent(in) THBIN, THPIN, ZHDR, PR, QLV, NMLV
 cf2py intent(in) OMEGAS, OMEGAH, PRT, THRSH, TSCAL, QSCAL, INLIN, IBC
+cf2py intent(in) HP0IN, SP0IN
 cf2py intent(out) HPOUT, SPOUT
 cf2py integer intent(hide),depend(MBIN) :: NY=shape(MBIN,0)
 cf2py integer intent(hide),depend(MBIN) :: NX=shape(MBIN,1)
@@ -816,7 +825,7 @@ c ----- nondim PV perturbation with QMIN floor (loop 280) -------------
 c ----- solve one piece ----------------------------------------------
       CALL BALP(MP, MB, SIP, SB, THP, QP, FC, FM, MF, AP, A, PI,
      +   HND, OMEGAS, OMEGAH, PRT, THRSH, BETA, FRC, MAXIT, MAXOT,
-     +   SIGM, QLV, NMLV, IBC, HPOUT, SPOUT, NY, NX)
+     +   SIGM, QLV, NMLV, IBC, HP0IN, SP0IN, HPOUT, SPOUT, NY, NX)
 
       RETURN
       END
@@ -831,7 +840,7 @@ c  fork-safety (the original relied on static zero-init).
 c ---------------------------------------------------------------------
       SUBROUTINE BALP(H, HB, S, SBR, TPR, Q, FCO, FCM, MFC, APS, AC,
      +   PE, HNDM, OMEGS, OMEGH, PART, THRS, BET, FR, MAXX, MAXXT,
-     +   SIG, QLV, NMLV, IBC, HPOUT, SPOUT, NY, NX)
+     +   SIG, QLV, NMLV, IBC, HP0, SP0, HPOUT, SPOUT, NY, NX)
       PARAMETER (NL=9)
       INTEGER NY, NX
       REAL  H(NY,NX,NL),HB(NY,NX,NL),HP(NY,NX,NL),MI,PART,
@@ -843,6 +852,7 @@ c ---------------------------------------------------------------------
      +   HRHS(NY,NX,NL),SRHS(NY,NX,NL),TP(NY,NX,2),OS(NY,NX,NL),
      +   OH(NY,NX,NL),BB(NL),PE(NL),BH(NL),BL(NL),DPI2(NL),HNDM,
      +   SISUM(NY,NX,NL),HTSUM(NY,NX,NL),FCM(NY,NX),MFC(NY,NX)
+      REAL HP0(NY,NX,NL), SP0(NY,NX,NL)
       REAL HPOUT(NY,NX,NL), SPOUT(NY,NX,NL)
       INTEGER QLV(NL),GPTS,NMLV,IBC
       LOGICAL IT,ICON
@@ -955,7 +965,22 @@ C******* Initialize fields, set boundary conditions *******
  245   CONTINUE
  240  CONTINUE
 
- 114  IF (IBC.EQ.1) THEN
+c     IBC=2: lateral boundary values + first guess from HP0/SP0, the
+c     array analogue of the qinvertp21_94 IGFIL nesting file (which is
+c     read as HP=HP/HNDM, SP=SP/HNDM). HP0 is in metres and SP0 in
+c     psi/1e5 -- the same units BALP writes HPOUT/SPOUT in, so an
+c     outer-domain piece solution feeds back verbatim. The SOR updates
+c     interior points only, so the ring stays fixed at these values.
+ 114  IF (IBC.EQ.2) THEN
+       DO 264 K=1,NL
+        DO 265 J=1,NX
+         DO 266 I=1,NY
+          HP(I,J,K)=HP0(I,J,K)/HNDM
+          SP(I,J,K)=SP0(I,J,K)/HNDM
+ 266     CONTINUE
+ 265    CONTINUE
+ 264   CONTINUE
+      ELSE IF (IBC.EQ.1) THEN
        DO 254 K=1,NL
         DO 255 J=1,NX
          DO 256 I=1,NY

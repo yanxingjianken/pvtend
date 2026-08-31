@@ -60,6 +60,22 @@ def _add_ppvi_pieces_arg(p: argparse.ArgumentParser) -> None:
              "eddy part.  The two write different keys — do not mix them "
              "within one output directory.",
     )
+    p.add_argument(
+        "--ppvi-nested", action=argparse.BooleanOptionalAction, default=False,
+        help="Nested lateral boundary conditions for the scale pieces "
+             "(requires --ppvi-pieces scale): solve the pieces first on a "
+             "zonally wider window (ibc=1 + wall), then feed each outer "
+             "corrected piece to the event window as that piece's ibc=2 "
+             "boundary values.  The stored 'wall' piece becomes the smaller "
+             "remainder the outer window could not attribute.  Roughly "
+             "doubles the PPVI cost per event.",
+    )
+    p.add_argument(
+        "--ppvi-nested-lon-margin", type=float, default=60.0,
+        help="Extra zonal half-width of the outer nesting window, degrees "
+             "per side (default 60: a +-90 deg event window nests inside "
+             "+-150 deg).",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -845,6 +861,8 @@ def _cmd_compute(args: argparse.Namespace) -> None:
         skip_existing=args.skip_existing,
         n_workers=args.n_workers,
         ppvi_pieces=args.ppvi_pieces,
+        ppvi_nested=args.ppvi_nested,
+        ppvi_nested_lon_margin=args.ppvi_nested_lon_margin,
         clim_helmholtz_dir=(
             args.clim_helmholtz_dir
             if args.clim_helmholtz_dir is not None
@@ -927,6 +945,8 @@ def _cmd_ppvi(args: argparse.Namespace) -> None:
         skip_existing=args.skip_existing,
         n_workers=args.n_workers,
         ppvi_pieces=args.ppvi_pieces,
+        ppvi_nested=args.ppvi_nested,
+        ppvi_nested_lon_margin=args.ppvi_nested_lon_margin,
         clim_helmholtz_dir=(
             args.clim_helmholtz_dir
             if args.clim_helmholtz_dir is not None
