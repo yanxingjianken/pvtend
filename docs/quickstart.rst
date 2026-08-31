@@ -232,17 +232,37 @@ The full production pipeline is a **three-pass** workflow:
        --pkl-in /path/to/outputs/composite_blocking.pkl \
        --out-dir /path/to/outputs/decomposition/
 
-The resulting ``composite_blocking.pkl`` can be loaded and inspected in
-Python:
+The resulting ``composite_blocking.pkl`` holds a
+:class:`~pvtend.composite_builder.CompositeResult` and is loaded with that
+class:
 
 .. code-block:: python
 
-   from pvtend import load_composite_state
+   from pvtend import CompositeResult
 
-   comp = load_composite_state("composite_blocking.pkl")
+   comp = CompositeResult.load("composite_blocking.pkl")
 
-   # Get composite-mean PV at peak + 0 h for AWB events
-   pv_awb = comp.composite_mean_3d("pv_3d", stage="peak", dh=0, variant="AWB_peak")
+   # Composite-mean PV at peak + 0 h for AWB events
+   pv_awb = comp.mean_3d("pv_3d", "peak", 0, variant="AWB_peak")
+
+   # 2-D reduction: a single level, or the exp(-z/H) weighted average
+   pv_250 = comp.reduce_2d("pv_3d", "peak", 0, level_mode=250)
+   pv_wavg = comp.reduce_2d("pv_3d", "peak", 0, level_mode="wavg")
+
+   comp.stages, comp.variant_names, comp.available_dh("peak")
+
+.. note::
+
+   Two composite formats exist and they need different loaders.
+   ``pvtend-pipeline composite`` writes a
+   :class:`~pvtend.composite_builder.CompositeResult`, read back with
+   ``CompositeResult.load()`` and queried with ``mean_3d`` / ``reduce_2d``.
+   :func:`~pvtend.load_composite_state` reads the older exported-globals
+   format (:class:`~pvtend.composites.CompositeState`, queried with
+   ``composite_mean_3d``), which is what the pre-CLI ERA5 notebooks
+   produced. Pointing ``load_composite_state`` at a pipeline pickle raises
+   ``TypeError``; pointing ``CompositeResult.load`` at a globals pickle
+   raises ``AttributeError``.
 
 
 Per-level piecewise PV inversion (PPVI)

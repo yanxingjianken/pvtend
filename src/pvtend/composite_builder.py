@@ -361,9 +361,22 @@ class CompositeResult:
 
     @classmethod
     def load(cls, path: Path | str) -> "CompositeResult":
+        """Load a composite written by ``pvtend-pipeline composite``.
+
+        Raises TypeError on the older exported-globals format, which reads
+        back as a plain mapping and would otherwise be returned silently
+        despite the annotation — the mismatch would then surface as an
+        attribute error somewhere downstream.
+        """
         path = Path(path)
         with open(path, "rb") as f:
             obj = pickle.load(f)
+        if not isinstance(obj, cls):
+            raise TypeError(
+                f"{path} holds {type(obj).__name__}, not a CompositeResult. "
+                "The exported-globals composite format is read with "
+                "pvtend.load_composite_state() instead."
+            )
         return obj
 
 

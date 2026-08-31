@@ -201,6 +201,13 @@ def load_composite_state(path: str | Path) -> CompositeState:
         data = pickle.load(fh)
     if isinstance(data, dict) and "globals" in data and len(data) == 1:
         data = data["globals"]
+    if not isinstance(data, Mapping):
+        raise TypeError(
+            f"{path} holds {type(data).__name__}, not the exported-globals "
+            "mapping this loader expects. Composites written by "
+            "`pvtend-pipeline composite` are read with "
+            "pvtend.CompositeResult.load() instead."
+        )
     return CompositeState(globals_map=data)
 
 

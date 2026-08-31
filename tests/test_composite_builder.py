@@ -280,3 +280,72 @@ class TestBuildComposites:
         # Mean z should be (20 + 30) / 2 = 25
         m = result.mean_3d("z_3d", "onset", 0)
         np.testing.assert_allclose(m, 25.0)
+
+
+# ── the two composite formats and their loaders ──────────────────────
+class TestCompositeLoaderContract:
+    """``composite`` writes a CompositeResult; the older globals export is a
+    CompositeState. Each loader must reject the other's file.
+
+    The docs used to point readers at ``load_composite_state`` for pipeline
+    output, which fails only at load time and only on a real run — so the
+    documented call is exercised here.
+    """
+
+    @pytest.fixture
+    def sample_result(self, levels):
+        shape = (3, 5, 7)
+        arr = np.ones(shape, dtype=np.float64) * 10.0
+        valid = np.ones(shape, dtype=np.uint16) * 2
+        return CompositeResult(
+            levels=levels,
+            x_rel=np.linspace(-3, 3, 7),
+            y_rel=np.linspace(-2, 2, 5),
+            h_scale=7000.0,
+            stages=["onset"],
+            fields_3d=["z_3d", "pv_3d"],
+            sums={"onset": {0: {"z_3d": arr * 2, "pv_3d": arr}}},
+            valids={"onset": {0: {"z_3d": valid, "pv_3d": valid}}},
+            counts={"onset": {0: 2}},
+            sums_v={}, valids_v={}, counts_v={},
+            variant_names=["original"],
+        )
+
+    @pytest.fixture
+    def result_pkl(self, sample_result, tmp_path):
+        p = tmp_path / "composite.pkl"
+        sample_result.save(p)
+        return p
+
+    def test_documented_loader_round_trips(self, result_pkl, sample_result):
+        """What quickstart tells the reader to run after the composite pass."""
+        from pvtend import CompositeResult
+
+        comp = CompositeResult.load(result_pkl)
+        assert comp.stages == sample_result.stages
+        assert set(comp.variant_names) == set(sample_result.variant_names)
+        np.testing.assert_allclose(
+            comp.mean_3d("z_3d", "onset", 0),
+            sample_result.mean_3d("z_3d", "onset", 0))
+        assert comp.reduce_2d("z_3d", "onset", 0, level_mode=500).ndim == 2
+        assert comp.available_dh("onset") == [0]
+
+    def test_globals_loader_rejects_a_pipeline_pickle(self, result_pkl):
+        from pvtend import load_composite_state
+
+        with pytest.raises((TypeError, KeyError)):
+            load_composite_state(result_pkl)
+
+    def test_result_loader_rejects_a_globals_pickle(self, tmp_path):
+        import pickle
+
+        from pvtend import CompositeResult
+
+        p = tmp_path / "globals.pkl"
+        with open(p, "wb") as fh:
+            pickle.dump({"FIELDS3D": (), "LEVELS": (), "SUMS3D": {},
+                         "VALID3D": {}, "FILECOUNT": {}, "SUMS3D_V": {},
+                         "VALID3D_V": {}, "FILECOUNT_V": {},
+                         "COMPOSITE_VARIANTS": ()}, fh)
+        with pytest.raises((AttributeError, TypeError, KeyError)):
+            CompositeResult.load(p)

@@ -890,6 +890,14 @@ event stage and RWB variant) and exports / loads the composite state via
 pickle.  :class:`CompositeState` provides ``composite_mean_3d()`` and
 ``composite_reduce()`` methods for rapid access to composite-mean fields.
 
+.. note::
+
+   This is the **older exported-globals** format, produced by the pre-CLI
+   ERA5 notebooks.  Composites written by ``pvtend-pipeline composite`` are
+   :class:`~pvtend.composite_builder.CompositeResult` objects and must be
+   read with ``CompositeResult.load()`` — see :ref:`composite-builder` below.
+   The two are not interchangeable: each loader raises on the other's file.
+
 .. autosummary::
    :toctree: generated/
 
@@ -1062,13 +1070,18 @@ Ten variants are supported:
 composite-mean fields, including exponential height-weighted vertical
 averages (``level_mode="wavg"``).
 
-The CLI subcommand is ``pvtend-pipeline composite``.
+The CLI subcommand is ``pvtend-pipeline composite``, and its output is read
+back with ``CompositeResult.load(path)`` — not with
+:func:`~pvtend.load_composite_state`, which serves the older
+:class:`~pvtend.composites.CompositeState` format.
 
 .. autosummary::
    :toctree: generated/
 
    CompositeConfig
    CompositeResult
+
+.. _composite-builder:
 
 .. currentmodule:: pvtend.composite_builder
 
