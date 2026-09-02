@@ -44,7 +44,7 @@ PIPELINE="$ENV_RUN pvtend-pipeline"
 mkdir -p "$LOG_DIR" "$BLK_OUT" "$PRP_OUT"
 touch "$STATE"
 
-log()  { echo "[$(date '+%F %T')] $*" | tee -a "$LOG_DIR/supervisor.log"; }
+log()  { echo "[$(date '+%F %T')] $*" | tee -a "$LOG_DIR/supervisor.log" >&2; }
 done_p() { grep -qx "$1" "$STATE"; }
 mark()   { echo "$1" >> "$STATE"; }
 
@@ -99,7 +99,7 @@ run_block() {
     kill "$sampler" 2>/dev/null
     n_after=$(find "$out/$stage/dh=+0" -name 'track_*.npz' 2>/dev/null | wc -l)
     made=$((n_after - n_before))
-    rate=$(awk -v m="$made" -v s="$elapsed" 'BEGIN{printf "%.2f", s>0 ? m*60/s : 0}')
+    rate=$(awk -v m="$made" -v s="$elapsed" 'BEGIN{printf "%.2f", (s > 0 ? m * 60 / s : 0)}')
     log "$tag: rc=$rc, $made NPZ in $((elapsed / 60)) min = $rate events/min ($workers workers)"
     echo "$rate" > "$LOG_DIR/rate_$tag"
     (( rc == 0 )) && mark "$tag"
@@ -125,7 +125,7 @@ choose_workers() {
         run_block "ramp_${workers}" blocking peak "$slice" "$BLK_OUT" "$workers"
         local rate per
         rate=$(cat "$LOG_DIR/rate_ramp_${workers}" 2>/dev/null || echo 0)
-        per=$(awk -v r="$rate" -v w="$workers" 'BEGIN{printf "%.4f", w>0 ? r/w : 0}')
+        per=$(awk -v r="$rate" -v w="$workers" 'BEGIN{printf "%.4f", (w > 0 ? r / w : 0)}')
         log "ramp: $workers workers -> $rate events/min ($per per worker)"
         # Stop where the total throughput no longer rises by a tenth: past that
         # the extra processes are contending for cache, not doing work.
