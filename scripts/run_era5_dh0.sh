@@ -33,7 +33,8 @@ TMP="${TMP:-/net/flood/data2/users/x_yan/tmp}"
 LOG_DIR="${LOG_DIR:-$TMP/pvtend_era5_dh0}"
 STATE="${STATE:-$LOG_DIR/state}"
 RAMP="${RAMP:-48 96 144 192}"
-RAMP_SIZES="${RAMP_SIZES:-120 240 360 540}"   # events per rung, in catalogue order
+RAMP_SIZES="${RAMP_SIZES:-360 720 1080 1620}"  # catalogue ROWS per rung; a third of them
+                                              # are the stage being computed
 WORKERS="${WORKERS:-}"                        # set to skip the ramp
 PIECES="${PIECES:-scale}"
 
