@@ -25,11 +25,11 @@ from .krylov import SolveReport, solve
 from .levels import LevelSet
 from .operator import FrozenState, PiecewiseOperator
 from .passab import DiagnosedState
-from .passc import BalancedInversion
+from .passc import BalancedInversion, rebuild_boundary_levels
 from .precond import SeparablePreconditioner
 from .qmin import FloorReport, floor_pv
 from .sphere import SphereOps
-from .vertical import VerticalOperator
+from .vertical import VerticalOperator, streamfunction_ghost
 
 
 @dataclass
@@ -161,14 +161,33 @@ def invert_pieces(
     phi_pert = phi_bal - mean.phi_spec
 
     # One frozen operator for every piece: the mean plus half the perturbation,
-    # which makes the linearisation exact and the pieces additive.
+    # which makes the linearisation exact and the pieces additive.  Its two
+    # boundary levels are set to the ghost values the operator assumes for the
+    # midpoint temperature: the balanced state carries those already, the
+    # observed mean carries the data's own 1000 and 100 hPa fields, and a
+    # reference mixing the two conventions makes the stability and cross-term
+    # coefficients at the first and last interior levels the tangent of neither.
+    psi_ref = mean.psi_spec + 0.5 * psi_pert
+    phi_ref = mean.phi_spec + 0.5 * phi_pert
+    psi_ref, phi_ref = rebuild_boundary_levels(
+        ops,
+        levels,
+        psi_ref.copy(),
+        phi_ref.copy(),
+        mean.theta_bot + 0.5 * theta_bot_anom,
+        mean.theta_top + 0.5 * theta_top_anom,
+        balancer.frozen_f(),
+    )
+    # The pieces take the limiter the total inversion converged with, so their
+    # operator is the tangent of the same regularised system at its midpoint.
     frozen = FrozenState(
         ops,
         levels,
-        mean.psi_spec + 0.5 * psi_pert,
-        mean.phi_spec + 0.5 * phi_pert,
+        psi_ref,
+        phi_ref,
         clamps=cfg.clamps,
         mirror=cfg.mirror,
+        deformation_limit=newton.deformation_limit,
     )
     op = PiecewiseOperator(frozen)
     pre = SeparablePreconditioner(op)
@@ -204,19 +223,24 @@ def invert_pieces(
         rhs = op.rhs(source, theta_b, theta_t)
         vec, report = solve(op.matvec, rhs, preconditioner=pre.apply, cfg=cfg.krylov)
         phi_int, psi_int = op.unpack_state(vec)
+        tb = theta_b if theta_b is not None else zeros_grid
+        tt = theta_t if theta_t is not None else zeros_grid
+        # The streamfunction's boundary levels take the thermal-wind ghost, the
+        # temperature over f with its area mean removed -- the same relation the
+        # operator's cross terms and the balanced total state use.  Handing it
+        # the geopotential's ghost instead adds a few hundred m^2 s^-2 to a
+        # field of order 1e7 m^2 s^-1: no error is raised, and the delivered
+        # 1000 and 100 hPa winds of every piece are then those of the level
+        # next to them.
         out[name] = Piece(
             name=name,
             levels=list(level_list),
             psi_spec=vert.extend(
                 psi_int,
-                ops.analyze(theta_b if theta_b is not None else zeros_grid),
-                ops.analyze(theta_t if theta_t is not None else zeros_grid),
+                ops.analyze(streamfunction_ghost(tb, frozen.f_grid, weights)),
+                ops.analyze(streamfunction_ghost(tt, frozen.f_grid, weights)),
             ),
-            phi_spec=vert.extend(
-                phi_int,
-                ops.analyze(theta_b if theta_b is not None else zeros_grid),
-                ops.analyze(theta_t if theta_t is not None else zeros_grid),
-            ),
+            phi_spec=vert.extend(phi_int, ops.analyze(tb), ops.analyze(tt)),
             report=report,
         )
 
@@ -240,7 +264,20 @@ def invert_pieces(
                 newton.increments[-1] / 9.81 if newton.increments else float("nan")
             ),
             "newton_residuals": list(newton.residuals),
+            # Whether every inner linear solve met its tolerance.  When it did
+            # not, the Newton steps were taken in approximate directions, and a
+            # stalled outer iteration is a statement about the preconditioner
+            # rather than about the nonlinearity.
+            "inner_solves_converged": bool(all(newton.linear_converged)),
+            "inner_solves_unconverged": int(
+                sum(1 for c in newton.linear_converged if not c)
+            ),
             "newton_increments": list(newton.increments),
+            "newton_final_norms": dict(newton.final_norms),
+            "newton_deformation_fraction": list(newton.deformation_fraction),
+            "newton_limiter_refreshes": int(newton.limiter_refreshes),
+            "newton_final_nonelliptic_fraction": list(newton.final_nonelliptic_fraction),
+            "piece_deformation_fraction": [float(v) for v in frozen.deform_fraction],
             "linear_iterations": {n: p.report.iterations for n, p in out.items()},
         },
     )

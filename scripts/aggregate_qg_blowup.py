@@ -77,6 +77,13 @@ _DIV_FIELDS = {
 #: solves reach 8 000–24 000 m/s.
 _PPVI_BLOWUP_MS = 300.0
 _PPVI_PARTS = ("surface", "lower", "upper_p", "upper_e", "wall")
+#: Pieces a store may lack without being incomplete: the ``wall`` piece exists
+#: only for the windowed engine, since only a bounded domain has a wall; the
+#: spherical engine (the default since v2.22) writes no such key.
+_PPVI_OPTIONAL_PARTS = ("wall",)
+_OPTIONAL_KEYS = {
+    f"max_abs_{c}_rot_anom_ppvi_{p}" for c in ("u", "v") for p in _PPVI_OPTIONAL_PARTS
+}
 _PPVI_FIELDS = {
     **{f"max_abs_{c}_rot_anom_ppvi_{p}": _PPVI_BLOWUP_MS
        for c in ("u", "v") for p in _PPVI_PARTS},
@@ -140,7 +147,8 @@ def _read_one(fp: Path, stage: str, npz_dir: Path,
                     rec[key] = float(np.nanmax(np.abs(z[_CUBE_FALLBACK[key]])))
                 else:
                     rec[key] = np.nan
-                    missing += 1
+                    if key not in _OPTIONAL_KEYS:
+                        missing += 1
             rec["n_missing_keys"] = missing
             return rec
     except (OSError, EOFError, ValueError, zipfile.BadZipFile) as e:

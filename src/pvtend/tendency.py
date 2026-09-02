@@ -182,12 +182,29 @@ class TendencyConfig:
     #: LENS2 member number; required when ``source == "cesm"``, since the
     #: member selects the file and cannot be inferred from the event row.
     member: int | None = None
-    #: PPVI decomposition. ``"per_level"`` gives one single-level piece per Wu
-    #: level (``u/v_rot_anom_ppvi_{L}_3d``); ``"scale"`` gives the four
-    #: surface / lower / upper_p / upper_e pieces, with the upper level split
-    #: into a planetary (zonal k≤4, confined to the tracked object) and an eddy
-    #: part. Both are kept: existing analyses read the per-level keys.
-    ppvi_pieces: str = "per_level"
+    #: PPVI engine. ``"spherical"`` (default) inverts on the closed sphere with
+    #: the vendored spectral solver (``ppvi/spherical``): no lateral wall, no
+    #: ``ibc``, ordinary points at the pole, float64. ``"windowed"`` is the
+    #: Wu/Davis Fortran relaxation on the fixed 10.5-85.5 N band with an
+    #: event-centred longitude window, which carries a ``wall`` piece.
+    ppvi_engine: str = "spherical"
+    #: PPVI decomposition. ``"scale"`` (default) gives the four surface /
+    #: lower / upper_p / upper_e pieces, with the upper levels split into a
+    #: planetary (zonal k≤4, confined to the tracked object) and an eddy
+    #: part; ``"per_level"`` gives one single-level piece per Wu level
+    #: (``u/v_rot_anom_ppvi_{L}_3d``). Both are kept: they write different
+    #: keys and must not be mixed in one output directory.
+    ppvi_pieces: str = "scale"
+    #: Gaussian solver grid and truncation of the spherical engine. The grid
+    #: is not the data grid: it excludes the poles and is chosen for the
+    #: truncation, which defaults to the largest the grid carries without
+    #: aliasing the quadratic terms (two thirds of the latitudes).
+    ppvi_solver_nlat: int = 128
+    ppvi_solver_nlon: int = 256
+    ppvi_lmax: int | None = None
+    #: Cap on the Newton iteration of the spherical engine's total inversion.
+    #: Real events converge in four to ten steps; the cap is a guard.
+    ppvi_newton_max_steps: int = 60
     #: Nested lateral boundary conditions for the scale-piece PPVI. When on,
     #: the same pieces are first solved on a zonally wider window (same fixed
     #: latitude band; ``inv_lon_half + ppvi_nested_lon_margin`` per side,
@@ -1643,6 +1660,9 @@ class TendencyComputer:
         self.cfg = config
         self._clim: xr.Dataset | None = None
         self._grid: _GridInfo | None = None
+        # The spherical PPVI engine, built on the first event of a worker and
+        # reused: its spectral tables are the fixed cost per grid.
+        self._sph_engine = None
 
     def _get_clim(self, chunks=None) -> xr.Dataset:
         # ``chunks`` is honoured only on the first (cache-filling) call. PPVI
@@ -2299,13 +2319,24 @@ class TendencyComputer:
              dlat, dlon, nx, ny], dtype=np.float32)
         wu_wavg_idx = [self._WU_PLEVS.index(l) for l in self.cfg.wavg_levels
                        if l in self._WU_PLEVS]
-        return dict(
+        geom = dict(
             plev=_plev_name(ds), lat_all=lat_all, lon_all=lon_all,
             nlon=len(lon_all), band_idx=band_idx, band_lats=band_lats,
             ny=ny, inv_lon_pad=inv_lon_pad, nx=nx, zhdr=zhdr,
             lat_s_act=lat_s_act, lat_n_act=lat_n_act,
             dlat=dlat, dlon=dlon, wu_wavg_idx=wu_wavg_idx,
         )
+        # The spherical engine is handed the whole hemisphere, in its own row
+        # and column order; the band above stays because the archive-PV
+        # planetary/eddy split is defined on it for both engines.
+        if self.cfg.ppvi_engine == "spherical":
+            from .ppvi import spherical_engine as sph
+            geom["sph_axes"] = sph.hemisphere_axes(lat_all, lon_all)
+        elif self.cfg.ppvi_engine != "windowed":
+            raise ValueError(
+                f"ppvi_engine must be 'spherical' or 'windowed', got "
+                f"{self.cfg.ppvi_engine!r}")
+        return geom
 
     def _scale_split_sources(self, ds, clim_ds, cplev, ts, geom, store,
                              lon_idx_inv):
@@ -2472,10 +2503,24 @@ class TendencyComputer:
         """Compute the PPVI rotational-wind / PV-anomaly keys for one ``dh``.
 
         ``store`` must already provide the base-patch metadata
-        (``center_lon``, ``lat_vec``, ``levels``) and the observed
-        rotational-wind anomalies (``u_rot_anom_3d``, ``v_rot_anom_3d``).
-        Returns a dict of new keys (no file IO).
+        (``center_lat``, ``center_lon``, ``lat_vec``, ``levels``) and the
+        observed rotational-wind anomalies (``u_rot_anom_3d``,
+        ``v_rot_anom_3d``). Returns a dict of new keys (no file IO).
+
+        Dispatches on ``cfg.ppvi_engine``: the spherical engine is
+        :meth:`_ppvi_compute_keys_spherical`; what follows is the windowed
+        Wu/Davis chain.
         """
+        if self.cfg.ppvi_engine == "spherical":
+            if self.cfg.ppvi_nested:
+                raise ValueError("ppvi_nested applies to the windowed engine "
+                                 "only: the sphere has no lateral boundary")
+            return self._ppvi_compute_keys_spherical(
+                store, ts, ds, clim_ds, cplev, geom)
+        if self.cfg.ppvi_engine != "windowed":
+            raise ValueError(
+                f"ppvi_engine must be 'spherical' or 'windowed', got "
+                f"{self.cfg.ppvi_engine!r}")
         from .ppvi import PIECES, invert_piecewise, psi_to_winds
         from .ppvi import scale_split
 
@@ -2787,6 +2832,226 @@ class TendencyComputer:
         new["pv_anom_wu"] = _wavg(pv_anom_wu_c)
         return new
 
+    def _spherical_engine(self, axes):
+        """The spherical engine for this archive grid, built once per worker."""
+        from .ppvi import spherical_engine as sph
+
+        if self._sph_engine is None or not self._sph_engine.fits(axes):
+            self._sph_engine = sph.SphericalEngine(
+                axes,
+                sph.SphericalConfig(
+                    solver_nlat=int(self.cfg.ppvi_solver_nlat),
+                    solver_nlon=int(self.cfg.ppvi_solver_nlon),
+                    lmax=self.cfg.ppvi_lmax,
+                    pieces=self.cfg.ppvi_pieces,
+                    newton_max_steps=int(self.cfg.ppvi_newton_max_steps),
+                ),
+            )
+        return self._sph_engine
+
+    def _ppvi_compute_keys_spherical(
+        self, store: dict, ts: pd.Timestamp, ds: xr.Dataset,
+        clim_ds: xr.Dataset, cplev: str, geom: dict,
+    ) -> dict:
+        """The PPVI keys from the global spherical engine, for one ``dh``.
+
+        The same keys as the windowed engine, minus the ``wall`` piece a closed
+        domain does not have, plus the engine's own observed rotational anomaly
+        (``u/v_rot_anom_sph(_3d)``: the wind of the event-minus-climatology
+        streamfunction on the sphere, what the pieces close against exactly)
+        and the ``ppvi_*`` convergence scalars. The residual keeps this
+        record's convention -- the stored observed rotational-wind anomaly
+        minus the sum of the pieces -- so ``residual = (obs - sph) +
+        (sph - sum)``: the difference between the two Helmholtz conventions
+        plus the unbalanced part of the anomaly.
+
+        The whole hemisphere is read for the event and the climatology, in
+        the engine's row and column order; the pieces come back on the
+        archive's own grid and are cropped onto the patch by the patch's row
+        latitudes and its column indices, so they sit on exactly the grid the
+        rest of the record uses. Rows the patch has past the pole are NaN,
+        and so is a pole row itself, where the eastward and northward
+        components are undefined.
+        """
+        from .ppvi import spherical_engine as sph
+
+        WU_PLEVS = self._WU_PLEVS
+        plev = geom["plev"]
+        lon_all = geom["lon_all"]
+        nlon = geom["nlon"]
+        wu_wavg_idx = geom["wu_wavg_idx"]
+        axes = geom["sph_axes"]
+        engine = self._spherical_engine(axes)
+
+        center_lat = float(store["center_lat"])
+        center_lon = float(store["center_lon"])
+        lat_vec = np.asarray(store["lat_vec"], dtype=float)
+        npz_levels = list(np.asarray(store["levels"]).tolist())
+        obs_u = np.asarray(store["u_rot_anom_3d"], dtype=float)
+        obs_v = np.asarray(store["v_rot_anom_3d"], dtype=float)
+        n_npz_lev, yp, xp = obs_u.shape
+
+        # Both datasets are indexed positionally by the same rows and columns,
+        # so their grids have to be element-identical.
+        for _ax in ("latitude", "longitude"):
+            if not np.array_equal(ds[_ax].values, clim_ds[_ax].values):
+                raise ValueError(
+                    f"climatology {_ax} grid differs from the state's; the PPVI "
+                    f"cubes are indexed positionally and would be misaligned "
+                    f"(state n={ds.sizes[_ax]}, clim n={clim_ds.sizes[_ax]})")
+        mo, dy, hr = int(ts.month), int(ts.day), int(ts.hour)
+
+        def _ev(var):
+            cube = (ds[var].sel(valid_time=ts)
+                    .sel({plev: WU_PLEVS})
+                    .isel(latitude=axes.nh_rows)
+                    .values.astype(np.float64))
+            return sph.to_engine_order(cube, axes)
+
+        def _mn(var):
+            if "slot" in clim_ds.dims:
+                base = clim_ds[var].isel(slot=noleap_slot_scalar(ts))
+            else:
+                base = clim_ds[var].sel(month=mo, day=dy, hour=hr)
+            cube = (base.sel({cplev: WU_PLEVS})
+                    .isel(latitude=axes.nh_rows)
+                    .values.astype(np.float64))
+            return sph.to_engine_order(cube, axes)
+
+        z_e, t_e, u_e, v_e = _ev("z"), _ev("t"), _ev("u"), _ev("v")
+        z_m, t_m, u_m, v_m = _mn("z"), _mn("t"), _mn("u"), _mn("v")
+        _zd = z_divisor(self.cfg)
+        H_e, H_m = z_e / _zd, z_m / _zd
+
+        hi = engine.invert((H_m, t_m, u_m, v_m), (H_e, t_e, u_e, v_e),
+                           (center_lat, center_lon))
+        pieces = hi.piece_names()
+
+        # ── Crop hemisphere (nlat_nh, nlon) → event patch (yp, xp) ──
+        # Rows by latitude value, columns by the same circular index walk the
+        # base patch was cut with, mapped into the engine's column order.
+        row_for = sph.patch_row_index(lat_vec, axes.lat_nh, axes.dlat)
+        if not (row_for >= 0).any():
+            raise RuntimeError(
+                "PPVI crop matched no hemisphere rows: patch lat "
+                f"{np.nanmin(lat_vec):.2f}..{np.nanmax(lat_vec):.2f} vs "
+                f"{axes.lat_nh.min():.2f}..{axes.lat_nh.max():.2f} "
+                f"(dlat={axes.dlat:.4f}). Every cropped field would be NaN.")
+        ilon_c = _circ_nearest_lon(lon_all, center_lon)
+        lon_idx_patch = _wrapped_lon_index(
+            ilon_c, LON_PAD=(xp - 1) // 2, nlon=nlon)
+        cols = axes.col_of[lon_idx_patch]
+        wu_pos = [npz_levels.index(p) for p in WU_PLEVS]
+
+        def _crop_global(field):
+            return sph.crop_to_patch(hi.northern(field), row_for, cols)
+
+        def _crop_nh(field):
+            return sph.crop_to_patch(field, row_for, cols)
+
+        def _pad_levels(cube9):
+            """(NL, yp, xp) Wu levels → (n_npz_lev, yp, xp), NaN elsewhere."""
+            out = np.full((n_npz_lev, yp, xp), np.nan, dtype=float)
+            out[wu_pos] = cube9
+            return out
+
+        piece_u_c = {n: _crop_global(hi.piece_u[n]) for n in pieces}
+        piece_v_c = {n: _crop_global(hi.piece_v[n]) for n in pieces}
+        sph_u_c = _crop_global(hi.u_obs)
+        sph_v_c = _crop_global(hi.v_obs)
+        pv_anom_c = _crop_global(hi.pv_anom)
+
+        # Residual vs the record's observed anomaly rotational wind.
+        sum_u = sum(piece_u_c[n] for n in pieces)
+        sum_v = sum(piece_v_c[n] for n in pieces)
+        resid_u = obs_u[wu_pos] - sum_u
+        resid_v = obs_v[wu_pos] - sum_v
+
+        # ── Weighted vertical average → 2-D (over wavg_levels) ──
+        # Divided by the weight of the levels that are valid at each point,
+        # never by the full weight: a gap filled with zero and divided by
+        # everything pulls the answer towards zero while keeping it finite.
+        z_patch = _crop_nh(H_e)            # geopotential height [m]
+        wt = np.exp(-z_patch[wu_wavg_idx] / H_SCALE)
+
+        def _wavg(cube9):
+            vals = cube9[wu_wavg_idx]
+            valid = np.isfinite(vals) & np.isfinite(wt)
+            w = np.where(valid, wt, 0.0)
+            num = np.sum(np.where(valid, vals, 0.0) * w, axis=0)
+            den = np.sum(w, axis=0)
+            out = np.full(num.shape, np.nan)
+            good = den > 0
+            out[good] = num[good] / den[good]
+            return out
+
+        def _absmax(a):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                return np.float32(np.nanmax(np.abs(a)))
+
+        # ── Assemble new keys ──
+        # Scale pieces keep their names; per-level pieces are named by their
+        # pressure ("250"), which is already the hPa label the keys use.
+        new: dict[str, np.ndarray] = {}
+        for n in pieces:
+            new[f"u_rot_anom_ppvi_{n}_3d"] = _pad_levels(piece_u_c[n])
+            new[f"v_rot_anom_ppvi_{n}_3d"] = _pad_levels(piece_v_c[n])
+            new[f"u_rot_anom_ppvi_{n}"] = _wavg(piece_u_c[n])
+            new[f"v_rot_anom_ppvi_{n}"] = _wavg(piece_v_c[n])
+            new[f"max_abs_u_rot_anom_ppvi_{n}"] = _absmax(piece_u_c[n])
+            new[f"max_abs_v_rot_anom_ppvi_{n}"] = _absmax(piece_v_c[n])
+        new["u_rot_anom_residual_ppvi_3d"] = _pad_levels(resid_u)
+        new["v_rot_anom_residual_ppvi_3d"] = _pad_levels(resid_v)
+        new["u_rot_anom_residual_ppvi"] = _wavg(resid_u)
+        new["v_rot_anom_residual_ppvi"] = _wavg(resid_v)
+        new["max_abs_u_rot_anom_residual_ppvi"] = _absmax(resid_u)
+        new["max_abs_v_rot_anom_residual_ppvi"] = _absmax(resid_v)
+        new["u_rot_anom_sph_3d"] = _pad_levels(sph_u_c)
+        new["v_rot_anom_sph_3d"] = _pad_levels(sph_v_c)
+        new["u_rot_anom_sph"] = _wavg(sph_u_c)
+        new["v_rot_anom_sph"] = _wavg(sph_v_c)
+        new["pv_anom_wu_3d"] = _pad_levels(pv_anom_c)
+        new["pv_anom_wu"] = _wavg(pv_anom_c)
+
+        # ── Convergence record, per file ──
+        # A Newton iteration that hit its cap, or an inner solve that did not
+        # meet its tolerance, leaves a complete-looking file; these scalars
+        # let the aggregator tell such a file from a converged one without
+        # reading a cube.
+        meta = hi.meta
+        new["ppvi_engine"] = np.str_("spherical")
+        new["ppvi_pieces"] = np.str_(self.cfg.ppvi_pieces)
+        new["ppvi_newton_steps"] = np.int32(meta["newton_steps"])
+        new["ppvi_newton_converged"] = np.bool_(meta["newton_converged"])
+        new["ppvi_all_pieces_converged"] = np.bool_(meta["all_pieces_converged"])
+        new["ppvi_inner_solves_unconverged"] = np.int32(
+            meta["inner_solves_unconverged"])
+        new["ppvi_newton_limiter_refreshes"] = np.int32(
+            meta["newton_limiter_refreshes"])
+        new["ppvi_solver_lmax"] = np.int32(meta["lmax"])
+        new["ppvi_pv_floor_fraction_event"] = np.float32(
+            meta["pv_floor_fraction_event"])
+        new["ppvi_clamp_worst_fraction"] = np.float32(meta["clamp_worst_fraction"])
+        for k, v in meta.items():
+            if k.startswith("newton_final_") and np.isscalar(v):
+                new[f"ppvi_{k}"] = np.float32(v)
+        if hi.split is not None:
+            new["ppvi_split_q_min"] = np.float32(hi.split["q_min"])
+            new["ppvi_split_thresh"] = np.float32(hi.split["contour"])
+            new["ppvi_split_mask_frac"] = np.float32(hi.split["object_fraction"])
+            new["ppvi_split_top_frac"] = np.float32(hi.split["top_fraction"])
+
+        # ── archive-PV planetary/eddy split, persisted (scale mode only) ──
+        # Engine-independent: the same near-centre split of the archived PV
+        # anomaly on the Wu band, seeded on the archive anomaly itself.
+        if (self.cfg.ppvi_pieces == "scale" and "pv_anom_3d" in store
+                and "pv" in ds and "pv" in clim_ds):
+            arch = self._archive_split_band(
+                ds, clim_ds, cplev, ts, geom, center_lat, center_lon)
+            new.update(self._arch_keys_from_split(arch, store, geom))
+        return new
+
     def _arch_keys_from_split(self, arch, store: dict, geom: dict) -> dict:
         """Patch-cropped archive-split keys from a band-global split result.
 
@@ -2871,7 +3136,10 @@ class TendencyComputer:
         from .ppvi import scale_split
 
         if self.cfg.ppvi_pieces == "scale":
-            names: list = list(scale_split.PIECES_SCALE) + ["wall"]
+            names: list = list(scale_split.PIECES_SCALE)
+            # Only a bounded domain has a wall; the sphere has no piece for it.
+            if self.cfg.ppvi_engine == "windowed":
+                names.append("wall")
         else:
             names = [self._WU_PLEVS[int(n) - 1] for n in PIECES]
         return [f"u_rot_anom_ppvi_{n}_3d" for n in names]
@@ -2886,15 +3154,16 @@ class TendencyComputer:
         *,
         inv_lon_half: float = 90.0,
     ) -> int:
-        """Append Wu piecewise PV-inversion rotational winds to NPZ files.
+        """Append piecewise PV-inversion rotational winds to NPZ files.
 
         For each ``dh`` in :attr:`cfg.rel_hours` this reads the **existing**
-        NPZ (produced by :meth:`process_event`), runs the Wu piecewise PV
-        inversion on a **fixed** Northern-Hemisphere latitude band
-        (85.5°N → 10.5°N, ``NY=51``) and an event-centred longitude window
-        of half-width ``inv_lon_half`` (default ±90° → ``NX=121``), then
-        crops the resulting balanced rotational winds back to the event
-        patch and **appends** the new fields in-place.
+        NPZ (produced by :meth:`process_event`), runs the piecewise PV
+        inversion -- on the closed sphere from the whole hemisphere with the
+        spherical engine (default), or with the windowed Wu chain on the
+        fixed 85.5°N → 10.5°N band and an event-centred longitude window of
+        half-width ``inv_lon_half`` -- then crops the resulting balanced
+        rotational winds back to the event patch and **appends** the new
+        fields in-place.
 
         Only NPZs that already exist on disk are touched here; missing NPZs
         should be produced by :meth:`process_event` with ``also_ppvi=True``

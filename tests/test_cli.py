@@ -163,9 +163,25 @@ class TestPPVIPiecesFlag:
             "--out-dir", "/d/out"]
 
     @pytest.mark.parametrize("cmd", ["compute", "ppvi"])
-    def test_defaults_to_per_level(self, cmd):
+    def test_defaults_to_scale_on_the_sphere(self, cmd):
         args = _build_parser().parse_args([cmd, *self.BASE])
+        assert args.ppvi_pieces == "scale"
+        assert args.ppvi_engine == "spherical"
+        assert args.ppvi_solver_grid == [128, 256]
+
+    @pytest.mark.parametrize("cmd", ["compute", "ppvi"])
+    def test_windowed_engine_is_selectable(self, cmd):
+        args = _build_parser().parse_args(
+            [cmd, *self.BASE, "--ppvi-engine", "windowed",
+             "--ppvi-pieces", "per_level"])
+        assert args.ppvi_engine == "windowed"
         assert args.ppvi_pieces == "per_level"
+
+    @pytest.mark.parametrize("cmd", ["compute", "ppvi"])
+    def test_unknown_engine_rejected(self, cmd):
+        with pytest.raises(SystemExit):
+            _build_parser().parse_args(
+                [cmd, *self.BASE, "--ppvi-engine", "cartesian"])
 
     @pytest.mark.parametrize("cmd", ["compute", "ppvi"])
     def test_scale_is_selectable(self, cmd):

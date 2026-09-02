@@ -89,10 +89,18 @@ def geographic_patch(
 ) -> Patch:
     """Crop an event-centred latitude-longitude box, wrapping in longitude.
 
-    Rows whose latitude would exceed 90 degrees are returned as NaN: they name no
-    location.  Marking them missing rather than dropping them is the contract
-    downstream consumers expect, and it is what lets every event's patch keep the
-    same declared shape however far north the centre sits.
+    Rows whose latitude would exceed 90 degrees are returned as NaN.  Not because
+    they name nothing -- 90 + d degrees north is 90 - d on the opposite meridian,
+    a real place with a real wind, and :func:`_pad_sphere` below depends on
+    exactly that -- but because this container cannot label them.  Every column
+    of the box carries one longitude, and continuing past the pole turns the
+    longitude by half a circle, so those rows belong to a different longitude
+    axis than the rest of the patch.  The rotated crop has no such trouble and
+    keeps them.
+
+    Marking them missing rather than dropping them is the contract downstream
+    consumers expect, and it is what lets every event's patch keep the same
+    declared shape however far north the centre sits.
 
     Args:
         field: ``(..., nlat, nlon)`` on a regular grid, latitude ascending.

@@ -45,20 +45,40 @@ from pvtend._version import __version__
 # =====================================================================
 
 def _add_ppvi_pieces_arg(p: argparse.ArgumentParser) -> None:
-    """``--ppvi-pieces``, shared by ``compute`` and ``ppvi``.
+    """The PPVI flags shared by ``compute`` and ``ppvi``.
 
-    The two subcommands must offer the same choice or a catalogue could be
-    started in one decomposition and appended to in the other.
+    The two subcommands must offer the same choices or a catalogue could be
+    started with one engine or decomposition and appended to in another.
     """
     p.add_argument(
-        "--ppvi-pieces", choices=("per_level", "scale"), default="per_level",
+        "--ppvi-engine", choices=("spherical", "windowed"), default="spherical",
+        help="Which inversion solves the pieces.  'spherical' (default) "
+             "inverts on the closed sphere with the spectral Newton-Krylov "
+             "solver: no lateral wall and no 'wall' piece, ordinary points at "
+             "the pole, float64.  'windowed' is the Wu/Davis Fortran "
+             "relaxation on the fixed 10.5-85.5N band with an event-centred "
+             "longitude window, which stores a 'wall' piece.",
+    )
+    p.add_argument(
+        "--ppvi-pieces", choices=("per_level", "scale"), default="scale",
         help="How to split the PV/theta anomaly before inverting.  "
-             "'per_level' (default) gives one piece per Wu level, keys "
-             "u/v_rot_anom_ppvi_{1000..100}.  'scale' gives four pieces "
-             "surface / lower / upper_p / upper_e, splitting the upper level "
-             "into a planetary (zonal k<=4, inside the tracked object) and an "
-             "eddy part.  The two write different keys — do not mix them "
-             "within one output directory.",
+             "'scale' (default) gives four pieces surface / lower / upper_p / "
+             "upper_e, splitting the upper levels into a planetary (zonal "
+             "k<=4, inside the tracked object) and an eddy part.  'per_level' "
+             "gives one piece per Wu level, keys u/v_rot_anom_ppvi_{1000..100}. "
+             "The two write different keys — do not mix them within one "
+             "output directory.",
+    )
+    p.add_argument(
+        "--ppvi-solver-grid", type=int, nargs=2, default=[128, 256],
+        metavar=("NLAT", "NLON"),
+        help="Gaussian solver grid of the spherical engine (default 128 256, "
+             "truncation T84 after the dealiasing rule).  Not the data grid.",
+    )
+    p.add_argument(
+        "--ppvi-newton-max-steps", type=int, default=60,
+        help="Cap on the spherical engine's Newton iteration (default 60; "
+             "real events take 4-10).",
     )
     p.add_argument(
         "--ppvi-nested", action=argparse.BooleanOptionalAction, default=False,
@@ -860,7 +880,11 @@ def _cmd_compute(args: argparse.Namespace) -> None:
         center_mode=args.center_mode,
         skip_existing=args.skip_existing,
         n_workers=args.n_workers,
+        ppvi_engine=args.ppvi_engine,
         ppvi_pieces=args.ppvi_pieces,
+        ppvi_solver_nlat=int(args.ppvi_solver_grid[0]),
+        ppvi_solver_nlon=int(args.ppvi_solver_grid[1]),
+        ppvi_newton_max_steps=int(args.ppvi_newton_max_steps),
         ppvi_nested=args.ppvi_nested,
         ppvi_nested_lon_margin=args.ppvi_nested_lon_margin,
         clim_helmholtz_dir=(
@@ -879,14 +903,16 @@ def _cmd_compute(args: argparse.Namespace) -> None:
 
     print(f"[pvtend] Processing {len(event_args)} events, "
           f"dh={dh_values[0]}..{dh_values[-1]}, qg_method={qg}, "
-          f"ppvi={'on' if args.with_ppvi else 'off'}")
+          f"ppvi={'on' if args.with_ppvi else 'off'} "
+          f"({args.ppvi_engine}, {args.ppvi_pieces})")
 
     if config.n_workers > 1:
         _pin_threads_for_pool()
-        if args.with_ppvi:
+        if args.with_ppvi and args.ppvi_engine == "windowed":
             # Build the f2py extension once in the parent; otherwise every
             # spawned worker races to build into the same directory on the
-            # first run after a wuppvi.f change.
+            # first run after a wuppvi.f change.  The spherical engine is
+            # pure Python and needs no build.
             from pvtend.ppvi._ext import load_ext
             load_ext()
         print(f"[pvtend] Using {config.n_workers} parallel workers "
@@ -944,7 +970,11 @@ def _cmd_ppvi(args: argparse.Namespace) -> None:
         center_mode=args.center_mode,
         skip_existing=args.skip_existing,
         n_workers=args.n_workers,
+        ppvi_engine=args.ppvi_engine,
         ppvi_pieces=args.ppvi_pieces,
+        ppvi_solver_nlat=int(args.ppvi_solver_grid[0]),
+        ppvi_solver_nlon=int(args.ppvi_solver_grid[1]),
+        ppvi_newton_max_steps=int(args.ppvi_newton_max_steps),
         ppvi_nested=args.ppvi_nested,
         ppvi_nested_lon_margin=args.ppvi_nested_lon_margin,
         clim_helmholtz_dir=(
@@ -963,6 +993,7 @@ def _cmd_ppvi(args: argparse.Namespace) -> None:
 
     print(f"[pvtend] PPVI for {len(event_args)} events, "
           f"dh={dh_values[0]}..{dh_values[-1]}, "
+          f"engine={args.ppvi_engine}, pieces={args.ppvi_pieces}, "
           f"inv_lon_half={args.inv_lon_half}")
 
     if config.n_workers > 1:

@@ -88,7 +88,7 @@ def run_one(spec: EventSpec, options: dict) -> dict:
 
 
 def _run_one_inner(spec: EventSpec, options: dict) -> dict:
-    from .config import InversionConfig, MirrorConfig, NewtonConfig
+    from .config import InversionConfig, KrylovConfig, MirrorConfig, NewtonConfig
     from .io import load_cesm_state, save_npz
     from .pipeline import invert_event
 
@@ -108,13 +108,19 @@ def _run_one_inner(spec: EventSpec, options: dict) -> dict:
                 "combined by position, so this would silently mix latitudes"
             )
         cfg = InversionConfig(
+            pv_source=options.get("pv_source", "operator"),
+            krylov=KrylovConfig(maxiter=options.get("krylov_maxiter", 800)),
             mirror=MirrorConfig(
                 blend=options["blend"],
                 blend_south=options["blend_south"],
                 blend_north=options["blend_north"],
                 f_floor_deg=options["f_floor_deg"],
             ),
-            newton=NewtonConfig(max_steps=options["newton_max_steps"]),
+            newton=NewtonConfig(
+                max_steps=options["newton_max_steps"],
+                eisenstat_walker=options.get("eisenstat_walker", False),
+                deformation_limiter=options.get("deformation_limiter", "adaptive"),
+            ),
         )
         output = invert_event(
             clim.as_tuple(),
@@ -197,7 +203,7 @@ def main(argv: list[str] | None = None) -> int:
         default=12.0,
         help=(
             "latitude at which the Coriolis floor is set; the ratio to |f| is "
-            "1.53 at 10.5N and 1.16 at 20N for the default, so it too reaches "
+            "1.52 at 10.5N and 1.17 at 20N for the default, so it too reaches "
             "well into the subtropics"
         ),
     )
@@ -218,6 +224,45 @@ def main(argv: list[str] | None = None) -> int:
             "test decays slowly on some events, so a run that hits this cap may "
             "already satisfy the equations -- check meta_newton_final_increment_m "
             "before treating it as a failure"
+        ),
+    )
+    parser.add_argument(
+        "--krylov-maxiter",
+        type=int,
+        default=800,
+        help=(
+            "operator applications one linear solve may spend; the hardest "
+            "systems met so far needed 540 to 600, and a solve that runs out "
+            "is what brings the deformation limiter in"
+        ),
+    )
+    parser.add_argument(
+        "--eisenstat-walker",
+        action="store_true",
+        help=(
+            "relax the inner linear tolerance while the outer residual is "
+            "large; measured worse on this problem and off by default, kept "
+            "so the comparison can be rerun"
+        ),
+    )
+    parser.add_argument(
+        "--pv-source",
+        choices=["operator", "data"],
+        default="operator",
+        help=(
+            "evaluate the potential-vorticity source with the inversion's own "
+            "stencils (operator) or with the limited-area code's centred "
+            "differences of temperature and wind (data)"
+        ),
+    )
+    parser.add_argument(
+        "--deformation-limiter",
+        choices=["adaptive", "observed", "off"],
+        default="adaptive",
+        help=(
+            "when the balance row's deformation limiter is switched on: only "
+            "after an inner solve or a line search fails (adaptive), from the "
+            "observed state before the first step (observed), or never (off)"
         ),
     )
     parser.add_argument("--skip-existing", action="store_true")
@@ -242,6 +287,10 @@ def main(argv: list[str] | None = None) -> int:
         "blend_north": args.blend_north,
         "f_floor_deg": args.f_floor_deg,
         "newton_max_steps": args.newton_max_steps,
+        "eisenstat_walker": args.eisenstat_walker,
+        "krylov_maxiter": args.krylov_maxiter,
+        "pv_source": args.pv_source,
+        "deformation_limiter": args.deformation_limiter,
         "skip_existing": args.skip_existing,
     }
 

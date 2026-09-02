@@ -2,8 +2,8 @@
 
 These modules are a copy, not a fork. They come from
 
-    pv_inversion_spherical, commit 9af88ed
-    2026-09-01
+    pv_inversion_spherical, commit 1a4e194 (v0.2.0)
+    2026-09-02
 
 **Do not edit them here.** A change made in this copy is invisible to the tests and
 the documentation that justify it, and the two copies will disagree without anyone

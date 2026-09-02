@@ -61,7 +61,7 @@ class MirrorConfig:
 
     ``f_floor_deg`` smooths ``|f|`` itself into
     ``2 Omega sqrt(sin^2(lat) + sin^2(phi0))``.  At the default of twelve degrees
-    the ratio to ``|f|`` is 1.53 at 10.5N, 1.16 at 20N and 1.08 at 30N, so the
+    the ratio to ``|f|`` is 1.52 at 10.5N, 1.17 at 20N and 1.08 at 30N, so the
     floor reaches well into the subtropics; together with the taper it makes a
     band around the equator where the operator is not the one being advertised.
     Both are set for the equator, not for the region a mid-latitude event's patch
@@ -125,7 +125,7 @@ class KrylovConfig:
     """
 
     rtol: float = 1.0e-8
-    maxiter: int = 400
+    maxiter: int = 800
     restart: int = 60
     method: Literal["gmres", "bicgstab"] = "gmres"
 
@@ -138,13 +138,31 @@ class NewtonConfig:
     anywhere on the grid by less than a tenth of a metre of equivalent height.
     It is quoted in SI geopotential, ``g * 0.1``, because that is the unit the
     solved field carries.
+
+    ``eisenstat_walker`` relaxes the inner linear tolerance while the outer
+    residual is still large, on the reasoning that an accurate direction is
+    wasted early.  Measured here it is worse and it is off.  On one event it
+    takes the first step after a single Krylov iteration, and the state that
+    step reaches has linear systems six times the iteration budget does not
+    solve; the same event with a fixed tolerance converges in ten steps with
+    no backtracking at all.  It is kept only so that comparison can be rerun.
     """
 
     phi_tol: float = 0.981
     max_steps: int = 20
     armijo: float = 1.0e-4
     max_backtracks: int = 8
-    eisenstat_walker: bool = True
+    eisenstat_walker: bool = False
+    #: When the deformation limiter of the balance row is switched on.
+    #: ``"adaptive"`` starts without it and brings it in, from the current
+    #: iterate, only when an inner solve fails to converge or a line search
+    #: fails -- the signs that the linearised balance row has lost
+    #: ellipticity -- so events that never meet a fold are solved with the
+    #: balance equation as posed.  ``"observed"`` decides it once from the
+    #: observed state before the first step.  ``"off"`` never limits.
+    deformation_limiter: Literal["adaptive", "observed", "off"] = "adaptive"
+    #: How many times the limiter may be refreshed in one solve.
+    max_limiter_refreshes: int = 6
 
 
 @dataclass(frozen=True)
@@ -169,6 +187,11 @@ class InversionConfig:
     levels: str = "NL9"
     lmax: int | None = None
     solver_dealias: bool = True
+    #: How the potential-vorticity source is evaluated from the data:
+    #: ``"operator"`` with the inversion's own stencils, so that the data pair
+    #: satisfies the potential-vorticity row exactly, or ``"data"`` with the
+    #: limited-area code's centred differences of temperature and wind.
+    pv_source: Literal["operator", "data"] = "operator"
     mirror: MirrorConfig = field(default_factory=MirrorConfig)
     clamps: ClampConfig = field(default_factory=ClampConfig)
     krylov: KrylovConfig = field(default_factory=KrylovConfig)

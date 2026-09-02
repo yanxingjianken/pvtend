@@ -123,6 +123,8 @@ def prepare_state(
     levels: LevelSet,
     ops: SphereOps,
     f_floor_deg: float = 12.0,
+    pv_source: str = "operator",
+    data_sht: SHT | None = None,
 ) -> DiagnosedState:
     """Diagnose one northern-hemisphere state on the global solver grid.
 
@@ -136,6 +138,11 @@ def prepare_state(
         ops: Operators on the Gaussian solver grid, which must be symmetric about
             the equator.
         f_floor_deg: Latitude scale of the smoothed Coriolis floor.
+        pv_source: Passed to :func:`pvinv_sph.passab.diagnose`.
+        data_sht: Transform on the mirrored data grid, if the caller already
+            holds one at the solver's truncation and radius; built here
+            otherwise.  A batch over one archive reuses the same tables for
+            every state rather than rebuilding them twice per event.
 
     Returns:
         A :class:`~pvinv_sph.passab.DiagnosedState` whose fields are even about
@@ -157,8 +164,20 @@ def prepare_state(
     # Physical mirror first: the wind is a vector, so the northward component
     # changes sign.  This is only scaffolding for the vorticity.
     lat_global = mirrored_latitudes(lat_nh)
-    data_grid = grid_from_axes(lat_global, lon)
-    data_sht = SHT(data_grid, lmax=ops.sht.lmax, radius=ops.sht.radius)
+    if data_sht is None:
+        data_grid = grid_from_axes(lat_global, lon)
+        data_sht = SHT(data_grid, lmax=ops.sht.lmax, radius=ops.sht.radius)
+    elif (
+        data_sht.lmax != ops.sht.lmax
+        or data_sht.radius != ops.sht.radius
+        or data_sht.grid.lat.shape != lat_global.shape
+        or not np.allclose(data_sht.grid.lat, lat_global)
+        or not np.allclose(data_sht.grid.lon, np.asarray(lon, dtype=float))
+    ):
+        raise ValueError(
+            "data_sht must be on the mirrored data grid at the solver's "
+            "truncation and radius"
+        )
 
     cos_data = np.cos(np.radians(lat_global))[:, None]
     u_global = mirror_even(u, lat_nh)
@@ -204,4 +223,5 @@ def prepare_state(
         u_even,
         v_even,
         f_floor_deg=f_floor_deg,
+        pv_source=pv_source,
     )

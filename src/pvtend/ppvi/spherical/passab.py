@@ -12,8 +12,10 @@ right-hand side of the inversion:
 ``q_hat = (f + zeta) Phi_PiPi - grad(psi_Pi) . grad(Phi_Pi)``
 
 which is the Ertel potential vorticity ``q_SI`` times ``p/(g kappa Pi)``.  It is
-assembled from the observed temperature and wind, never from the balanced fields,
-so the inversion is driven by the data rather than by its own solution.
+assembled from the observed state, never from the balanced fields, so the
+inversion is driven by the data rather than by its own solution; by default with
+the inversion's own stencils (see ``pv_source``), so that the observed state
+satisfies the potential-vorticity row exactly.
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ import numpy as np
 from .levels import CP, KAPPA, LevelSet, P0
 from .mirror import coriolis_star
 from .sphere import SphereOps
+from .vertical import VerticalOperator, streamfunction_ghost
 
 
 @dataclass
@@ -46,6 +49,13 @@ class DiagnosedState:
     theta_top: np.ndarray
     theta: np.ndarray
     zeta: np.ndarray
+    #: Area mean of the boundary temperature the geopotential implies
+    #: hydrostatically, over the one the temperature gives, at the bottom and
+    #: the top.  Near one for data that are hydrostatically consistent; a
+    #: potential temperature passed as temperature, or a height passed as
+    #: geopotential, moves the top value far from it while every other check
+    #: still passes.
+    boundary_theta_ratio: tuple[float, float] = (1.0, 1.0)
 
 
 def potential_temperature(temperature: np.ndarray, p_hpa: np.ndarray) -> np.ndarray:
@@ -63,6 +73,7 @@ def diagnose(
     u: np.ndarray,
     v: np.ndarray,
     f_floor_deg: float = 12.0,
+    pv_source: str = "operator",
 ) -> DiagnosedState:
     """Diagnose streamfunction, boundary temperature and potential vorticity.
 
@@ -75,10 +86,31 @@ def diagnose(
             costs about a factor of three in the potential vorticity.
         u, v: Eastward and northward wind [m s^-1].
         f_floor_deg: Latitude scale of the smoothed Coriolis floor.
+        pv_source: ``"operator"`` evaluates the potential vorticity with the
+            inversion's own discretisation -- the three-point non-uniform
+            second difference of the geopotential for the stratification, the
+            centred first differences with the hydrostatic ghosts for the shear
+            terms, and the boundary temperature as the hydrostatic difference
+            of the geopotential across the half level -- so that the data pair
+            satisfies the potential-vorticity row of the system exactly.
+            ``"data"`` is the limited-area convention: stratification and
+            shear from plain centred differences of the temperature and the
+            wind, and the boundary temperature as the mean of the two levels
+            beside it.  On a stretched Exner grid the two differ by 5 to 30
+            percent level by level (5 to 14 on the ERA5 walkthrough case, up
+            to 29 at 850 hPa on a CESM winter state), and the total inversion has to move the
+            geopotential to absorb the difference: on one winter event the
+            balanced rotational wind missed the observed one at 250 hPa by
+            6.4 m/s rms with the data source and 5.3 with this one.  Note
+            that the shear terms at the first and last interior level then
+            use the thermal-wind ghost in place of the observed 1000 and
+            100 hPa streamfunction, as the operator does.
 
     Returns:
         A :class:`DiagnosedState` on the solver grid.
     """
+    if pv_source not in ("operator", "data"):
+        raise ValueError(f"pv_source must be 'operator' or 'data', got {pv_source!r}")
     nlev = levels.nlev
     for name, arr in (
         ("geopotential", geopotential),
@@ -133,20 +165,44 @@ def diagnose(
 
     interior = levels.interior
     q_hat = np.empty((interior.size, ops.grid.nlat, ops.grid.nlon))
-    theta_spec = np.stack([ops.analyze(theta[k]) for k in range(nlev)])
-    for i, k in enumerate(interior):
-        two_dpi = 2.0 * levels.dpi2[k]
-        dtheta_dpi = (theta[k + 1] - theta[k - 1]) / two_dpi
-        du_dpi = (u[k + 1] - u[k - 1]) / two_dpi
-        dv_dpi = (v[k + 1] - v[k - 1]) / two_dpi
-        dtheta_dx, dtheta_dy = ops.grad(theta_spec[k])
-        q_hat[i] = -(
-            (f + zeta[k]) * dtheta_dpi + du_dpi * dtheta_dy - dv_dpi * dtheta_dx
+    if pv_source == "operator":
+        vert = VerticalOperator(levels)
+        bot_spec, top_spec = theta_from_geopotential(phi_spec, levels)
+        theta_bot = ops.synth(bot_spec)
+        theta_top = ops.synth(top_spec)
+        phi_grid = np.stack([ops.synth(phi_spec[k]) for k in range(nlev)])
+        d2phi = vert.d2(phi_grid[interior]) + vert.theta_forcing(theta_bot, theta_top)
+        dphi_dpi = vert.d_dpi(phi_spec[interior], bot_spec, top_spec)
+        weights = ops.grid.weights
+        psi_bot = ops.analyze(streamfunction_ghost(theta_bot, f, weights))
+        psi_top = ops.analyze(streamfunction_ghost(theta_top, f, weights))
+        dpsi_dpi = vert.d_dpi(psi_spec[interior], psi_bot, psi_top)
+        for i, k in enumerate(interior):
+            px, py = ops.grad(dphi_dpi[i])
+            sx, sy = ops.grad(dpsi_dpi[i])
+            q_hat[i] = (f + zeta[k]) * d2phi[i] - (sx * px + sy * py)
+    else:
+        theta_spec = np.stack([ops.analyze(theta[k]) for k in range(nlev)])
+        for i, k in enumerate(interior):
+            two_dpi = 2.0 * levels.dpi2[k]
+            dtheta_dpi = (theta[k + 1] - theta[k - 1]) / two_dpi
+            du_dpi = (u[k + 1] - u[k - 1]) / two_dpi
+            dv_dpi = (v[k + 1] - v[k - 1]) / two_dpi
+            dtheta_dx, dtheta_dy = ops.grad(theta_spec[k])
+            q_hat[i] = -(
+                (f + zeta[k]) * dtheta_dpi + du_dpi * dtheta_dy - dv_dpi * dtheta_dx
+            )
+        theta_bot = 0.5 * (theta[0] + theta[1])
+        theta_top = 0.5 * (theta[nlev - 2] + theta[nlev - 1])
+
+    implied_bot, implied_top = theta_from_geopotential(phi_spec, levels)
+    ratio = tuple(
+        float(implied[0, 0].real / ops.analyze(given)[0, 0].real)
+        for implied, given in (
+            (implied_bot, 0.5 * (theta[0] + theta[1])),
+            (implied_top, 0.5 * (theta[nlev - 2] + theta[nlev - 1])),
         )
-
-    theta_bot = 0.5 * (theta[0] + theta[1])
-    theta_top = 0.5 * (theta[nlev - 2] + theta[nlev - 1])
-
+    )
     return DiagnosedState(
         psi_spec=psi_spec,
         phi_spec=phi_spec,
@@ -155,6 +211,7 @@ def diagnose(
         theta_top=theta_top,
         theta=theta,
         zeta=zeta,
+        boundary_theta_ratio=ratio,
     )
 
 
@@ -175,8 +232,9 @@ def theta_from_geopotential(phi_spec_or_grid: np.ndarray, levels: LevelSet) -> n
     """Boundary potential temperature implied hydrostatically by a geopotential.
 
     ``theta = -dPhi/dPi``, evaluated at the two half levels the inversion uses.
-    Handy for checking that a balanced state stayed consistent with the boundary
-    data it was given.
+    This is the boundary temperature of the ``"operator"`` potential-vorticity
+    source, and the check that a balanced state stayed consistent with the
+    boundary data it was given.
     """
     pi = levels.pi
     bot = -(phi_spec_or_grid[1] - phi_spec_or_grid[0]) / (pi[1] - pi[0])

@@ -20,6 +20,13 @@ The two engines write the same output keys, with one difference that follows fro
 the physics: ``*_ppvi_wall`` exists only for the windowed engine, because only a
 bounded domain has a wall.  Everything not attributed to a source is in
 ``*_rot_anom_residual_ppvi`` for both.
+
+The solver itself is the vendored :mod:`pvtend.ppvi.spherical` package and is not
+edited here.  This module owns what is specific to this pipeline: the archive's
+row and column order, the reuse of one engine across a worker's events, and the
+crop back onto the event patch by the patch's own row latitudes and column
+indices, so the delivered arrays sit on exactly the grid the rest of the record
+uses.
 """
 from __future__ import annotations
 
@@ -49,86 +56,82 @@ class SphericalConfig:
             carries without aliasing the quadratic terms in the equations, which
             is two thirds of the number of latitudes.
         pieces: ``"scale"`` or ``"per_level"``.
-        blend: Taper the reference coefficients to their smooth equatorial limits
-            across a band about the equator.  On by default because a hemisphere
-            mirrored onto the sphere has a kink there wherever the mean zonal wind
-            does not vanish.
         newton_max_steps: Cap on the nonlinear iteration of the total inversion.
+            Real events converge in four to ten steps; the cap is a guard.
     """
 
     solver_nlat: int = 128
     solver_nlon: int = 256
     lmax: int | None = None
     pieces: str = "scale"
-    blend: bool = True
     newton_max_steps: int = 60
 
+    def inversion_config(self):
+        """The vendored solver's configuration this run uses.
 
-def northern_hemisphere_state(
-    dataset,
-    time_index: int,
-    plevs=WU_PLEVS,
-    names: dict[str, str] | None = None,
-    lat_name: str = "lat",
-    lon_name: str = "lon",
-    level_name: str = "level",
-    z_divisor: float = 1.0,
-) -> tuple[np.ndarray, ...]:
-    """Read one state as the spherical engine needs it: the whole hemisphere.
+        Everything not named here is the solver's default: the operator-consistent
+        potential-vorticity source, the adaptive deformation limiter, the 5-20 N
+        taper of the mirrored hemisphere, the Coriolis floor at 12 degrees.
+        """
+        from .spherical.config import InversionConfig, NewtonConfig
+
+        if self.pieces not in ("scale", "per_level"):
+            raise ValueError(f"pieces must be scale or per_level, got {self.pieces!r}")
+        return InversionConfig(newton=NewtonConfig(max_steps=int(self.newton_max_steps)))
+
+
+@dataclass
+class HemisphereAxes:
+    """How an archive's rows and columns map onto the engine's axes.
 
     The engine has one set of conventions and they are not negotiable, because a
-    field that violates them still looks like weather:
+    field that violates them still looks like weather: latitude ascending from
+    the equator to the pole, longitude ascending from zero.  ERA5 is stored north
+    to south; CESM f09 is stored south to north on a -180..180 longitude axis.
+    Both are permutations of what the engine wants, and this records them once
+    per grid so every cube is permuted the same way and the crop can be undone.
 
-    * latitude ascending from the equator to the pole, longitude ascending from
-      zero, level descending in pressure;
-    * ``z`` a geopotential *height* in metres -- one archive stores height and
-      another stores geopotential, so the divisor is a parameter rather than a
-      guess;
-    * ``t`` a temperature, not a potential temperature.  The inversion forms
-      potential temperature itself, and a state handed the wrong one is out by a
-      factor of the Exner function and entirely plausible.
-
-    Args:
-        dataset: An open dataset for one archive.
-        time_index: Step to take.
-        plevs: Levels to select, bottom-up.
-        names: Variable names, defaulting to ``z``/``t``/``u``/``v``.
-        z_divisor: Divide the height field by this.  Standard gravity for an
-            archive that stores geopotential; one for an archive that stores
-            height.
-
-    Returns:
-        ``(height, temperature, u, v, lat, lon)``, the first four shaped
-        ``(nlev, nlat, nlon)``.
+    Attributes:
+        nh_rows: Archive latitude indices of the northern rows, ordered so that
+            latitude ascends.
+        lat_nh: Their latitudes, ascending.
+        lon_order: Archive longitude indices ordered so that ``lon mod 360``
+            ascends from zero.
+        lon: The engine's longitude axis, in ``[0, 360)``.
+        col_of: Engine column for each archive column index -- the inverse of
+            ``lon_order``.
+        dlat: Latitude spacing, degrees.
     """
-    names = names or {"z": "z", "t": "t", "u": "u", "v": "v"}
-    snapshot = dataset.isel({_time_dim(dataset): time_index})
-    snapshot = snapshot.sel({level_name: list(plevs)})
-    snapshot = snapshot.sortby(lat_name).sortby(lon_name)
 
-    lon = np.asarray(snapshot[lon_name].values, dtype=float)
-    if lon.min() < -1e-9:  # a -180..180 axis, which the transform cannot take
-        snapshot = snapshot.assign_coords({lon_name: lon % 360.0}).sortby(lon_name)
-    snapshot = snapshot.sel({lat_name: slice(0.0, 90.0)})
-
-    lat = np.asarray(snapshot[lat_name].values, dtype=float)
-    lon = np.asarray(snapshot[lon_name].values, dtype=float)
-    fields = [
-        np.asarray(snapshot[names[key]].values, dtype=float) for key in ("z", "t", "u", "v")
-    ]
-    fields[0] = fields[0] / z_divisor
-    _check_conventions(lat, lon, fields)
-    return (*fields, lat, lon)
+    nh_rows: np.ndarray
+    lat_nh: np.ndarray
+    lon_order: np.ndarray
+    lon: np.ndarray
+    col_of: np.ndarray
+    dlat: float
 
 
-def _time_dim(dataset) -> str:
-    for name in ("time", "valid_time", "slot"):
-        if name in dataset.dims:
-            return name
-    raise ValueError(f"no recognised time dimension in {list(dataset.dims)}")
+def hemisphere_axes(lat_all: np.ndarray, lon_all: np.ndarray) -> HemisphereAxes:
+    """Describe the archive's northern hemisphere in the engine's order."""
+    lat_all = np.asarray(lat_all, dtype=float)
+    lon_all = np.asarray(lon_all, dtype=float)
+    nh_rows = np.where(lat_all >= -1e-9)[0]
+    if nh_rows.size < 2:
+        raise ValueError(f"no northern hemisphere in latitudes {lat_all.min()}..{lat_all.max()}")
+    nh_rows = nh_rows[np.argsort(lat_all[nh_rows], kind="stable")]
+    lat_nh = lat_all[nh_rows]
+    lon_mod = np.mod(lon_all, 360.0)
+    lon_order = np.argsort(lon_mod, kind="stable")
+    lon = lon_mod[lon_order]
+    col_of = np.empty(lon_all.size, dtype=int)
+    col_of[lon_order] = np.arange(lon_all.size)
+    dlat = float(np.median(np.diff(lat_nh)))
+    return HemisphereAxes(
+        nh_rows=nh_rows, lat_nh=lat_nh, lon_order=lon_order, lon=lon, col_of=col_of, dlat=dlat
+    )
 
 
-def _check_conventions(lat, lon, fields) -> None:
+def check_conventions(lat: np.ndarray, lon: np.ndarray, fields) -> None:
     """Refuse a state that violates a convention, rather than inverting it anyway."""
     if lat[0] > lat[-1]:
         raise ValueError("latitude must ascend from the equator to the pole")
@@ -140,7 +143,7 @@ def _check_conventions(lat, lon, fields) -> None:
     if np.nanmax(heights) > 1.0e5:
         raise ValueError(
             "the height field reaches above 100 km, which is a geopotential rather "
-            "than a height; pass z_divisor=9.80665"
+            "than a height; divide by standard gravity first"
         )
     temperature = fields[1]
     if np.nanmin(temperature) > 200.0 and np.nanmax(temperature) > 400.0:
@@ -150,56 +153,103 @@ def _check_conventions(lat, lon, fields) -> None:
         )
 
 
-def invert_event(
-    mean_fields,
-    event_fields,
-    lat,
-    lon,
-    centre,
-    cfg: SphericalConfig | None = None,
-    lat_half: float = 30.0,
-    lon_half: float = 60.0,
-):
-    """Invert one event on the sphere and crop the pieces to its patch.
+class SphericalEngine:
+    """One engine per archive grid, built once and reused for every event.
+
+    The spectral tables are the fixed cost; a worker builds them on its first
+    event and inverts every later state through the same object.  ``fits`` says
+    whether a dataset's axes are the ones it was built for.
+    """
+
+    def __init__(self, axes: HemisphereAxes, cfg: SphericalConfig | None = None) -> None:
+        from .spherical.pipeline import SphereEngine
+
+        self.axes = axes
+        self.cfg = cfg or SphericalConfig()
+        self.engine = SphereEngine.build(
+            axes.lat_nh,
+            axes.lon,
+            cfg=self.cfg.inversion_config(),
+            solver_nlat=self.cfg.solver_nlat,
+            solver_nlon=self.cfg.solver_nlon,
+            lmax=self.cfg.lmax,
+        )
+
+    def fits(self, axes: HemisphereAxes) -> bool:
+        return self.engine.fits(axes.lat_nh, axes.lon)
+
+    def invert(self, mean_fields, event_fields, centre):
+        """Invert one event; fields ``(height, temperature, u, v)`` in engine order.
+
+        Args:
+            mean_fields, event_fields: Each ``(nlev, nlat_nh, nlon)``, bottom-up,
+                rows and columns already in the engine's order (see
+                :func:`to_engine_order`), heights in metres.
+            centre: ``(latitude, longitude)`` of the event; any longitude
+                convention.
+
+        Returns:
+            The vendored :class:`~pvtend.ppvi.spherical.pipeline.HemisphereInversion`:
+            pieces on the mirrored data grid, its ``northern`` method giving the
+            hemisphere's own rows.
+        """
+        from .spherical.pipeline import invert_hemisphere
+
+        check_conventions(self.axes.lat_nh, self.axes.lon, mean_fields)
+        check_conventions(self.axes.lat_nh, self.axes.lon, event_fields)
+        return invert_hemisphere(
+            self.engine,
+            tuple(np.ascontiguousarray(f, dtype=float) for f in mean_fields),
+            tuple(np.ascontiguousarray(f, dtype=float) for f in event_fields),
+            (float(centre[0]), float(centre[1]) % 360.0),
+            pieces_mode=self.cfg.pieces,
+        )
+
+
+def to_engine_order(cube_nh: np.ndarray, axes: HemisphereAxes) -> np.ndarray:
+    """Reorder the columns of a cube whose rows are already ``axes.nh_rows``."""
+    return np.ascontiguousarray(np.asarray(cube_nh, dtype=float)[..., axes.lon_order])
+
+
+def patch_row_index(lat_vec: np.ndarray, lat_nh: np.ndarray, dlat: float) -> np.ndarray:
+    """Engine row for each patch-row latitude, ``-1`` where there is none.
+
+    Matched by value, so it holds for either ordering of the patch.  Patch rows and
+    engine rows are both exact grid latitudes, so real matches are exact; the
+    tolerance only excludes a row one spacing away.  A patch row past the pole is
+    NaN and stays unmatched.
+    """
+    lat_vec = np.asarray(lat_vec, dtype=float)
+    row_for = np.full(lat_vec.shape[0], -1, dtype=int)
+    tol = 0.25 * float(dlat)
+    for j, plat in enumerate(lat_vec):
+        if not np.isfinite(plat):
+            continue
+        r = int(np.abs(lat_nh - plat).argmin())
+        if abs(lat_nh[r] - plat) < tol:
+            row_for[j] = r
+    return row_for
+
+
+def crop_to_patch(
+    field_nh: np.ndarray, row_for: np.ndarray, cols: np.ndarray
+) -> np.ndarray:
+    """``(nlev, nlat_nh, nlon)`` in engine order to ``(nlev, yp, xp)`` on the patch.
 
     Args:
-        mean_fields, event_fields: ``(height, temperature, u, v)`` for the
-            climatology and the event, from :func:`northern_hemisphere_state`.
-        lat, lon: The axes those fields are on.
-        centre: ``(latitude, longitude)`` of the event, the longitude in the same
-            convention as ``lon``.
-        cfg: Engine configuration.
-        lat_half, lon_half: Half-widths of the output patch, in degrees.
+        field_nh: The hemisphere's rows, latitude ascending, engine columns.
+        row_for: From :func:`patch_row_index`.
+        cols: Engine column for each patch column, in patch order.
 
-    Returns:
-        The object the vendored pipeline returns: ``arrays`` carrying this
-        package's output keys, and ``meta``.
+    Rows the patch has and the hemisphere does not are NaN.
     """
-    from .spherical.config import InversionConfig, MirrorConfig, NewtonConfig
-    from .spherical.pipeline import invert_event as _invert
-
-    cfg = cfg or SphericalConfig()
-    if cfg.pieces not in ("scale", "per_level"):
-        raise ValueError(f"pieces must be scale or per_level, got {cfg.pieces!r}")
-
-    inversion = InversionConfig(
-        mirror=MirrorConfig(blend=cfg.blend),
-        newton=NewtonConfig(max_steps=cfg.newton_max_steps),
-    )
-    return _invert(
-        mean_fields,
-        event_fields,
-        lat,
-        lon,
-        (float(centre[0]), float(centre[1]) % 360.0),
-        cfg=inversion,
-        lat_half=lat_half,
-        lon_half=lon_half,
-        solver_nlat=cfg.solver_nlat,
-        solver_nlon=cfg.solver_nlon,
-        lmax=cfg.lmax,
-        pieces_mode=cfg.pieces,
-    )
+    field_nh = np.asarray(field_nh, dtype=float)
+    yp, xp = row_for.size, cols.size
+    out = np.full(field_nh.shape[:-2] + (yp, xp), np.nan, dtype=float)
+    have = row_for >= 0
+    if have.any():
+        out[..., have, :] = field_nh[..., row_for[have][:, None], cols[None, :]]
+    return out
 
 
 def piece_keys(pieces: str = "scale") -> list[str]:
@@ -210,4 +260,6 @@ def piece_keys(pieces: str = "scale") -> list[str]:
     """
     if pieces == "scale":
         return list(SCALE_PIECES)
-    return [str(p) for p in WU_PLEVS]
+    if pieces == "per_level":
+        return [str(p) for p in WU_PLEVS]
+    raise ValueError(f"pieces must be scale or per_level, got {pieces!r}")

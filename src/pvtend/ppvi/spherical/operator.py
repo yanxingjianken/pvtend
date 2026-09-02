@@ -35,7 +35,7 @@ import numpy as np
 
 from .config import ClampConfig, MirrorConfig
 from .levels import LevelSet
-from .mirror import blend_to_limit, coriolis_star
+from .mirror import blend_weight, coriolis_star
 from .sphere import SphereOps
 from .state import SpectralPacker
 from .vertical import VerticalOperator, streamfunction_ghost
@@ -67,6 +67,11 @@ class FrozenState:
         phi_spec: Reference geopotential spectra on all levels.
         clamps: Ellipticity floors.
         mirror: Equatorial blending of the coefficients.
+        deformation_limit: Optional limiter for the deformation terms, one
+            factor per interior level on the grid, to be used instead of the
+            one this state would compute for itself.  The nonlinear pass hands
+            the Jacobian's limiter to the half-state operator that evaluates
+            its residual, so the two describe the same regularised system.
     """
 
     def __init__(
@@ -77,6 +82,7 @@ class FrozenState:
         phi_spec: np.ndarray,
         clamps: ClampConfig | None = None,
         mirror: MirrorConfig | None = None,
+        deformation_limit: np.ndarray | None = None,
     ):
         self.ops = ops
         self.levels = levels
@@ -111,43 +117,26 @@ class FrozenState:
             ]
         )
 
-        # Coefficients only: taper towards their smooth equatorial limits before
-        # the clamps, so the mirror's kink at the equator never enters the
-        # operator.  Sources and solutions are left alone, which is what keeps the
-        # operator identical across pieces.
+        # The equatorial taper.  Only the coefficients are tapered, never the
+        # sources or the solution, so the operator stays shared between pieces.
+        # The weight multiplies the *products* the quadratic terms are built
+        # from, which keeps the tapered system an exact quadratic with a
+        # symmetric bilinear form: the midpoint linearisation then holds with the
+        # taper on, and the Jacobian is the derivative of the residual.  Tapering
+        # the reference argument alone (the vorticity, or a streamfunction rebuilt
+        # from it) does neither, and cost a factor of two per Newton step on every
+        # event before it was found.
+        weight = np.ones((ops.grid.nlat, 1))
         if self.mirror.blend:
-            zeta = blend_to_limit(
-                zeta, lat, 0.0, self.mirror.blend_south, self.mirror.blend_north
-            )
-            stb_limit = self._area_mean(stb).reshape(-1, 1, 1)
-            stb = blend_to_limit(
-                stb, lat, stb_limit, self.mirror.blend_south, self.mirror.blend_north
-            )
-
-        # The streamfunction that actually has the tapered vorticity.  Tapering
-        # the vorticity but leaving the streamfunction alone would give the
-        # balance row a reference state that is two different flows at once: its
-        # first term would use one and its deformation terms the other, so the row
-        # would be the exact tangent of nothing, and the midpoint linearisation --
-        # the whole reason the pieces add up -- would not hold where the taper
-        # acts.  Neither the piece sum nor the nonlinear residual can see that,
-        # because every piece shares the same operator, so it has to be got right
-        # rather than checked for.
-        if self.mirror.blend:
-            self.psi_ref_spec = np.stack(
-                [ops.inv_lap(ops.analyze(zeta[k])) for k in range(len(interior))]
-            )
-            # And the vorticity read back off it.  The taper multiplies by a ramp
-            # in latitude, so the tapered field is no longer band limited and the
-            # transform truncates it; taking the vorticity from the
-            # streamfunction rather than the other way round makes the pair agree
-            # to rounding instead of to the truncation error, which was seven
-            # parts in a thousand.
-            zeta = np.stack(
-                [ops.synth(ops.lap(self.psi_ref_spec[k])) for k in range(len(interior))]
-            )
-        else:
-            self.psi_ref_spec = np.stack([psi_spec[k] for k in interior])
+            weight = blend_weight(
+                lat, self.mirror.blend_south, self.mirror.blend_north
+            ).reshape(-1, 1)
+        self.weight = weight
+        self.zeta_raw = zeta
+        zeta = weight[None] * zeta
+        self.stb_limit = self._area_mean(stb).reshape(-1, 1, 1)
+        stb = self.stb_limit + weight[None] * (stb - self.stb_limit)
+        self.psi_ref_spec = np.stack([psi_spec[k] for k in interior])
 
         avo = self.f_grid[None, :, :] + zeta
         self.avo, avo_hit = self._floor(avo, self.clamps.avo_min)
@@ -155,17 +144,44 @@ class FrozenState:
         self.report = ClampReport(avo_fraction=avo_hit, stb_fraction=stb_hit)
         self.zeta_ref = zeta
 
+        # The balance row is elliptic only where the absolute vorticity exceeds
+        # the deformation of the reference flow: the quadratic part of the
+        # balance equation, polarised, is ``zeta_a zeta_b - D_a . D_b`` (less the
+        # curvature term), so the symbol of the linearised row has eigenvalues
+        # ``AVO -/+ w D``.  Where the deformation wins -- routinely on the flank
+        # of a strong anticyclone, over about a sixth of the jet level -- the
+        # linearised system is indefinite, no inner solver converges and Newton
+        # walks into a fold.  The deformation part alone is therefore scaled by
+        # ``s = min(1, (1 - margin) AVO / (w D))``, the counterpart of the
+        # limited-area code's clamp on its balance-equation coefficient; the
+        # vorticity part, which is what gradient-wind balance lives on, is kept.
+        if deformation_limit is None:
+            deform = np.stack(
+                [self._deformation_magnitude(psi_spec[k]) for k in interior]
+            )
+            margin = self.clamps.deformation_margin
+            denom = weight[None] * deform
+            allowed = (1.0 - margin) * self.avo
+            with np.errstate(divide="ignore", invalid="ignore"):
+                limit = np.where(denom > allowed, allowed / denom, 1.0)
+            self.deform_limit = limit
+        else:
+            limit = np.asarray(deformation_limit, dtype=float)
+            if limit.shape != zeta.shape:
+                raise ValueError(
+                    f"deformation_limit has shape {limit.shape}, expected {zeta.shape}"
+                )
+            self.deform_limit = limit
+        self.deform_fraction = np.mean(self.deform_limit < 1.0, axis=(1, 2))
+
         # Cross-term coefficients: horizontal gradients of the vertical
         # derivatives of the reference state, tapered on the same band.
         dpsi = self._d_dpi_reference(psi_spec)
         dphi = self._d_dpi_reference(phi_spec)
         self.dpsi_x, self.dpsi_y = self._grad_stack(dpsi)
         self.dphi_x, self.dphi_y = self._grad_stack(dphi)
-        if self.mirror.blend:
-            for arr in (self.dpsi_x, self.dpsi_y, self.dphi_x, self.dphi_y):
-                arr[...] = blend_to_limit(
-                    arr, lat, 0.0, self.mirror.blend_south, self.mirror.blend_north
-                )
+        for arr in (self.dpsi_x, self.dpsi_y, self.dphi_x, self.dphi_y):
+            arr *= weight[None]
 
         # Level means for the separable preconditioner.
         self.avo_mean = self._area_mean(self.avo)
@@ -199,6 +215,23 @@ class FrozenState:
                 for k in interior
             ]
         )
+
+    def _deformation_magnitude(self, spec: np.ndarray) -> np.ndarray:
+        """``D`` of the reference flow, from the polarised balance identity.
+
+        ``B(psi, psi) = zeta^2 - D^2 - 2 |grad psi|^2 / a^2`` with ``B`` the
+        exact divergence form, so ``D`` follows from spectral operations alone
+        and stays regular at the poles, where the strain-rate components -- which
+        expand the wind components as scalars -- do not.  Truncation can push the
+        square a little below zero; it is clipped.
+        """
+        ops = self.ops
+        zeta = ops.synth(ops.lap(spec))
+        px, py = ops.grad(spec)
+        speed2 = px * px + py * py
+        form = ops.synth(2.0 * ops.div(zeta * px, zeta * py) - ops.lap(ops.analyze(speed2)))
+        d2 = zeta * zeta - form - 2.0 * speed2 / ops.sht.radius**2
+        return np.sqrt(np.clip(d2, 0.0, None))
 
     def _grad_stack(self, spec: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         gx, gy = [], []
@@ -234,9 +267,13 @@ class PiecewiseOperator:
         self.nint = self.vert.nint
         self.packer = SpectralPacker(self.nint, self.lmax)
         #: Scale for the rank-one term that removes the constant-geopotential
-        #: null direction; comparable to the operator's own diagonal.
+        #: null direction; comparable to the operator's own diagonal.  Built
+        #: from the Coriolis parameter alone so that it is the same number for
+        #: every reference state: a scale that moved with the reference would
+        #: make the gauge row bilinear in the state and the residual's Jacobian
+        #: inexact in that one slot.
         self.gauge_scale = float(
-            np.mean(np.abs(frozen.avo_mean * self.vert.diag))
+            np.mean(np.abs(np.mean(frozen.f_grid) * self.vert.diag))
         )
         # The two equations differ by many orders of magnitude in units alone, so
         # a Krylov tolerance on the combined vector is met almost entirely by the
@@ -250,15 +287,45 @@ class PiecewiseOperator:
     # -- pieces of the operator --------------------------------------------
 
     def _row1(self, phi: np.ndarray, psi: np.ndarray) -> np.ndarray:
-        """Linearised balance equation, level by level (no vertical coupling)."""
+        """Linearised balance equation, level by level (no vertical coupling).
+
+        ``lap(Phi') - div(f* grad psi') - T[psi']`` with the tangent of the
+        quadratic part built from its polarised form,
+
+        ``T[psi'] = w zeta~ zeta' + w s (B(psi~, psi') - zeta~ zeta')``,
+
+        where ``B(a, b) = div(zeta_a grad b) + div(zeta_b grad a)
+        - lap(grad a . grad b)`` is the exact spherical bilinear form,
+        ``B - zeta zeta`` its deformation-and-curvature part, ``w`` the
+        equatorial weight and ``s`` the deformation limiter, both frozen.
+        Every factor is symmetric in the reference and the perturbation, so the
+        row is the exact tangent of a quadratic and the midpoint linearisation
+        holds wherever the floors are quiet.
+        """
+        ops = self.ops
+        frozen = self.frozen
         out = np.empty_like(phi)
         for k in range(self.nint):
-            out[k] = self.ops.lap(phi[k]) - self.ops.balance_nonlinear_tangent(
-                self.frozen.psi_ref_spec[k],
-                psi[k],
-                self.frozen.f_grid,
-                zeta_ref_grid=self.frozen.zeta_ref[k],
+            weight = frozen.weight
+            limit = frozen.deform_limit[k]
+            zeta_ref = frozen.avo[k] - frozen.f_grid
+            linear = ops.div_c_grad(frozen.f_grid, psi[k])
+            zeta_p = ops.synth(ops.lap(psi[k]))
+            rx, ry = ops.grad(frozen.psi_ref_spec[k])
+            px, py = ops.grad(psi[k])
+            full = ops.synth(
+                ops.div(frozen.zeta_raw[k] * px, frozen.zeta_raw[k] * py)
+                + ops.div(zeta_p * rx, zeta_p * ry)
+                - ops.lap(ops.analyze(rx * px + ry * py))
             )
+            # ``zeta_ref`` already carries the equatorial weight (and the floor
+            # where it bit); the deformation part takes the weight here.
+            vorticity_part = zeta_ref * zeta_p
+            deformation_part = full - frozen.zeta_raw[k] * zeta_p
+            tangent = ops.analyze(
+                vorticity_part + weight * limit * deformation_part
+            )
+            out[k] = ops.lap(phi[k]) - linear - tangent
         return out
 
     def _row2(self, phi: np.ndarray, psi: np.ndarray) -> np.ndarray:
@@ -286,6 +353,15 @@ class PiecewiseOperator:
                 self.frozen.avo[k] * d2phi[k]
                 + self.frozen.stb[k] * zeta_grid[k]
                 - cross
+            )
+            # The static stability is tapered towards its level mean, an affine
+            # map of the reference; the symmetric bilinear form that goes with it
+            # carries the perturbation's level-mean stratification against the
+            # untapered reference vorticity where the taper acts.
+            field += (
+                (1.0 - self.frozen.weight)
+                * self.frozen.zeta_raw[k]
+                * self.frozen._area_mean(d2phi[k : k + 1])[0]
             )
             out[k] = self.ops.analyze(field)
         return out
@@ -361,11 +437,24 @@ class PiecewiseOperator:
         error, so both are assembled here from one call to the vertical operator.
         """
         zeros = np.zeros((self.ops.grid.nlat, self.ops.grid.nlon))
-        tb = zeros if theta_bot is None else theta_bot
-        tt = zeros if theta_top is None else theta_top
+        # Both boundary temperatures pass through the spectrum first, so the
+        # right-hand side sees exactly the temperature the hydrostatic ghosts
+        # of a reference state are built from; a temperature with power beyond
+        # the truncation would otherwise enter the two sides of the same
+        # bilinear form differently.
+        tb = zeros if theta_bot is None else self.ops.synth(self.ops.analyze(theta_bot))
+        tt = zeros if theta_top is None else self.ops.synth(self.ops.analyze(theta_top))
 
         b2_grid = np.asarray(q_hat, dtype=float).copy()
-        b2_grid -= self.frozen.avo * self.vert.theta_forcing(tb, tt)
+        forcing = self.vert.theta_forcing(tb, tt)
+        b2_grid -= self.frozen.avo * forcing
+        forcing_mean = self.frozen._area_mean(forcing)
+        for k in range(self.nint):
+            b2_grid[k] -= (
+                (1.0 - self.frozen.weight[:, 0])[:, None]
+                * self.frozen.zeta_raw[k]
+                * forcing_mean[k]
+            )
 
         # Ghost contribution to the cross terms: d/dPi of a zero field with the
         # boundary temperature attached is exactly the part that belongs on the

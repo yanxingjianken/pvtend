@@ -305,19 +305,38 @@ class TestPPVIPieceKeys:
         assert "u_rot_anom_ppvi_250_3d" in keys
         assert "u_rot_anom_ppvi_1000_3d" in keys
 
-    def test_scale_covers_the_four_scale_pieces_plus_wall(self):
+    def test_scale_covers_the_four_scale_pieces(self):
+        """The spherical engine has no wall: a closed domain has no boundary
+        for a response to come from."""
         assert set(self._keys("scale")) == {
             "u_rot_anom_ppvi_surface_3d", "u_rot_anom_ppvi_lower_3d",
-            "u_rot_anom_ppvi_upper_p_3d", "u_rot_anom_ppvi_upper_e_3d",
-            "u_rot_anom_ppvi_wall_3d"}
+            "u_rot_anom_ppvi_upper_p_3d", "u_rot_anom_ppvi_upper_e_3d"}
+
+    def test_windowed_scale_adds_the_wall(self):
+        keys = TendencyComputer(TendencyConfig(
+            ppvi_pieces="scale", ppvi_engine="windowed"))._ppvi_piece_keys()
+        assert "u_rot_anom_ppvi_wall_3d" in keys
+        assert len(keys) == 5
 
     def test_scale_claims_no_per_level_key(self):
         """The exact confusion behind the bug."""
         assert "u_rot_anom_ppvi_250_3d" not in self._keys("scale")
 
-    def test_default_is_per_level(self):
-        assert self._keys("per_level") == TendencyComputer(
-            TendencyConfig())._ppvi_piece_keys()
+    def test_default_is_spherical_scale(self):
+        cfg = TendencyConfig()
+        assert cfg.ppvi_engine == "spherical"
+        assert cfg.ppvi_pieces == "scale"
+        assert self._keys("scale") == TendencyComputer(cfg)._ppvi_piece_keys()
+
+    def test_unknown_engine_is_refused_by_the_geometry(self):
+        import pytest
+        import xarray as xr
+        lat = np.arange(90.0, -0.1, -1.5)
+        ds = xr.Dataset(coords={"latitude": lat,
+                                "longitude": np.arange(0.0, 360.0, 1.5),
+                                "level": np.array([1000, 500, 100])})
+        with pytest.raises(ValueError, match="ppvi_engine"):
+            TendencyComputer(TendencyConfig(ppvi_engine="cartesian"))._ppvi_geom(ds, 90.0)
 
 
 class TestCircNearestLon:
