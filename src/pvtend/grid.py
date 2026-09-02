@@ -73,28 +73,18 @@ def default_nh_grid() -> NHGrid:
 
 @dataclass(frozen=True)
 class GridProfile:
-    """Static description of an input grid + its PV-inversion geometry (config).
+    """Static description of an input grid (config).
 
-    Bundles the regular lat-lon grid metadata, the event-patch half-widths, and
-    the Wu QG piecewise-inversion latitude band. **Scope (v2.13):** this is
-    metadata/config consumed by *callers*. The Wu inversion **solver**
-    (:func:`pvtend.ppvi.solver.invert_piecewise`) is genuinely grid-agnostic
-    (anisotropic-safe ``zhdr`` reorder + below-ground fill), and the spectral
-    Helmholtz/derivatives (:mod:`pvtend.sh_ops`) are global. The higher-level
-    :class:`~pvtend.TendencyComputer` pipeline, however, is **still
-    ERA5-specific** (it hard-codes the 10.5–85.5°N band and ``H=z/g``), so f09
-    end-to-end use currently goes through the solver API directly — build the
-    cubes + ``zhdr`` yourself and pass ``H=z`` when ``z_is_height`` (see the
-    ``pv_inversion/wu_cesm`` closure test for a worked example). Two profiles
-    are provided:
+    Bundles the regular lat-lon grid metadata with the event-patch half-widths
+    and the height convention. It is metadata consumed by *callers*: the
+    spectral operators (:mod:`pvtend.sh_ops`) and the piecewise PV inversion
+    (:mod:`pvtend.ppvi`) both run globally and read the grid off the data.
+    Two profiles are provided:
 
-    - :data:`ERA5_1P5_NH` — the default ERA5 1.5° Northern-Hemisphere grid
-      (current behaviour; isotropic Δlat=Δlon=1.5°).
+    - :data:`ERA5_1P5_NH` — the ERA5 1.5° Northern-Hemisphere grid (the
+      default; isotropic Δlat=Δlon=1.5°).
     - :data:`CESM_F09` — the CESM2-LENS2 f09 global grid (192×288, anisotropic
-      Δlat≈0.942°, Δlon=1.25°). Helmholtz/derivatives run fully global; the Wu
-      QG inversion runs on the mid-latitude band ``[inv_band_s, inv_band_n]``
-      (it is singular at the equator/poles, so a truly-global QG inversion is
-      out of scope — the band covers all blocking, ~25–85°N).
+      Δlat≈0.942°, Δlon=1.25°).
 
     Note: CESM ``z`` is geopotential **height [m]** (use ``H=z`` directly),
     whereas ERA5 ``z`` is geopotential [m²/s²] (``H=z/g``).
@@ -111,12 +101,10 @@ class GridProfile:
     lat_half: float          # event-patch half-width in latitude [deg]
     lon_half: float          # event-patch half-width in longitude [deg]
     z_is_height: bool        # True ⇒ H=z; False ⇒ H=z/g (ERA5 geopotential)
-    inv_band_s: float = 10.5  # Wu QG inversion band, south edge [°N]
-    inv_band_n: float = 85.5  # Wu QG inversion band, north edge [°N]
 
     @property
     def isotropic(self) -> bool:
-        """True if Δlat≈Δlon (Wu zhdr ordering is then irrelevant)."""
+        """True if Δlat≈Δlon."""
         return abs(self.dlat - self.dlon) < 1e-6
 
 

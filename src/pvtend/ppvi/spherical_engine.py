@@ -1,32 +1,22 @@
 """Drive the global spherical inversion from this pipeline's data and conventions.
 
-Two inversion engines are available and they answer the same question differently.
+The inversion solves on the closed sphere. There is no lateral boundary, so there
+is no wall piece and no boundary condition to choose: the decomposition is exactly
+the sources -- potential vorticity level by level, plus the two boundary
+temperatures -- and everything they do not account for is in
+``*_rot_anom_residual_ppvi``. It also has nothing to say about where the event is,
+so an event at eighty degrees is the same calculation as one at forty.
 
-The *windowed* engine solves on a fixed 10.5-85.5 degree latitude band with a
-longitude window centred on the event, by relaxation, and carries the response to
-its own lateral walls as a piece of the decomposition.
-
-The *spherical* engine solves on the closed sphere.  There is no lateral boundary,
-so there is no wall piece and no boundary condition to choose: the decomposition is
-exactly the sources -- potential vorticity level by level, plus the two boundary
-temperatures.  It also has nothing to say about where the event is, so an event at
-eighty degrees is the same calculation as one at forty.
-
-That difference drives the shape of this module.  The windowed engine is handed the
-window; the spherical engine is handed the whole northern hemisphere and the crop
-happens afterwards.  Reading the full field is not overhead here -- it is the point.
-
-The two engines write the same output keys, with one difference that follows from
-the physics: ``*_ppvi_wall`` exists only for the windowed engine, because only a
-bounded domain has a wall.  Everything not attributed to a source is in
-``*_rot_anom_residual_ppvi`` for both.
+That shapes this module. The solver is handed the whole northern hemisphere and the
+crop happens afterwards; reading the full field is not overhead here, it is the
+point.
 
 The solver itself is the vendored :mod:`pvtend.ppvi.spherical` package and is not
-edited here.  This module owns what is specific to this pipeline: the archive's
-row and column order, the reuse of one engine across a worker's events, and the
-crop back onto the event patch by the patch's own row latitudes and column
-indices, so the delivered arrays sit on exactly the grid the rest of the record
-uses.
+edited here. This module owns what is specific to this pipeline: the archive's row
+and column order, the reuse of one engine across a worker's events, and the crop
+back onto the event patch -- by the patch's own row latitudes and column indices,
+with the rows past the pole reading the antimeridian -- so the delivered arrays sit
+on exactly the grid the rest of the record uses.
 """
 from __future__ import annotations
 
@@ -109,6 +99,17 @@ class HemisphereAxes:
     lon: np.ndarray
     col_of: np.ndarray
     dlat: float
+
+    @property
+    def nlon(self) -> int:
+        return int(self.lon.size)
+
+    def far_columns(self, cols: np.ndarray) -> np.ndarray:
+        """Engine columns half a turn away: the antimeridian of each column."""
+        if self.nlon % 2:
+            raise ValueError("the continuation across the pole needs an even "
+                             f"number of longitudes, got {self.nlon}")
+        return (np.asarray(cols) + self.nlon // 2) % self.nlon
 
 
 def hemisphere_axes(lat_all: np.ndarray, lon_all: np.ndarray) -> HemisphereAxes:
@@ -197,12 +198,16 @@ class SphericalEngine:
 
         check_conventions(self.axes.lat_nh, self.axes.lon, mean_fields)
         check_conventions(self.axes.lat_nh, self.axes.lon, event_fields)
+        # The Cartesian components are formed as well: they are what the pole
+        # row of a patch is built from, where the eastward and northward
+        # components of the regular grid are undefined.
         return invert_hemisphere(
             self.engine,
             tuple(np.ascontiguousarray(f, dtype=float) for f in mean_fields),
             tuple(np.ascontiguousarray(f, dtype=float) for f in event_fields),
             (float(centre[0]), float(centre[1]) % 360.0),
             pieces_mode=self.cfg.pieces,
+            rotated_track=True,
         )
 
 
@@ -232,24 +237,57 @@ def patch_row_index(lat_vec: np.ndarray, lat_nh: np.ndarray, dlat: float) -> np.
 
 
 def crop_to_patch(
-    field_nh: np.ndarray, row_for: np.ndarray, cols: np.ndarray
+    field_nh: np.ndarray,
+    row_for: np.ndarray,
+    cols: np.ndarray,
+    sign: np.ndarray | None = None,
 ) -> np.ndarray:
     """``(nlev, nlat_nh, nlon)`` in engine order to ``(nlev, yp, xp)`` on the patch.
 
     Args:
         field_nh: The hemisphere's rows, latitude ascending, engine columns.
-        row_for: From :func:`patch_row_index`.
-        cols: Engine column for each patch column, in patch order.
+        row_for: From :func:`patch_row_index`, on the rows' geographic latitude.
+        cols: Engine column for each patch column, ``(xp,)`` for every row or
+            ``(yp, xp)`` row by row -- the rows past the pole read the
+            antimeridian.
+        sign: Optional factor per row, ``-1`` on the rows past the pole for a
+            horizontal vector component.
 
     Rows the patch has and the hemisphere does not are NaN.
     """
     field_nh = np.asarray(field_nh, dtype=float)
-    yp, xp = row_for.size, cols.size
+    cols = np.asarray(cols)
+    yp = row_for.size
+    xp = cols.shape[-1]
     out = np.full(field_nh.shape[:-2] + (yp, xp), np.nan, dtype=float)
     have = row_for >= 0
     if have.any():
-        out[..., have, :] = field_nh[..., row_for[have][:, None], cols[None, :]]
+        col_rows = cols[have] if cols.ndim == 2 else np.broadcast_to(cols, (int(have.sum()), xp))
+        out[..., have, :] = field_nh[..., row_for[have][:, None], col_rows]
+        if sign is not None:
+            out[..., have, :] *= np.asarray(sign, dtype=float)[have][:, None]
     return out
+
+
+def pole_row_winds(cartesian, lon: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Eastward and northward components on the pole row, column by column.
+
+    On the pole the components of the regular grid are undefined; the wind is
+    not. For the column at longitude λ the patch's frame is the local frame of
+    meridian λ: eastward ``e_λ = (−sin λ, cos λ, 0)`` and northward the
+    direction of travel through the pole, ``(−cos λ, −sin λ, 0)``. Projecting
+    the Cartesian wind ``(Vx, Vy, Vz)`` onto them gives the pair the archive
+    itself stores on its pole row.
+
+    Args:
+        cartesian: ``(Vx, Vy, Vz)``, each ``(..., nlon)`` on the pole row.
+        lon: The columns' longitudes in degrees.
+    """
+    vx, vy, _ = cartesian
+    lam = np.radians(np.asarray(lon, dtype=float))
+    u = -vx * np.sin(lam) + vy * np.cos(lam)
+    v = -vx * np.cos(lam) - vy * np.sin(lam)
+    return u, v
 
 
 def piece_keys(pieces: str = "scale") -> list[str]:

@@ -52,7 +52,6 @@ from .constants import (
     F_MIN_LAT,
     LAT_QG_LO,
     LAT_QG_HI,
-    LAT_QG_POLAR,
     SP19_DRY_FRACTION,
     CLIM_VARIABLES,
     MONTH_ABBREVS,
@@ -60,6 +59,8 @@ from .constants import (
 from .derivatives import ddx, ddy, ddp, ddt
 from .helmholtz import helmholtz_decomposition, solve_poisson_spherical_fft, gradient
 from .climatology import load_helmholtz_climatology
+from .polar import (far_side_rows, geographic_latitude,
+                    negates_across_pole, plan_continuation)
 from .omega import (
     solve_qg_omega_sip,
     _compute_diabatic_rhs_log20,
@@ -182,16 +183,10 @@ class TendencyConfig:
     #: LENS2 member number; required when ``source == "cesm"``, since the
     #: member selects the file and cannot be inferred from the event row.
     member: int | None = None
-    #: PPVI engine. ``"spherical"`` (default) inverts on the closed sphere with
-    #: the vendored spectral solver (``ppvi/spherical``): no lateral wall, no
-    #: ``ibc``, ordinary points at the pole, float64. ``"windowed"`` is the
-    #: Wu/Davis Fortran relaxation on the fixed 10.5-85.5 N band with an
-    #: event-centred longitude window, which carries a ``wall`` piece.
-    ppvi_engine: str = "spherical"
     #: PPVI decomposition. ``"scale"`` (default) gives the four surface /
     #: lower / upper_p / upper_e pieces, with the upper levels split into a
     #: planetary (zonal k≤4, confined to the tracked object) and an eddy
-    #: part; ``"per_level"`` gives one single-level piece per Wu level
+    #: part; ``"per_level"`` gives one single-level piece per level
     #: (``u/v_rot_anom_ppvi_{L}_3d``). Both are kept: they write different
     #: keys and must not be mixed in one output directory.
     ppvi_pieces: str = "scale"
@@ -205,19 +200,6 @@ class TendencyConfig:
     #: Cap on the Newton iteration of the spherical engine's total inversion.
     #: Real events converge in four to ten steps; the cap is a guard.
     ppvi_newton_max_steps: int = 60
-    #: Nested lateral boundary conditions for the scale-piece PPVI. When on,
-    #: the same pieces are first solved on a zonally wider window (same fixed
-    #: latitude band; ``inv_lon_half + ppvi_nested_lon_margin`` per side,
-    #: capped just under the full circle) with the production ibc=1 + wall
-    #: method, and each outer corrected piece then supplies the inner walls
-    #: for that piece (``ibc=2``). The stored ``wall`` piece becomes the
-    #: remainder the outer domain could not attribute — smaller, never zero.
-    #: The N/S band edges are unchanged (the band exists for ellipticity), so
-    #: nesting is zonal only. Requires ``ppvi_pieces == "scale"``. Roughly
-    #: doubles the PPVI cost per event.
-    ppvi_nested: bool = False
-    #: Extra zonal half-width of the outer nesting window, degrees per side.
-    ppvi_nested_lon_margin: float = 60.0
     qg_omega_method: str = "log20"
     center_mode: str = "eulerian"
     skip_existing: bool = True
@@ -626,24 +608,32 @@ def fill_window_below_ground(ds: xr.Dataset) -> xr.Dataset:
     A no-op on ERA5, whose pressure-level fields ECMWF already extrapolates
     below ground.
     """
-    from .ppvi.solver import fill_below_ground_stack
+    from .belowground import below_ground_mask, fill_below_ground_stack
 
     names = [v for v in ds.data_vars
              if ds[v].dims[-3:] == ("pressure_level", "latitude", "longitude")]
     if not names:
         return ds
     vals = {n: np.asarray(ds[n].values, dtype=np.float64) for n in names}
+    dims = ds[names[0]].dims
     if all(np.isfinite(v).all() for v in vals.values()):
+        ds["below_ground"] = (dims, np.zeros(vals[names[0]].shape, dtype=np.uint8))
         return ds
 
+    # The record of the fill, before it happens: the QG-omega solves drop their
+    # forcing on these cells, where a persisted state forces the equation with
+    # the terrain seam rather than with weather.
     plev = np.asarray(ds.pressure_level.values, dtype=float)
+    mask = np.zeros(vals[names[0]].shape, dtype=np.uint8)
     for ti in range(ds.sizes["valid_time"]):
+        mask[ti] = below_ground_mask({n: vals[n][ti] for n in names}, height_key="z")
         filled = fill_below_ground_stack(
             {n: vals[n][ti] for n in names}, plev, height_key="z", temp_key="t")
         for n in names:
             vals[n][ti] = filled[n]
     for n in names:
         ds[n] = (ds[n].dims, vals[n].astype(np.float32))
+    ds["below_ground"] = (dims, mask)
     return ds
 
 
@@ -831,14 +821,14 @@ def _solve_chi_nh(
     if method in ("spectral", "sh"):
         from .sh_ops import invert_laplacian_sh, gradient_sh, _SPHARM_AVAILABLE
         if not _SPHARM_AVAILABLE:
-            import warnings
-            warnings.warn(
-                "pyspharm not installed; falling back to FD for "
-                "u_div_from_omega. Install via `pip install pvtend[sh]`.",
-                RuntimeWarning,
-                stacklevel=2,
+            raise RuntimeError(
+                "pyspharm/windspharm is not installed: the spectral Poisson "
+                "inverse is required for the divergent wind of the omega "
+                "branches (the finite-difference path is not pole-safe and "
+                "is never taken silently). Install via `pip install "
+                "pvtend[sh]` or `micromamba install -c conda-forge windspharm "
+                "pyspharm`, or pass method='fd' explicitly."
             )
-            method = "fd"
         else:
             u_div_nh = np.zeros_like(omega_nh)
             v_div_nh = np.zeros_like(omega_nh)
@@ -953,7 +943,7 @@ def _qg_diabatic_adiabatic_on_patch(
         return np.nan_to_num(arr3d[psort][:, valid, :], nan=0.0)
 
     def unpack(arr_sv):
-        out = np.zeros((nlevs, nlat, nlon), dtype=np.float32)
+        out = np.full((nlevs, nlat, nlon), np.nan, dtype=np.float32)
         for ki, si in enumerate(psort):
             out[si, valid, :] = arr_sv[ki]
         return out
@@ -1043,6 +1033,15 @@ def _qg_diabatic_adiabatic_on_patch(
             out = out[:, ::-1, :]
         return np.nan_to_num(out, nan=0.0)
 
+    # Cells the below-ground fill invented: the solves drop their forcing there.
+    below = nh_data.get("below_ground")
+    if below is not None:
+        forcing_mask = np.asarray(below, dtype=bool)[psort]
+        if flip_nh:
+            forcing_mask = forcing_mask[:, ::-1, :]
+    else:
+        forcing_mask = None
+
     z_nh = _prep(nh_data["z"]) * phi_factor
     t_nh = _prep(nh_data["t"])
     w_nh = _prep(nh_data["w"])
@@ -1073,7 +1072,8 @@ def _qg_diabatic_adiabatic_on_patch(
         center_lat=center_lat,
         omega_b=w_nh,
         phi_3d=z_nh,
-        bc_top=0.0, bc_bot=0.0)
+        bc_top=0.0, bc_bot=0.0,
+        forcing_mask=forcing_mask)
 
     # ── Solve 2: Direct C-only QG (LOG20 full J) → ω_qg_diabatic ──
     # Exploits operator linearity: solve(C) = solve(A+B+C) - solve(A+B)
@@ -1095,7 +1095,8 @@ def _qg_diabatic_adiabatic_on_patch(
             omega_b=None,
             rhs_c=C_log20,
             phi_3d=z_nh,
-            bc_top=0.0, bc_bot=0.0)
+            bc_top=0.0, bc_bot=0.0,
+            forcing_mask=forcing_mask)
     else:
         w_qg_diabatic_nh = np.zeros_like(od_nh)
 
@@ -1115,7 +1116,8 @@ def _qg_diabatic_adiabatic_on_patch(
             omega_b=None,
             rhs_c=C_em,
             phi_3d=z_nh,
-            bc_top=0.0, bc_bot=0.0)
+            bc_top=0.0, bc_bot=0.0,
+            forcing_mask=forcing_mask)
     else:
         w_em_diabatic_nh = np.zeros_like(od_nh)
 
@@ -1133,24 +1135,35 @@ def _qg_diabatic_adiabatic_on_patch(
     udem_nh, vdem_nh = _solve_chi_nh(
         w_em_diabatic_nh, lat_nh_asc, lon_nh, plevs_pa)
 
-    # Extract patch from full NH solutions
+    # Extract patch from full NH solutions. A patch row past the pole reads
+    # the mirrored latitude on the antimeridian; its wind components change
+    # sign there (the frame turns by 180 degrees through the pole).
+    lat_geo_v = geographic_latitude(lat_v)
+    far_v = far_side_rows(lat_v)
     lat_idx = np.array([np.argmin(np.abs(lat_nh_asc - la))
-                        for la in lat_v])
+                        for la in lat_geo_v])
+    lon_idx_near = np.array([_circ_nearest_lon(lon_nh, lo) for lo in lon_vec])
+    lon_idx_far = np.array([_circ_nearest_lon(lon_nh, lo + 180.0)
+                            for lo in lon_vec])
+    col_idx = np.where(far_v[:, None], lon_idx_far[None, :],
+                       lon_idx_near[None, :])
+    sign_v = np.where(far_v, -1.0, 1.0)[None, :, None]
 
-    lon_idx = np.array([_circ_nearest_lon(lon_nh, lo) for lo in lon_vec])
-    ix = np.ix_(np.arange(od_nh.shape[0]), lat_idx, lon_idx)
+    def _take(nh, vector):
+        out = nh[:, lat_idx[:, None], col_idx]
+        return out * sign_v if vector else out
 
-    od       = od_nh[ix]
-    wqm_sv   = w_qg_diabatic_nh[ix]
-    wem_sv   = w_em_diabatic_nh[ix]
-    udm_sv   = udm_nh[ix]
-    vdm_sv   = vdm_nh[ix]
-    udd_sv   = udd_nh[ix]
-    vdd_sv   = vdd_nh[ix]
-    udqm_sv  = udqm_nh[ix]
-    vdqm_sv  = vdqm_nh[ix]
-    udem_sv  = udem_nh[ix]
-    vdem_sv  = vdem_nh[ix]
+    od       = _take(od_nh, False)
+    wqm_sv   = _take(w_qg_diabatic_nh, False)
+    wem_sv   = _take(w_em_diabatic_nh, False)
+    udm_sv   = _take(udm_nh, True)
+    vdm_sv   = _take(vdm_nh, True)
+    udd_sv   = _take(udd_nh, True)
+    vdd_sv   = _take(vdd_nh, True)
+    udqm_sv  = _take(udqm_nh, True)
+    vdqm_sv  = _take(vdqm_nh, True)
+    udem_sv  = _take(udem_nh, True)
+    vdem_sv  = _take(vdem_nh, True)
 
     # --- Unpack & store ---
     cube3d["w_adiabatic"]            = unpack(od)
@@ -1179,10 +1192,12 @@ def _omega_sip_scalars(sip_info: dict | None) -> dict:
     iteration ran away and the retry could not rescue it),
     ``omega_sip_alpha_{branch}`` the relaxation parameter it was solved with
     (0.93, or the retry's 0.5), ``omega_sip_retried_{branch}`` and
-    ``omega_sip_diverged_{branch}`` the guard's verdicts, and
-    ``omega_sip_iters_{branch}`` its sweep count. A branch that did not run
-    (sp19, or a missing forcing) carries NaN / False / 0, so the aggregator can
-    read every file the same way.
+    ``omega_sip_diverged_{branch}`` the guard's verdicts,
+    ``omega_sip_iters_{branch}`` its sweep count, and
+    ``omega_sip_forcing_masked_{branch}`` the fraction of the domain whose
+    forcing was dropped as below-ground fill. A branch that did not run (sp19,
+    or a missing forcing) carries NaN / False / 0, so the aggregator can read
+    every file the same way.
     """
     out: dict = {}
     sip_info = sip_info or {}
@@ -1194,6 +1209,8 @@ def _omega_sip_scalars(sip_info: dict | None) -> dict:
         out[f"omega_sip_iters_{branch}"] = np.int32(info["iters"] if info else 0)
         out[f"omega_sip_retried_{branch}"] = np.bool_(bool(info["retried"]) if info else False)
         out[f"omega_sip_diverged_{branch}"] = np.bool_(bool(info["diverged"]) if info else False)
+        out[f"omega_sip_forcing_masked_{branch}"] = np.float32(
+            info["forcing_masked_fraction"] if info else 0.0)
     return out
 
 
@@ -1559,6 +1576,8 @@ class _GridInfo:
         self.lon = lon
         self.LAT_PAD = int(round(lat_half / dlat))
         self.LON_PAD = int(round(lon_half / dlon))
+        self.dlat = dlat
+        self.dlon = dlon
         rlat = np.linspace(-lat_half, lat_half, 2 * self.LAT_PAD + 1)
         rlon = np.linspace(-lon_half, lon_half, 2 * self.LON_PAD + 1)
         self.Y_rel, self.X_rel = np.meshgrid(rlat, rlon, indexing="ij")
@@ -1575,34 +1594,6 @@ def _nearest_idx(lat0, lon0, grid):
 def _wrapped_lon_index(ilon, *, LON_PAD, nlon):
     start = ilon - LON_PAD
     return (np.arange(0, 2 * LON_PAD + 1) + start) % nlon
-
-
-def _band_row_index(lat_vec, band_lats, dlat):
-    """Row in the fixed PPVI inversion band for each patch-row latitude.
-
-    Matched by nearest value, so this holds for either latitude ordering and
-    for bands whose actual edge is off the nominal one. The predecessor,
-    ``round((BAND_N - plat)/dlat)``, baked in both a N->S band and a nominal
-    85.5 deg north edge; CESM f09 breaks both (stored S->N, band ends at
-    85.29), no row matched, and every PPVI field cropped to pure NaN.
-
-    Patch and band rows are both exact grid latitudes, so real matches are
-    exact; the tolerance only has to exclude a non-band row one dlat away.
-
-    Returns an int array of length ``len(lat_vec)``, ``-1`` where the patch row
-    is not in the band (off-grid NaN, or outside the band edges).
-    """
-    lat_vec = np.asarray(lat_vec, dtype=float)
-    band_lats = np.asarray(band_lats, dtype=float)
-    row_for = np.full(lat_vec.shape[0], -1, dtype=int)
-    tol = 0.25 * float(dlat)
-    for j, plat in enumerate(lat_vec):
-        if not np.isfinite(plat):
-            continue
-        r = int(np.abs(band_lats - plat).argmin())
-        if abs(band_lats[r] - plat) < tol:
-            row_for[j] = r
-    return row_for
 
 
 def _patch_lon1d(ds, ilon, grid):
@@ -1628,6 +1619,12 @@ def _patch_lat1d_full(ds, ilat, grid, eff_north, eff_south):
     y_eff = seg.shape[0]
     y0 = grid.LAT_PAD - eff_south
     out[y0:y0 + y_eff] = seg
+    # Rows past the pole carry their nominal latitude, 90 + m*dlat: real places
+    # on the far side of the pole, filled by the continuation (see polar.py).
+    plan = plan_continuation(ds.latitude.values, ds.sizes["longitude"],
+                             grid.LAT_PAD, eff_north, eff_south, grid.dlat)
+    if plan is not None:
+        out[plan.slots] = plan.nominal_lat
     return out
 
 
@@ -1667,6 +1664,29 @@ def _extract_cube_with_pads3d(ds, varnames, ts, ilat, ilon, levels, grid,
         buf = np.full((L, Y_full, X), np.nan, dtype=arr.dtype)
         buf[:, y0:y0 + Y_eff, :] = arr
         out[v] = buf
+
+    # The rows past the pole: each is the grid row at the mirrored latitude on
+    # the antimeridian, copied for a scalar and negated for a horizontal vector
+    # component or first derivative (the frame turns by 180 degrees through
+    # the pole). Nothing is interpolated and the rows above are untouched.
+    plan = plan_continuation(ds.latitude.values, nlon, grid.LAT_PAD,
+                             eff_north, eff_south, grid.dlat)
+    if plan is not None:
+        far_cols = xr.DataArray(plan.far_columns(lon_idx.values, nlon), dims=("x",))
+        src_rows = xr.DataArray(plan.src_rows, dims=("yf",))
+        far_parts = []
+        for v in varnames:
+            da = (ts_sel[v]
+                  .sel({plev: levels})
+                  .isel(latitude=src_rows)
+                  .isel(longitude=far_cols))
+            far_parts.append(da)
+        far_stacked = xr.concat(far_parts, dim="__var__").compute()
+        for i, v in enumerate(varnames):
+            arr = far_stacked.isel(__var__=i).values
+            if negates_across_pole(v):
+                arr = -arr
+            out[v][:, plan.slots, :] = arr
     return out
 
 
@@ -1727,7 +1747,6 @@ class TendencyComputer:
         base_ts: pd.Timestamp,
         *,
         also_ppvi: bool = False,
-        inv_lon_half: float = 90.0,
     ) -> int:
         """Process a single event and write NPZ files.
 
@@ -1735,7 +1754,7 @@ class TendencyComputer:
         iterates over ``cfg.rel_hours``, extracting a patch and computing
         QG omega + moist/dry + cross-terms + wavg per timestep.
 
-        When ``also_ppvi=True`` the Wu piecewise PV-inversion rotational
+        When ``also_ppvi=True`` the piecewise PV-inversion rotational
         winds are computed for each ``dh`` and written **together** with
         the base tendency fields in a single NPZ write (used for fresh
         runs where no base NPZ exists yet — no append/re-write).
@@ -1799,7 +1818,7 @@ class TendencyComputer:
         ppvi_geom = None
         cplev = None
         if also_ppvi:
-            ppvi_geom = self._ppvi_geom(ds, inv_lon_half)
+            ppvi_geom = self._ppvi_geom(ds)
             cplev = _plev_name(clim_ds)
 
         for dh in self.cfg.rel_hours:
@@ -1859,6 +1878,8 @@ class TendencyComputer:
                     "theta": snap["theta"].values,
                     "lat": ds.latitude.values,
                     "lon": ds.longitude.values,
+                    "below_ground": (snap["below_ground"].values
+                                     if "below_ground" in snap else None),
                 }
             omega_sip_info = _qg_diabatic_adiabatic_on_patch(
                 cube3d, lat_vec_full, lon_unwrapped,
@@ -1867,30 +1888,21 @@ class TendencyComputer:
                 nh_data=nh_data,
                 phi_factor=G0 / z_divisor(self.cfg))
 
-            # NaN safety: 0-fill these solver-output fields ONLY as input sanitization before the
-            # nansum-based vertical mean `vwm` below — never 0-fill before a statistical mean
-            # (see Rule 14). On the validated ERA5 path the wavg levels (300/250/200) are NaN-free,
-            # so this is a no-op; dropping it to rely on nansum's exclude-NaN semantics is deferred
-            # to v2.14 (needs the full test/CI checklist on the published package).
-            for _key in ("w_adiabatic", "w_diabatic", "w_qg_diabatic",
-                         "w_lhr_moist",
-                         "u_div_diabatic", "v_div_diabatic",
-                         "u_div_adiabatic", "v_div_adiabatic",
-                         "u_div_qg_diabatic", "v_div_qg_diabatic",
-                         "u_div_lhr_moist", "v_div_lhr_moist",
-                         "q", "t_dt"):
-                if _key in cube3d:
-                    cube3d[_key] = np.nan_to_num(
-                        cube3d[_key], nan=0.0, posinf=0.0, neginf=0.0)
-
             z_m_3d = cube3d["z"] / z_divisor(self.cfg)
 
             def vwm(arrL, *, z_m_3d=z_m_3d, wavg_idx=wavg_idx):
+                # Divided by the weight of the levels that are valid at each
+                # point, never by the full weight: a level filled with zero
+                # and divided by everything pulls the mean towards zero while
+                # keeping it finite. Where every level is valid this is the
+                # plain weighted mean.
                 arr_w = arrL[wavg_idx]
                 z_w = z_m_3d[wavg_idx]
                 wt = np.exp(-z_w / H_SCALE)
-                num = np.nansum(arr_w * wt, axis=0)
-                den = np.nansum(wt, axis=0)
+                valid = np.isfinite(arr_w) & np.isfinite(wt)
+                w = np.where(valid, wt, 0.0)
+                num = np.sum(np.where(valid, arr_w, 0.0) * w, axis=0)
+                den = np.sum(w, axis=0)
                 out = np.full_like(num, np.nan)
                 mask = den > 0
                 out[mask] = num[mask] / den[mask]
@@ -1989,6 +2001,8 @@ class TendencyComputer:
                     wavg_levels=np.array(self.cfg.wavg_levels, dtype=np.int32),
                     H_SCALE=float(H_SCALE), G0=float(G0),
                     lat_vec=lat_vec_full.astype(float),
+                    lat_geo_vec=geographic_latitude(lat_vec_full),
+                    far_side_rows=far_side_rows(lat_vec_full).astype(np.uint8),
                     lon_vec_unwrapped=lon_unwrapped.astype(float),
                     # Stored as-is: CESM ids are strings ('m091_t00002')
                     # because track_id restarts per LENS2 member. np.savez
@@ -2304,571 +2318,31 @@ class TendencyComputer:
 
     # ── piecewise PV inversion pass ────────────────────────────────
 
-    # Fixed Wu inversion conventions. 9 levels 1000→100 hPa (matches the npz
-    # ``levels`` and the audited per-level PPVI); index 0 = 1000 hPa bottom-θ,
-    # index 8 = 100 hPa top-θ, 1..7 = interior PV.
-    # 9-level Wu grid.  NL is a recompile-time PARAMETER in wuppvi.f and this
-    # list MUST match solver.PR -- they are edited together or pass D silently
-    # mismatches.  NL=20 was tried on 2026-08-10 and is BROKEN in this port:
-    # the f2py build uses -frecursive (stack locals, no zero-init) whereas the
-    # original relied on -fno-automatic static zero-init, and only 7 of ~35
-    # local arrays in BALP are explicitly zeroed.  At NL=9 the leftover stack
-    # happens to be harmless; at NL=20 pass D returns ~95 % NaN.
+    # The nine pressure levels the inversion runs on, 1000→100 hPa: the list
+    # the npz ``levels`` carry, with index 0 the 1000 hPa bottom-θ (Bretherton)
+    # sheet, index 8 the 100 hPa top-θ sheet and 1..7 the interior PV.
     _WU_PLEVS = [1000, 850, 700, 500, 400, 300, 250, 200, 100]
-    _WU2SI = 1.0e-8          # Wu pseudo-PV → SI Ertel PV
-    _WU_MI = 9999.90         # Wu missing-value sentinel
-    _BAND_N = 85.5           # fixed inversion latitude band (north)
-    _BAND_S = 10.5           # fixed inversion latitude band (south)
 
-    def _ppvi_geom(self, ds: xr.Dataset, inv_lon_half: float) -> dict:
+    def _ppvi_geom(self, ds: xr.Dataset) -> dict:
         """Build the static inversion geometry for an event.
 
-        Returns a dict of grid / header info reused across all ``dh`` of a
-        single event (depends only on the ERA5 grid + ``inv_lon_half``).
+        Returns a dict of grid information reused across all ``dh`` of a single
+        event; it depends only on the archive's grid.
         """
-        dlat = float(abs(np.diff(ds.latitude.values).mean()))
-        dlon = float(abs(np.diff(ds.longitude.values).mean()))
+        from .ppvi import spherical_engine as sph
+
         lat_all = ds.latitude.values
         lon_all = ds.longitude.values
-        band_idx = np.where(
-            (lat_all <= self._BAND_N + 1e-6)
-            & (lat_all >= self._BAND_S - 1e-6))[0]
-        # Row 0 MUST be the northernmost. The Fortran is never given latitudes:
-        # it rebuilds row I's as lat_n-(I-1)*dlat and keys cos(phi) and the
-        # Coriolis f off that index, so a S->N cube is inverted with f upside
-        # down. ERA5 is stored N->S and satisfies this for free; CESM f09 is
-        # stored S->N. Reversing here gives one convention to every downstream
-        # consumer -- the Fortran, psi_to_winds' centred differences, the crop.
-        if band_idx.size > 1 and lat_all[band_idx[0]] < lat_all[band_idx[-1]]:
-            band_idx = np.ascontiguousarray(band_idx[::-1])
-        band_lats = lat_all[band_idx]
-        ny = len(band_idx)
-        inv_lon_pad = int(round(inv_lon_half / dlon))
-        nx = 2 * inv_lon_pad + 1
-        # The band EDGES must be the grid's own, not the nominal 10.5/85.5:
-        # the Fortran reconstructs its rows as lat_n-(I-1)*dlat, so a nominal
-        # span that is not (ny-1)*dlat puts every row at the wrong latitude.
-        # 10.5..85.5 is exactly 51 rows on ERA5's 1.5 deg grid, but on CESM f09
-        # (dlat = 180/191) the same band holds 80 rows spanning 74.45 deg, and
-        # invert_piecewise rejected it -- so PPVI had never run on CESM at all.
-        lat_s_act, lat_n_act = float(band_lats.min()), float(band_lats.max())
-        zhdr = np.array(
-            [lat_s_act, 0.0, lat_n_act, (nx - 1) * dlon,
-             dlat, dlon, nx, ny], dtype=np.float32)
-        wu_wavg_idx = [self._WU_PLEVS.index(l) for l in self.cfg.wavg_levels
-                       if l in self._WU_PLEVS]
-        geom = dict(
-            plev=_plev_name(ds), lat_all=lat_all, lon_all=lon_all,
-            nlon=len(lon_all), band_idx=band_idx, band_lats=band_lats,
-            ny=ny, inv_lon_pad=inv_lon_pad, nx=nx, zhdr=zhdr,
-            lat_s_act=lat_s_act, lat_n_act=lat_n_act,
-            dlat=dlat, dlon=dlon, wu_wavg_idx=wu_wavg_idx,
+        return dict(
+            plev=_plev_name(ds), lon_all=lon_all, nlon=len(lon_all),
+            dlat=float(abs(np.diff(lat_all).mean())),
+            dlon=float(abs(np.diff(lon_all).mean())),
+            wu_wavg_idx=[self._WU_PLEVS.index(l) for l in self.cfg.wavg_levels
+                         if l in self._WU_PLEVS],
+            # The engine is handed the whole hemisphere in its own row and
+            # column order; the axes carry the map back to the archive grid.
+            sph_axes=sph.hemisphere_axes(lat_all, lon_all),
         )
-        # The spherical engine is handed the whole hemisphere, in its own row
-        # and column order; the band above stays because the archive-PV
-        # planetary/eddy split is defined on it for both engines.
-        if self.cfg.ppvi_engine == "spherical":
-            from .ppvi import spherical_engine as sph
-            geom["sph_axes"] = sph.hemisphere_axes(lat_all, lon_all)
-        elif self.cfg.ppvi_engine != "windowed":
-            raise ValueError(
-                f"ppvi_engine must be 'spherical' or 'windowed', got "
-                f"{self.cfg.ppvi_engine!r}")
-        return geom
-
-    def _scale_split_sources(self, ds, clim_ds, cplev, ts, geom, store,
-                             lon_idx_inv):
-        """Planetary/eddy PV and boundary-θ anomalies for the upper piece.
-
-        Runs pass A/B a second time over the **whole longitude circle**, not the
-        ±90° inversion box: `zonal_filter` needs 360° or the wavenumbers it
-        keeps are not global ones. The split is then cropped back onto the box
-        and handed to ``invert_piecewise`` as additive PV overrides, which is
-        exact because pass D is linear in its source — ``upper_p`` and
-        ``upper_e`` sum to the unsplit ``upper``.
-
-        Returns ``(qp_anoms, th_anoms, diagnostics)``.
-        """
-        from .ppvi import scale_split
-        from .ppvi.solver import (PR, PassABParams, _from_core, _to_core,
-                                  fill_below_ground)
-        from .ppvi import _ext
-
-        plev, band_idx, band_lats = geom["plev"], geom["band_idx"], geom["band_lats"]
-        dlat, dlon, nlon = geom["dlat"], geom["dlon"], geom["nlon"]
-        lon_all = geom["lon_all"]
-        mo, dy, hr = int(ts.month), int(ts.day), int(ts.hour)
-
-        def _cube(src, var, is_clim):
-            if is_clim:
-                base = (src[var].isel(slot=noleap_slot_scalar(ts))
-                        if "slot" in src.dims
-                        else src[var].sel(month=mo, day=dy, hour=hr))
-                base = base.sel({cplev: self._WU_PLEVS})
-            else:
-                base = src[var].sel(valid_time=ts).sel({plev: self._WU_PLEVS})
-            return np.ascontiguousarray(
-                base.isel(latitude=band_idx).values.astype(np.float64))
-
-        def _pass_ab(src, is_clim):
-            H = _cube(src, "z", is_clim) / z_divisor(self.cfg)
-            T, U, V = (_cube(src, v, is_clim) for v in ("t", "u", "v"))
-            H, T, U, V = fill_below_ground(H, T, U, V)
-            p = PassABParams()
-            z = np.zeros(10, dtype=np.float32)
-            z[0], z[1], z[2] = geom["lat_s_act"], 0.0, geom["lat_n_act"]
-            z[3] = (nlon - 1) * dlon
-            z[4], z[5] = dlon, dlat
-            z[6], z[7] = nlon, H.shape[1]
-            _, q, _thb, tht = _ext.load_ext().pvpialln_core(
-                _to_core(H), _to_core(T), _to_core(U), _to_core(V),
-                z, PR, int(p.imax), np.float32(p.omegs), np.float32(p.thrs))
-            return _from_core(q), np.asarray(tht)
-
-        q_e, tht_e = _pass_ab(ds, False)
-        q_m, tht_m = _pass_ab(clim_ds, True)
-        q_anom, th_anom = q_e - q_m, tht_e - tht_m
-        # This pass spans the whole circle, so its first and last columns are
-        # neighbours -- and pvpialln flags both as missing, leaving a notch at
-        # the dateline for zonal_filter to transform across. Only Q is flagged;
-        # the boundary theta is not, so th_anom needs no equivalent.
-        q_anom = scale_split.fill_seam_columns(q_anom)
-
-        clat, clon = float(store["center_lat"]), float(store["center_lon"])
-        box_lat = np.nonzero(np.abs(band_lats - clat) <= self.cfg.lat_half)[0]
-        # The box columns must be ordered AROUND THE CIRCLE, not by index. A
-        # boolean mask over a -180..180 axis returns sorted indices, so a box
-        # spanning the dateline arrives as [0..k, m..nlon-1]: the flood fill in
-        # split_at_box_minimum sees the two halves of the object at opposite
-        # ends of its sub-array (ndimage.label is not periodic) and invents an
-        # adjacency in the middle between longitudes 240 deg apart. 31,082 of
-        # the 85,425 catalogue events have a box that crosses the seam.
-        # _wrapped_lon_index gives the same columns in circular order.
-        box_lon = _wrapped_lon_index(
-            _circ_nearest_lon(lon_all, clon),
-            LON_PAD=int(round(self.cfg.lon_half / dlon)), nlon=nlon)
-
-        # Seed the object at the TRACKED centre, not at the box minimum.  The
-        # box is +/-60 x +/-30 deg and routinely contains something deeper than
-        # the event: measured on 30+30 m091 events, a blocking high IS its box
-        # minimum (ratio 1.0) but a propagating high is not (1.5), so the old
-        # policy inverted an unrelated system a median 4193 km away -- and
-        # upper_e is defined as the remainder, so the sums still balanced.
-        # Seeding near the centre puts the object back on the event: distance
-        # from the tracked centre to the nearest point of the object goes
-        # 1581 -> 117 km for prp, while blocking is untouched (45 -> 44 km).
-        # The halo bounds only where the SEARCH starts; the fill still spreads
-        # across the whole box.
-        centre_row = int(np.argmin(np.abs(band_lats - clat)))
-        out = scale_split.split_near_centre(
-            q_anom, th_anom, scale_split.UPPER_INTERIOR_IDX,
-            scale_split.TOP_IDX, box_lat, box_lon,
-            centre_lat=centre_row,          # row within the band, as box_lat is
-            centre_lon=_circ_nearest_lon(lon_all, clon),   # global column
-            halo_lat=int(round(SEED_HALO_LAT / dlat)),
-            halo_lon=int(round(SEED_HALO_LON / dlon)))
-
-        sub = lambda a: np.ascontiguousarray(a[..., lon_idx_inv])
-        qp_anoms = {"upper_p": sub(out["q_p"]), "upper_e": sub(out["q_e"])}
-        # (NY, NX, 2): bottom boundary theta is untouched by the upper split.
-        def _th(a):
-            z = np.zeros(sub(a).shape + (2,), dtype=np.float64)
-            z[..., 1] = sub(a)
-            return z
-        th_anoms = {"upper_p": _th(out["th_p"]), "upper_e": _th(out["th_e"])}
-        diag = dict(q_min=out["q_min"], thresh=out["thresh_used"],
-                    mask_frac=float(out["mask"][scale_split.UPPER_INTERIOR_IDX].mean()),
-                    top_frac=out["top_frac"])
-
-        diag["arch_split"] = self._archive_split_band(
-            ds, clim_ds, cplev, ts, geom, clat, clon)
-        return qp_anoms, th_anoms, diag
-
-    def _archive_split_band(self, ds, clim_ds, cplev, ts, geom, clat, clon):
-        """Planetary/eddy split of the ARCHIVE PV anomaly on the Wu band.
-
-        Same algorithm and parameters as the production wind split
-        (split_near_centre: global k1-4 zonal filter, near-centre seed,
-        frac of the local minimum), applied to the archive PV anomaly.
-        One convention for both the writer and the retrofit of pre-existing
-        NPZ: the mask is seeded on the ARCHIVE anomaly itself -- a Wu-seeded
-        mask cannot be reproduced on existing files without re-running pass
-        A/B per event, and the frac-of-local-min contour is scale-relative,
-        so the difference between the two seeds is second order.
-
-        Needs only the ``pv`` variable of both datasets; NO Fortran.
-        """
-        from .ppvi import scale_split
-        band_idx, band_lats = geom["band_idx"], geom["band_lats"]
-        dlat, dlon = geom["dlat"], geom["dlon"]
-        lon_all = geom["lon_all"]
-        plev = geom["plev"]
-        mo, dy, hr = int(ts.month), int(ts.day), int(ts.hour)
-
-        def _band(src, is_clim):
-            if is_clim:
-                base = (src["pv"].isel(slot=noleap_slot_scalar(ts))
-                        if "slot" in src.dims
-                        else src["pv"].sel(month=mo, day=dy, hour=hr))
-                base = base.sel({cplev: self._WU_PLEVS})
-            else:
-                base = src["pv"].sel(valid_time=ts).sel({plev: self._WU_PLEVS})
-            return np.ascontiguousarray(
-                base.isel(latitude=band_idx).values.astype(np.float64))
-
-        pva_band = _band(ds, False) - _band(clim_ds, True)
-        box_lat = np.nonzero(np.abs(band_lats - clat) <= self.cfg.lat_half)[0]
-        box_lon = _wrapped_lon_index(
-            _circ_nearest_lon(lon_all, clon),
-            LON_PAD=int(round(self.cfg.lon_half / dlon)),
-            nlon=geom["nlon"])
-        centre_row = int(np.argmin(np.abs(band_lats - clat)))
-        arch = scale_split.split_near_centre(
-            pva_band, np.zeros_like(pva_band[0]),
-            scale_split.UPPER_INTERIOR_IDX, scale_split.TOP_IDX,
-            box_lat, box_lon,
-            centre_lat=centre_row,
-            centre_lon=_circ_nearest_lon(lon_all, clon),
-            halo_lat=int(round(SEED_HALO_LAT / dlat)),
-            halo_lon=int(round(SEED_HALO_LON / dlon)))
-        return dict(q_p=arch["q_p"], mask=arch["mask"],
-                    q_min=arch["q_min"], thresh=arch["thresh_used"])
-
-    def _ppvi_compute_keys(
-        self, store: dict, ts: pd.Timestamp, ds: xr.Dataset,
-        clim_ds: xr.Dataset, cplev: str, geom: dict,
-    ) -> dict:
-        """Compute the PPVI rotational-wind / PV-anomaly keys for one ``dh``.
-
-        ``store`` must already provide the base-patch metadata
-        (``center_lat``, ``center_lon``, ``lat_vec``, ``levels``) and the
-        observed rotational-wind anomalies (``u_rot_anom_3d``,
-        ``v_rot_anom_3d``). Returns a dict of new keys (no file IO).
-
-        Dispatches on ``cfg.ppvi_engine``: the spherical engine is
-        :meth:`_ppvi_compute_keys_spherical`; what follows is the windowed
-        Wu/Davis chain.
-        """
-        if self.cfg.ppvi_engine == "spherical":
-            if self.cfg.ppvi_nested:
-                raise ValueError("ppvi_nested applies to the windowed engine "
-                                 "only: the sphere has no lateral boundary")
-            return self._ppvi_compute_keys_spherical(
-                store, ts, ds, clim_ds, cplev, geom)
-        if self.cfg.ppvi_engine != "windowed":
-            raise ValueError(
-                f"ppvi_engine must be 'spherical' or 'windowed', got "
-                f"{self.cfg.ppvi_engine!r}")
-        from .ppvi import PIECES, invert_piecewise, psi_to_winds
-        from .ppvi import scale_split
-
-        WU_PLEVS = self._WU_PLEVS
-        WU2SI = self._WU2SI
-        MI = self._WU_MI
-        plev = geom["plev"]
-        band_idx = geom["band_idx"]
-        band_lats = geom["band_lats"]
-        inv_lon_pad = geom["inv_lon_pad"]
-        zhdr = geom["zhdr"]
-        lon_all = geom["lon_all"]
-        nlon = geom["nlon"]
-        dlat = geom["dlat"]
-        dlon = geom["dlon"]
-        wu_wavg_idx = geom["wu_wavg_idx"]
-
-        center_lon = float(store["center_lon"])
-        lat_vec = np.asarray(store["lat_vec"], dtype=float)
-        npz_levels = list(np.asarray(store["levels"]).tolist())
-        obs_u = np.asarray(store["u_rot_anom_3d"], dtype=float)
-        obs_v = np.asarray(store["v_rot_anom_3d"], dtype=float)
-        n_npz_lev, yp, xp = obs_u.shape
-
-        ilon_c = _circ_nearest_lon(lon_all, center_lon)
-        lon_idx_inv = _wrapped_lon_index(
-            ilon_c, LON_PAD=inv_lon_pad, nlon=nlon)
-
-        # ── Extract event + climatological-mean cubes (NL, ny, nx) ──
-        # Both are indexed POSITIONALLY, by the same band_idx / lon_idx_inv, so
-        # the two grids have to be element-identical -- and band_idx is now
-        # deliberately non-monotonic on a south->north archive, which makes a
-        # silent mismatch harder to spot in the output than it already was.
-        for _ax in ("latitude", "longitude"):
-            if not np.array_equal(ds[_ax].values, clim_ds[_ax].values):
-                raise ValueError(
-                    f"climatology {_ax} grid differs from the state's; the PPVI "
-                    f"cubes are indexed positionally and would be misaligned "
-                    f"(state n={ds.sizes[_ax]}, clim n={clim_ds.sizes[_ax]})")
-        mo, dy, hr = int(ts.month), int(ts.day), int(ts.hour)
-
-        def _ev(var, idx=lon_idx_inv):
-            return (ds[var].sel(valid_time=ts)
-                    .sel({plev: WU_PLEVS})
-                    .isel(latitude=band_idx, longitude=idx)
-                    .values.astype(np.float64))
-
-        def _mn(var, idx=lon_idx_inv):
-            # Same layout dispatch as `clim_bar`, on a single timestamp.
-            if "slot" in clim_ds.dims:
-                base = clim_ds[var].isel(slot=noleap_slot_scalar(ts))
-            else:
-                base = clim_ds[var].sel(month=mo, day=dy, hour=hr)
-            return (base.sel({cplev: WU_PLEVS})
-                    .isel(latitude=band_idx, longitude=idx)
-                    .values.astype(np.float64))
-
-        z_e, t_e, u_e, v_e = _ev("z"), _ev("t"), _ev("u"), _ev("v")
-        z_m, t_m, u_m, v_m = _mn("z"), _mn("t"), _mn("u"), _mn("v")
-        _zd = z_divisor(self.cfg)
-        H_e, H_m = z_e / _zd, z_m / _zd
-
-        # ── Planetary/eddy split of the upper piece ──────────────────────
-        # Only in "scale" mode, and only ever on the GLOBAL longitude circle:
-        # a zonal wavenumber does not exist on a sector. The inversion box is
-        # +-90 deg, i.e. half the globe, so its k<=4 content is meaningless --
-        # hence a second pass A/B over the full band purely to build the split,
-        # after which q_p / q_e are cropped back onto the inversion box.
-        pieces = PIECES
-        qp_anoms = th_anoms = None
-        _arch_split = None
-        pd_params = None
-        bc_fields = bc_residual = None
-        nested = bool(self.cfg.ppvi_nested)
-        if nested and self.cfg.ppvi_pieces != "scale":
-            raise ValueError("ppvi_nested requires ppvi_pieces='scale' "
-                             f"(got {self.cfg.ppvi_pieces!r})")
-        if self.cfg.ppvi_pieces == "scale":
-            src_idx = lon_idx_inv
-            if nested:
-                # Outer nesting window: same latitude band, zonally wider by
-                # the configured margin, capped just below the full circle
-                # (the window must stay a proper sector — a self-overlapping
-                # wrapped index would alias columns).
-                pad_out = min(
-                    inv_lon_pad
-                    + int(round(self.cfg.ppvi_nested_lon_margin / dlon)),
-                    (nlon - 1) // 2)
-                if pad_out <= inv_lon_pad:
-                    raise ValueError(
-                        f"ppvi_nested_lon_margin="
-                        f"{self.cfg.ppvi_nested_lon_margin} adds no columns "
-                        f"at dlon={dlon} (inner pad {inv_lon_pad}, capped "
-                        f"outer pad {pad_out})")
-                lon_idx_out = _wrapped_lon_index(
-                    ilon_c, LON_PAD=pad_out, nlon=nlon)
-                src_idx = lon_idx_out
-            qp_anoms, th_anoms, split_diag = self._scale_split_sources(
-                ds, clim_ds, cplev, ts, geom, store, src_idx)
-            _arch_split = split_diag.pop("arch_split", None)
-            store.update({f"ppvi_split_{k}": v for k, v in split_diag.items()})
-            # ── Wall piece: the lateral-boundary (far-field) contribution ──
-            # The fixed Wu band crops the domain, so PV outside the window
-            # induces flow inside it only through the lateral ψ′ boundary
-            # values. With ibc=0 (homogeneous Dirichlet) that flow is lost —
-            # it leaks into the residual as zonally uniform stripes hugging
-            # the band-edge rows, and the piece sum cannot carry band-mean
-            # anomaly flow. With ibc=1 EVERY piece solve carries the full
-            # perturbation on the walls, so the shared wall response W must
-            # be counted once, not N times:
-            #     corrected piece_k = piece_k(ibc=1) − W
-            #     total = Σ corrected pieces + W  (W stored as piece "wall")
-            # W itself is the zero-source solve below: zero PV and boundary-θ
-            # anomaly overrides (its level list is never a source), walls at
-            # the full perturbation — the pure wall-forced harmonic response.
-            pieces = dict(scale_split.PIECES_SCALE, wall=[2])
-            from .ppvi.solver import PassDParams
-            if nested:
-                # ── Outer pass: production ibc=1 + wall on the wide window,
-                # then each corrected outer piece hands its central-columns
-                # subset to the inner solve as that piece's ibc=2 walls. The
-                # inner "wall" piece takes the residual boundary values
-                # (full inner perturbation − Σ outer-piece walls), so the
-                # nested pieces still telescope to the all-sources
-                # inversion; what changes is that boundary-forced flow the
-                # OUTER window can attribute to a piece now lands in that
-                # piece instead of in "wall".
-                z_eo, t_eo, u_eo, v_eo = (_ev(v, lon_idx_out)
-                                          for v in ("z", "t", "u", "v"))
-                z_mo, t_mo, u_mo, v_mo = (_mn(v, lon_idx_out)
-                                          for v in ("z", "t", "u", "v"))
-                H_eo, H_mo = z_eo / _zd, z_mo / _zd
-                nx_out = 2 * pad_out + 1
-                zhdr_out = np.array(
-                    [geom["lat_s_act"], 0.0, geom["lat_n_act"],
-                     (nx_out - 1) * dlon, dlat, dlon, nx_out,
-                     len(band_lats)], dtype=np.float32)
-                qp_out = dict(qp_anoms, wall=np.zeros_like(H_mo))
-                th_out = dict(th_anoms,
-                              wall=np.zeros(H_mo.shape[1:] + (2,)))
-                res_o = invert_piecewise(
-                    H_mo, t_mo, u_mo, v_mo, H_eo, t_eo, u_eo, v_eo,
-                    zhdr_out, pieces=pieces, qp_anoms=qp_out,
-                    th_anoms=th_out, pd=PassDParams(ibc=1))
-                off = pad_out - inv_lon_pad
-                sl = np.s_[:, :, off:off + (2 * inv_lon_pad + 1)]
-                _Wh = res_o["HP_pieces"]["wall"]
-                _Ws = res_o["SP_pieces"]["wall"]
-                bc_fields = {
-                    n: ((res_o["HP_pieces"][n] - _Wh)[sl],
-                        (res_o["SP_pieces"][n] - _Ws)[sl])
-                    for n in pieces if n != "wall"}
-                bc_residual = "wall"
-                pd_params = PassDParams(ibc=2)
-                # Inner sources are the central columns of the wide-window
-                # source arrays (the split is computed on the full circle
-                # and subset, so this is exact, not an approximation).
-                qp_anoms = {n: a[:, :, off:off + (2 * inv_lon_pad + 1)]
-                            for n, a in qp_anoms.items()}
-                th_anoms = {n: a[:, off:off + (2 * inv_lon_pad + 1), :]
-                            for n, a in th_anoms.items()}
-                store["ppvi_nested_lon_half"] = np.float32(pad_out * dlon)
-            else:
-                pd_params = PassDParams(ibc=1)
-            qp_anoms = dict(qp_anoms, wall=np.zeros_like(H_m))
-            th_anoms = dict(th_anoms,
-                            wall=np.zeros(H_m.shape[1:] + (2,)))
-
-        # ── Run the Wu piecewise inversion ──
-        res = invert_piecewise(
-            H_m, t_m, u_m, v_m, H_e, t_e, u_e, v_e, zhdr,
-            pieces=pieces, qp_anoms=qp_anoms, th_anoms=th_anoms,
-            pd=pd_params, bc_fields=bc_fields, bc_residual=bc_residual)
-
-        # Assign the wall response once (see the wall-piece note above).
-        # Not with nesting: each ibc=2 piece already owns exactly its
-        # outer-attributed boundary response, and "wall" is the separate
-        # residual solve — subtracting it again would double-count.
-        if "wall" in pieces and not nested:
-            _W = res["psi_pieces"]["wall"]
-            for _n in pieces:
-                if _n != "wall":
-                    res["psi_pieces"][_n] = res["psi_pieces"][_n] - _W
-
-        # Rotational winds per piece on the inversion grid (NL, ny, nx).
-        piece_u: dict[str, np.ndarray] = {}
-        piece_v: dict[str, np.ndarray] = {}
-        for name in pieces:
-            ur, vr = psi_to_winds(
-                res["psi_pieces"][name], band_lats, dlat, dlon)
-            piece_u[name], piece_v[name] = ur, vr
-
-        # Wu PV anomaly (interior levels valid; sentinel → NaN).
-        q_e = np.asarray(res["Q_event"], dtype=float)
-        q_m = np.asarray(res["Q_mean"], dtype=float)
-        bad = (np.abs(q_e) >= MI * 0.99) | (np.abs(q_m) >= MI * 0.99)
-        pv_anom_wu = (q_e - q_m) * WU2SI
-        pv_anom_wu[bad] = np.nan
-
-        # ── Crop inversion grid (ny, nx) → event patch (yp, xp) ──
-        # Latitude: match each patch row to a fixed-band row by value.
-        row_for = _band_row_index(lat_vec, band_lats, dlat)
-        # Longitude: map patch columns to inversion columns by grid index.
-        patch_lon_pad = (xp - 1) // 2
-        lon_idx_patch = _wrapped_lon_index(
-            ilon_c, LON_PAD=patch_lon_pad, nlon=nlon)
-        pos_of = {int(g): k for k, g in enumerate(lon_idx_inv)}
-        col_for = np.array(
-            [pos_of.get(int(g), -1) for g in lon_idx_patch], dtype=int)
-
-        vr_mask = row_for >= 0
-        vc_mask = col_for >= 0
-        # An empty match is how this failed silently for the whole of the CESM
-        # port: _crop then returns its np.full(nan) untouched, every PPVI key
-        # comes out 100 % NaN, and nothing raises -- so the NPZ is written,
-        # looks complete, and --skip-existing never revisits it.  Refuse.
-        if not vr_mask.any() or not vc_mask.any():
-            raise RuntimeError(
-                "PPVI crop matched no band "
-                f"{'rows' if not vr_mask.any() else 'columns'}: patch lat "
-                f"{np.nanmin(lat_vec):.2f}..{np.nanmax(lat_vec):.2f} vs band "
-                f"{band_lats.min():.2f}..{band_lats.max():.2f} "
-                f"(dlat={dlat:.4f}), patch centre lon {center_lon:.2f}. "
-                "Every cropped field would be NaN."
-            )
-        rr = row_for[vr_mask]
-        cc = col_for[vc_mask]
-        ridx = np.where(vr_mask)[0]
-        cidx = np.where(vc_mask)[0]
-        wu_pos = [npz_levels.index(p) for p in WU_PLEVS]
-
-        def _crop(cube):
-            out = np.full((cube.shape[0], yp, xp), np.nan, dtype=float)
-            if rr.size and cc.size:
-                sub = cube[:, rr][:, :, cc]
-                out[np.ix_(np.arange(cube.shape[0]), ridx, cidx)] = sub
-            return out
-
-        def _pad_levels(cube8):
-            """(NL, yp, xp) Wu levels → (n_npz_lev, yp, xp), NaN elsewhere."""
-            out = np.full((n_npz_lev, yp, xp), np.nan, dtype=float)
-            out[wu_pos] = cube8
-            return out
-
-        piece_u_c = {n: _crop(piece_u[n]) for n in pieces}
-        piece_v_c = {n: _crop(piece_v[n]) for n in pieces}
-        pv_anom_wu_c = _crop(pv_anom_wu)
-
-        # Residual vs observed anomaly rotational wind (Wu levels only).
-        sum_u = sum(piece_u_c[n] for n in pieces)
-        sum_v = sum(piece_v_c[n] for n in pieces)
-        resid_u = obs_u[wu_pos] - sum_u
-        resid_v = obs_v[wu_pos] - sum_v
-
-        # ── Weighted vertical average → 2-D (over wavg_levels) ──
-        z_patch = _crop(z_e) / z_divisor(self.cfg)   # geopotential height [m]
-        zw = z_patch[wu_wavg_idx]
-        wt = np.exp(-zw / H_SCALE)
-        den = np.nansum(wt, axis=0)
-        dmask = den > 0
-
-        def _wavg(cube8):
-            num = np.nansum(cube8[wu_wavg_idx] * wt, axis=0)
-            out = np.full_like(num, np.nan)
-            out[dmask] = num[dmask] / den[dmask]
-            return out
-
-        # ── Assemble new keys ──
-        # Per-level decomposition: the solver piece name is the 1-based Wu
-        # level index as a string; map it to the hPa level for the npz key,
-        # e.g. piece "7" → 250 hPa → ``u_rot_anom_ppvi_250(_3d)``.
-        new: dict[str, np.ndarray] = {}
-        for n in pieces:
-            # per_level pieces are keyed by their hPa level ("7" -> 250); the
-            # scale pieces keep their own names (surface/lower/upper_p/upper_e)
-            L = WU_PLEVS[int(n) - 1] if n.isdigit() else n
-            new[f"u_rot_anom_ppvi_{L}_3d"] = _pad_levels(piece_u_c[n])
-            new[f"v_rot_anom_ppvi_{L}_3d"] = _pad_levels(piece_v_c[n])
-            new[f"u_rot_anom_ppvi_{L}"] = _wavg(piece_u_c[n])
-            new[f"v_rot_anom_ppvi_{L}"] = _wavg(piece_v_c[n])
-        new["u_rot_anom_residual_ppvi_3d"] = _pad_levels(resid_u)
-        new["v_rot_anom_residual_ppvi_3d"] = _pad_levels(resid_v)
-        new["u_rot_anom_residual_ppvi"] = _wavg(resid_u)
-        new["v_rot_anom_residual_ppvi"] = _wavg(resid_v)
-
-        # ── PPVI blowup watch ──
-        # A diverged Wu SOR solve returns no error and writes a
-        # complete-looking NPZ, so magnitude is the only signal. These
-        # scalars are the third blowup family alongside the omega branches
-        # and the divergent winds, and let the aggregator flag such an
-        # inversion from a scalar read instead of the whole cube. Peak over
-        # all 9 Wu levels of each stored piece and of the residual.
-        def _absmax(a):
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", RuntimeWarning)
-                return np.float32(np.nanmax(np.abs(a)))
-
-        for n in pieces:
-            L = WU_PLEVS[int(n) - 1] if n.isdigit() else n
-            new[f"max_abs_u_rot_anom_ppvi_{L}"] = _absmax(piece_u_c[n])
-            new[f"max_abs_v_rot_anom_ppvi_{L}"] = _absmax(piece_v_c[n])
-        new["max_abs_u_rot_anom_residual_ppvi"] = _absmax(resid_u)
-        new["max_abs_v_rot_anom_residual_ppvi"] = _absmax(resid_v)
-        new["pv_anom_wu_3d"] = _pad_levels(pv_anom_wu_c)
-
-        # ── archive-PV planetary/eddy split, persisted (scale mode only) ──
-        if _arch_split is not None and "pv_anom_3d" in store:
-            new.update(self._arch_keys_from_split(_arch_split, store, geom))
-        new["pv_anom_wu"] = _wavg(pv_anom_wu_c)
-        return new
 
     def _spherical_engine(self, axes):
         """The spherical engine for this archive grid, built once per worker."""
@@ -2887,14 +2361,18 @@ class TendencyComputer:
             )
         return self._sph_engine
 
-    def _ppvi_compute_keys_spherical(
+    def _ppvi_compute_keys(
         self, store: dict, ts: pd.Timestamp, ds: xr.Dataset,
         clim_ds: xr.Dataset, cplev: str, geom: dict,
     ) -> dict:
-        """The PPVI keys from the global spherical engine, for one ``dh``.
+        """The PPVI rotational-wind / PV-anomaly keys for one ``dh``.
 
-        The same keys as the windowed engine, minus the ``wall`` piece a closed
-        domain does not have, plus the engine's own observed rotational anomaly
+        ``store`` must already provide the base-patch metadata (``center_lat``,
+        ``center_lon``, ``lat_vec``, ``levels``) and the observed rotational-wind
+        anomalies (``u_rot_anom_3d``, ``v_rot_anom_3d``). Returns a dict of new
+        keys; no file IO.
+
+        One key per piece, plus the engine's own observed rotational anomaly
         (``u/v_rot_anom_sph(_3d)``: the wind of the event-minus-climatology
         streamfunction on the sphere, what the pieces close against exactly)
         and the ``ppvi_*`` convergence scalars. The residual keeps this
@@ -2907,9 +2385,10 @@ class TendencyComputer:
         the engine's row and column order; the pieces come back on the
         archive's own grid and are cropped onto the patch by the patch's row
         latitudes and its column indices, so they sit on exactly the grid the
-        rest of the record uses. Rows the patch has past the pole are NaN,
-        and so is a pole row itself, where the eastward and northward
-        components are undefined.
+        rest of the record uses. A row past the pole reads the mirrored
+        latitude on the antimeridian, with the wind components negated, and
+        the pole row's own components come from the Cartesian ones, which are
+        defined there.
         """
         from .ppvi import spherical_engine as sph
 
@@ -2966,37 +2445,65 @@ class TendencyComputer:
         pieces = hi.piece_names()
 
         # ── Crop hemisphere (nlat_nh, nlon) → event patch (yp, xp) ──
-        # Rows by latitude value, columns by the same circular index walk the
-        # base patch was cut with, mapped into the engine's column order.
-        row_for = sph.patch_row_index(lat_vec, axes.lat_nh, axes.dlat)
+        # Rows by geographic latitude, columns by the same circular index walk
+        # the base patch was cut with, mapped into the engine's column order;
+        # a row past the pole reads the antimeridian and its wind components
+        # change sign (the frame turns by 180 degrees through the pole).
+        lat_geo = geographic_latitude(lat_vec)
+        far = far_side_rows(lat_vec)
+        row_for = sph.patch_row_index(lat_geo, axes.lat_nh, axes.dlat)
         if not (row_for >= 0).any():
             raise RuntimeError(
                 "PPVI crop matched no hemisphere rows: patch lat "
-                f"{np.nanmin(lat_vec):.2f}..{np.nanmax(lat_vec):.2f} vs "
+                f"{np.nanmin(lat_geo):.2f}..{np.nanmax(lat_geo):.2f} vs "
                 f"{axes.lat_nh.min():.2f}..{axes.lat_nh.max():.2f} "
                 f"(dlat={axes.dlat:.4f}). Every cropped field would be NaN.")
         ilon_c = _circ_nearest_lon(lon_all, center_lon)
         lon_idx_patch = _wrapped_lon_index(
             ilon_c, LON_PAD=(xp - 1) // 2, nlon=nlon)
-        cols = axes.col_of[lon_idx_patch]
+        cols_near = axes.col_of[lon_idx_patch]
+        cols_far = axes.far_columns(cols_near) if far.any() else cols_near
+        cols = np.where(far[:, None], cols_far[None, :], cols_near[None, :])
+        sign = np.where(far, -1.0, 1.0)
         wu_pos = [npz_levels.index(p) for p in WU_PLEVS]
 
-        def _crop_global(field):
-            return sph.crop_to_patch(hi.northern(field), row_for, cols)
+        # The pole row itself: the regular grid's components are undefined
+        # there, so the winds come from the Cartesian components projected
+        # onto each column's own frame.
+        pole = (row_for >= 0) & (np.abs(axes.lat_nh[np.maximum(row_for, 0)] - 90.0)
+                                 < 0.25 * axes.dlat)
+        pole_cols = cols[pole] if pole.any() else None
+
+        def _pole_fill(out, cart, vector_index):
+            if pole_cols is None or cart is None:
+                return out
+            parts = tuple(hi.northern(c)[..., -1, :] for c in cart)
+            u_p, v_p = sph.pole_row_winds(parts, axes.lon)
+            src = (u_p, v_p)[vector_index]
+            out[..., pole, :] = src[..., pole_cols]
+            return out
+
+        def _crop_global(field, vector=False, cart=None, component=0):
+            out = sph.crop_to_patch(hi.northern(field), row_for, cols,
+                                    sign if vector else None)
+            return _pole_fill(out, cart, component) if vector else out
 
         def _crop_nh(field):
             return sph.crop_to_patch(field, row_for, cols)
 
         def _pad_levels(cube9):
-            """(NL, yp, xp) Wu levels → (n_npz_lev, yp, xp), NaN elsewhere."""
+            """(NL, yp, xp) inversion levels → (n_npz_lev, yp, xp)."""
             out = np.full((n_npz_lev, yp, xp), np.nan, dtype=float)
             out[wu_pos] = cube9
             return out
 
-        piece_u_c = {n: _crop_global(hi.piece_u[n]) for n in pieces}
-        piece_v_c = {n: _crop_global(hi.piece_v[n]) for n in pieces}
-        sph_u_c = _crop_global(hi.u_obs)
-        sph_v_c = _crop_global(hi.v_obs)
+        pcart = hi.piece_cartesian or {}
+        piece_u_c = {n: _crop_global(hi.piece_u[n], True, pcart.get(n), 0)
+                     for n in pieces}
+        piece_v_c = {n: _crop_global(hi.piece_v[n], True, pcart.get(n), 1)
+                     for n in pieces}
+        sph_u_c = _crop_global(hi.u_obs, True, hi.observed_cartesian, 0)
+        sph_v_c = _crop_global(hi.v_obs, True, hi.observed_cartesian, 1)
         pv_anom_c = _crop_global(hi.pv_anom)
 
         # Residual vs the record's observed anomaly rotational wind.
@@ -3081,56 +2588,112 @@ class TendencyComputer:
             new["ppvi_split_top_frac"] = np.float32(hi.split["top_fraction"])
 
         # ── archive-PV planetary/eddy split, persisted (scale mode only) ──
-        # Engine-independent: the same near-centre split of the archived PV
-        # anomaly on the Wu band, seeded on the archive anomaly itself.
+        # The same near-centre split of the archived PV anomaly, on the whole
+        # hemisphere ring, seeded on the archive anomaly itself.
         if (self.cfg.ppvi_pieces == "scale" and "pv_anom_3d" in store
                 and "pv" in ds and "pv" in clim_ds):
-            arch = self._archive_split_band(
+            arch = self._archive_split_ring(
                 ds, clim_ds, cplev, ts, geom, center_lat, center_lon)
             new.update(self._arch_keys_from_split(arch, store, geom))
         return new
 
+    def _archive_split_ring(self, ds, clim_ds, cplev, ts, geom, clat, clon):
+        """Planetary/eddy split of the ARCHIVE PV anomaly on the hemisphere ring.
+
+        Same algorithm and parameters as the inversion's split
+        (``split_near_centre``: global k1-4 zonal filter, near-centre seed,
+        contour at a fraction of the local minimum), applied to the archive
+        PV anomaly on every row the archive has, in its own longitude order.
+        The mask is seeded on the archive anomaly itself, one convention for
+        the writer and any retrofit. Needs only the ``pv`` variable.
+
+        Returns ``q_p``, ``mask`` on ``(9, nlat_nh, nlon)`` with latitude
+        ascending from the equator, plus ``q_min`` and ``thresh``.
+        """
+        from .ppvi import scale_split
+        axes = geom["sph_axes"]
+        lon_all = geom["lon_all"]
+        dlat, dlon = geom["dlat"], geom["dlon"]
+        plev = geom["plev"]
+        mo, dy, hr = int(ts.month), int(ts.day), int(ts.hour)
+
+        def _ring(src, is_clim):
+            if is_clim:
+                base = (src["pv"].isel(slot=noleap_slot_scalar(ts))
+                        if "slot" in src.dims
+                        else src["pv"].sel(month=mo, day=dy, hour=hr))
+                base = base.sel({cplev: self._WU_PLEVS})
+            else:
+                base = src["pv"].sel(valid_time=ts).sel({plev: self._WU_PLEVS})
+            return np.ascontiguousarray(
+                base.isel(latitude=axes.nh_rows).values.astype(np.float64))
+
+        pva = _ring(ds, False) - _ring(clim_ds, True)
+        lat_ring = axes.lat_nh
+        box_lat = np.nonzero(np.abs(lat_ring - clat) <= self.cfg.lat_half)[0]
+        box_lon = _wrapped_lon_index(
+            _circ_nearest_lon(lon_all, clon),
+            LON_PAD=int(round(self.cfg.lon_half / dlon)),
+            nlon=geom["nlon"])
+        centre_row = int(np.argmin(np.abs(lat_ring - clat)))
+        arch = scale_split.split_near_centre(
+            pva, np.zeros_like(pva[0]),
+            scale_split.UPPER_INTERIOR_IDX, scale_split.TOP_IDX,
+            box_lat, box_lon,
+            centre_lat=centre_row,
+            centre_lon=_circ_nearest_lon(lon_all, clon),
+            halo_lat=int(round(SEED_HALO_LAT / dlat)),
+            halo_lon=int(round(SEED_HALO_LON / dlon)))
+        return dict(q_p=arch["q_p"], mask=arch["mask"],
+                    q_min=arch["q_min"], thresh=arch["thresh_used"])
+
     def _arch_keys_from_split(self, arch, store: dict, geom: dict) -> dict:
-        """Patch-cropped archive-split keys from a band-global split result.
+        """Patch-cropped archive-split keys from a hemisphere-wide split result.
 
         Self-contained (store + geom only) so the writer and the retrofit
         produce byte-identical keys.  Conventions: p is zero outside the
-        upper interior levels and outside the Wu band rows; e is the STORED
-        total minus p, so ``pv_anom_p_3d + pv_anom_e_3d == pv_anom_3d``
+        upper interior levels; e is the STORED total minus p, so
+        ``pv_anom_p_3d + pv_anom_e_3d == pv_anom_3d``
         exactly on disk wherever the total is finite.  Units follow the
         stored archive PV (PVU on this catalogue).
         """
+        from .ppvi import spherical_engine as sph
         lat_vec = np.asarray(store["lat_vec"], dtype=float)
         levels = [int(v) for v in np.asarray(store["levels"])]
         total3d = np.asarray(store["pv_anom_3d"], dtype=float)
         yp, xp = total3d.shape[1], total3d.shape[2]
-        row_for = _band_row_index(lat_vec, geom["band_lats"], geom["dlat"])
+        axes = geom["sph_axes"]
+        lat_geo = geographic_latitude(lat_vec)
+        far = far_side_rows(lat_vec)
+        row_for = sph.patch_row_index(lat_geo, axes.lat_nh, axes.dlat)
         ilon_c = _circ_nearest_lon(geom["lon_all"], float(store["center_lon"]))
-        lon_idx_patch = _wrapped_lon_index(
+        cols_near = _wrapped_lon_index(
             ilon_c, LON_PAD=(xp - 1) // 2, nlon=geom["nlon"])
-        vr = row_for >= 0
-        rr, ridx = row_for[vr], np.where(vr)[0]
+        cols_far = (cols_near + geom["nlon"] // 2) % geom["nlon"]
+        cols = np.where(far[:, None], cols_far[None, :], cols_near[None, :])
         wu_pos = [levels.index(pl) for pl in self._WU_PLEVS]
 
         def _crop_pad(cube):
+            # Scalars: the rows past the pole are copies of the mirrored row.
             pat = np.full((len(levels), yp, xp), np.nan, dtype=float)
-            if rr.size:
-                out = np.full((cube.shape[0], yp, xp), np.nan, dtype=float)
-                out[:, ridx, :] = cube[:, rr][:, :, lon_idx_patch]
-                for k, pos in enumerate(wu_pos):
-                    pat[pos] = out[k]
+            out = sph.crop_to_patch(np.asarray(cube, float), row_for, cols)
+            for k, pos in enumerate(wu_pos):
+                pat[pos] = out[k]
             return pat
 
-        p_pat = np.nan_to_num(_crop_pad(np.asarray(arch["q_p"], float)), nan=0.0)
+        # The planetary part is zero outside the object but defined on every
+        # row the archive has; it is missing only where the record is.
+        p_pat = _crop_pad(np.asarray(arch["q_p"], float))
+        p_pat = np.where(np.isfinite(total3d), np.nan_to_num(p_pat, nan=0.0), np.nan)
         m_pat = np.nan_to_num(_crop_pad(np.asarray(arch["mask"], float)), nan=0.0)
 
         wavg_levels = [int(v) for v in np.asarray(store["wavg_levels"])]
         widx = [levels.index(pl) for pl in wavg_levels]
-        # NO z_divisor here. Unlike `_ppvi_compute_keys`, which crops `z_e`
-        # straight off the dataset (still geopotential, m^2/s^2) and must
-        # divide, `store["z_3d"]` is written as `z_m_3d`, which was ALREADY
-        # divided at the point it was built. Dividing a second time made the
-        # ERA5 weights exp(-z/gH) instead of exp(-z/H) -- z/9.81 is ~1 km where
+        # NO z_divisor here. `store["z_3d"]` is written as `z_m_3d`, which was
+        # ALREADY divided at the point it was built -- unlike the `z` an
+        # inversion crops straight off the dataset, still geopotential
+        # [m^2/s^2]. Dividing a second time made the ERA5 weights
+        # exp(-z/gH) instead of exp(-z/H) -- z/9.81 is ~1 km where
         # the real height is ~10 km, so exp() barely varies and the vertical
         # average collapsed to nearly flat (measured: 0.394/0.333/0.273 correct
         # vs 0.339/0.334/0.327 shipped, 13.8% off the dominant weight). It also
@@ -3170,17 +2733,10 @@ class TendencyComputer:
         resumable) and the post-condition in compute_ppvi_for_event fail every
         single event.
         """
-        from .ppvi import PIECES
-        from .ppvi import scale_split
+        from .ppvi import spherical_engine as sph
 
-        if self.cfg.ppvi_pieces == "scale":
-            names: list = list(scale_split.PIECES_SCALE)
-            # Only a bounded domain has a wall; the sphere has no piece for it.
-            if self.cfg.ppvi_engine == "windowed":
-                names.append("wall")
-        else:
-            names = [self._WU_PLEVS[int(n) - 1] for n in PIECES]
-        return [f"u_rot_anom_ppvi_{n}_3d" for n in names]
+        return [f"u_rot_anom_ppvi_{n}_3d"
+                for n in sph.piece_keys(self.cfg.ppvi_pieces)]
 
     def compute_ppvi_for_event(
         self,
@@ -3189,19 +2745,14 @@ class TendencyComputer:
         lat0: float,
         lon0: float,
         base_ts: pd.Timestamp,
-        *,
-        inv_lon_half: float = 90.0,
     ) -> int:
         """Append piecewise PV-inversion rotational winds to NPZ files.
 
         For each ``dh`` in :attr:`cfg.rel_hours` this reads the **existing**
-        NPZ (produced by :meth:`process_event`), runs the piecewise PV
-        inversion -- on the closed sphere from the whole hemisphere with the
-        spherical engine (default), or with the windowed Wu chain on the
-        fixed 85.5°N → 10.5°N band and an event-centred longitude window of
-        half-width ``inv_lon_half`` -- then crops the resulting balanced
-        rotational winds back to the event patch and **appends** the new
-        fields in-place.
+        NPZ (produced by :meth:`process_event`), inverts the whole hemisphere
+        on the closed sphere, then crops the resulting balanced rotational
+        winds back to the event patch and **appends** the new fields
+        in-place.
 
         Only NPZs that already exist on disk are touched here; missing NPZs
         should be produced by :meth:`process_event` with ``also_ppvi=True``
@@ -3211,10 +2762,11 @@ class TendencyComputer:
         This **replaces** any superseded grouped-piece keys
         (``[uv]_rot_anom_{lower,middle,upper}(_3d)``) with the per-level
         decomposition. New keys (each also with a ``_3d`` variant), for each
-        Wu level ``L`` in 1000…100 hPa:
+        level ``L`` in 1000…100 hPa:
         ``u_rot_anom_ppvi_{L}``, ``v_rot_anom_ppvi_{L}``,
         plus ``u/v_rot_anom_residual_ppvi`` (observed − Σ of all per-level
-        pieces) and ``pv_anom_wu`` (Wu PV anomaly in SI, interior levels only).
+        pieces) and ``pv_anom_wu`` (the inverted PV anomaly in SI, interior
+        levels only).
 
         Returns the number of NPZ files updated.
         """
@@ -3255,7 +2807,7 @@ class TendencyComputer:
             self.cfg, base_ts, chunks={"valid_time": 1},
             var_list=["z", "t", "u", "v", "pv"])   # pv: archive-split keys
         cplev = _plev_name(clim_ds)
-        geom = self._ppvi_geom(ds, inv_lon_half)
+        geom = self._ppvi_geom(ds)
         dt_index = pd.to_datetime(ds.valid_time.values)
 
         updated = 0

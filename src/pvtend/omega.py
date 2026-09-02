@@ -46,7 +46,7 @@ import warnings
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
-from .constants import R_EARTH, OMEGA_E, R_DRY
+from .constants import R_EARTH, OMEGA_E, R_DRY, LAT_QG_POLAR as _LAT_QG_POLAR
 
 # Constants for geostrophic wind
 GEO_SMOOTH_SIGMA: float = 1.5   # Gaussian sigma in grid points
@@ -55,7 +55,7 @@ F_MIN_LAT: float = 5.0          # degrees — regularize |f| >= f(F_MIN_LAT)
 # Latitude taper constants for QG validity
 LAT_QG_LO: float = 15.0    # below this: omega_dry ≡ 0
 LAT_QG_HI: float = 25.0    # above this: full weight
-LAT_QG_POLAR: float = 85.0  # above this: taper to 0
+LAT_QG_POLAR: float = _LAT_QG_POLAR  # above this: taper to 0 (constants.py)
 
 
 def gaussian_smooth_2d(
@@ -826,6 +826,7 @@ def solve_qg_omega_sip(
     w_physical_max: float | None = None,
     retry_alpha: float | None = 0.5,
     retry_maxit: int | None = None,
+    forcing_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict]:
     """Solve the QG omega equation using the SIP (Strongly Implicit Procedure).
 
@@ -962,6 +963,22 @@ def solve_qg_omega_sip(
     if rhs_c is not None:
         rhs += rhs_c * lat_taper_full[None, :, None]
         terms_used = "ABC"
+
+    # --- 1c. Drop the forcing on below-ground cells ---
+    # A persisted temperature and wind under high terrain carry a step at
+    # the terrain seam; the thermal-wind shear across it forces the equation
+    # with line sources along plateau margins (4-18 Pa/s at 850 hPa over
+    # Greenland and Tibet) that are the fill, not weather. The forcing is
+    # zeroed there; the operator, the boundary values and every cell above
+    # ground are untouched.
+    masked_fraction = 0.0
+    if forcing_mask is not None:
+        forcing_mask = np.asarray(forcing_mask, dtype=bool)
+        if forcing_mask.shape != rhs.shape:
+            raise ValueError(
+                f"forcing_mask has shape {forcing_mask.shape}, expected {rhs.shape}")
+        rhs = np.where(forcing_mask, 0.0, rhs)
+        masked_fraction = float(forcing_mask.mean())
 
     # --- 1b. Local 3-D static stability σ(k,j,i) ---
     t_for_sigma = t_full if t_full is not None else t
@@ -1198,6 +1215,7 @@ def solve_qg_omega_sip(
         "diverged": bool(diverged),
         "first_iters": first_iters,
         "first_final_residual": first_res,
+        "forcing_masked_fraction": masked_fraction,
         "numba": _HAS_NUMBA,
         "solve_time": elapsed,
         "terms": terms_used,

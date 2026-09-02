@@ -19,7 +19,7 @@ F_MIN_LAT: float = 5.0            # Min latitude for f clamping [deg]
 GEO_SMOOTH_SIGMA: float = 1.5     # Gaussian smoothing sigma for geostrophic wind [grid pts]
 LAT_QG_LO: float = 15.0           # QG taper: zero below this [deg]
 LAT_QG_HI: float = 25.0           # QG taper: full above this [deg]
-LAT_QG_POLAR: float = 80.0        # QG taper: polar taper start [deg]
+LAT_QG_POLAR: float = 85.0        # QG taper: zero poleward of this [deg] (omega.lat_taper)
 
 # --- Default grid ---
 DEFAULT_LEVELS: list[int] = [1000, 850, 700, 500, 400, 300, 250, 200, 100]

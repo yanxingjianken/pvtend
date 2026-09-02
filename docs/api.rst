@@ -16,17 +16,14 @@ throughout the package, spatial cropping/interpolation utilities, and
 event-centred patch extraction.  Constants include Earth parameters,
 thermodynamic constants, and default level lists.
 
-:class:`GridProfile` bundles a regular lat-lon grid's metadata, the
-event-patch half-widths, and the Wu QG-inversion latitude band.  Two
-profiles ship: :data:`ERA5_1P5_NH` (the default, isotropic 1.5° NH grid)
-and :data:`CESM_F09` (the CESM2-LENS2 f09 global grid, anisotropic
+:class:`GridProfile` bundles a regular lat-lon grid's metadata with the
+event-patch half-widths and the height convention.  Two profiles ship:
+:data:`ERA5_1P5_NH` (the default, isotropic 1.5° NH grid) and
+:data:`CESM_F09` (the CESM2-LENS2 f09 global grid, anisotropic
 Δlat≈0.942°/Δlon=1.25°, with ``z`` as geopotential height).  It is config
-metadata: the inversion **solver**
-(:func:`~pvtend.ppvi.solver.invert_piecewise`) is grid-agnostic and the
-spectral operators (:mod:`pvtend.sh_ops`) are global, but the higher-level
-:class:`~pvtend.TendencyComputer` pipeline is still ERA5-specific — so f09
-end-to-end inversion goes through the solver API directly (see the
-``pv_inversion/wu_cesm`` closure test).
+metadata: the spectral operators (:mod:`pvtend.sh_ops`) and the piecewise
+PV inversion (:mod:`pvtend.ppvi`) are global and read the grid off the
+data.
 
 .. autosummary::
    :toctree: generated/
@@ -302,15 +299,17 @@ CLI::
 Piecewise PV inversion (PPVI)
 -----------------------------
 
-The :mod:`pvtend.ppvi` subpackage performs **Wu/Davis nonlinear-balance
-piecewise potential-vorticity inversion** and stores, in each event NPZ, the
-balanced rotational-wind anomaly induced by **each individual pressure level's**
-PV (or boundary-θ) anomaly.
+The :mod:`pvtend.ppvi` subpackage performs **nonlinear-balance piecewise
+potential-vorticity inversion** and stores, in each event NPZ, the balanced
+rotational-wind anomaly induced by **each individual pressure level's** PV (or
+boundary-θ) anomaly.
 
-The inversion uses the validated Davis–Emanuel (1991) / Wu serial
-Gauss–Seidel SOR cores (``pvpialln`` → ``qinvert21`` → ``qinvertp21``),
-transcribed verbatim into Fortran and compiled on demand with f2py
-(:mod:`pvtend.ppvi._ext`).  It runs on **9 Wu levels**
+The inversion is global.  :mod:`pvtend.ppvi.spherical` is a spectral
+Newton–Krylov solver for the Charney nonlinear balance on the closed sphere,
+vendored verbatim from ``pv_inversion_spherical``; :mod:`pvtend.ppvi.spherical_engine`
+is the adapter that puts an archive hemisphere on its Gaussian grid and brings
+the pieces back.  A closed domain has no lateral boundary, so no piece stands
+for one and the pole is an ordinary point.  It runs on **9 levels**
 :math:`[1000, 850, 700, 500, 400, 300, 250, 200, 100]` hPa.  The 1000 hPa
 (bottom) and 100 hPa (top) pieces are **Bretherton (1966) boundary-θ sheets**
 — a warm low-level θ′ is equivalent to a positive (cyclonic) PV sheet — while
@@ -318,59 +317,47 @@ levels 2–8 are interior PV.
 
 The rotational wind of each piece derives from its balanced streamfunction
 :math:`\psi` (:math:`u_\text{rot}=-\partial\psi/\partial y`,
-:math:`v_\text{rot}=\partial\psi/\partial x`).  Because the perturbation
-balance is **linear**, the per-level pieces sum **exactly** (to machine
-precision) to the full balanced field; the unbalanced remainder is stored as
-the ``residual``.
+:math:`v_\text{rot}=\partial\psi/\partial x`).  The perturbation problem is
+linearised about the midpoint of a quadratic system, so the pieces sum
+**exactly** (to machine precision) to the all-sources solve; the unbalanced
+remainder is stored as the ``residual``.
 
 **NPZ key contract** — for ``L`` in
 :math:`\{1000,850,700,500,400,300,250,200,100\}` hPa:
 
 * ``u_rot_anom_ppvi_{L}`` / ``v_rot_anom_ppvi_{L}`` (and ``_3d``) — rotational
+  wind induced by inverting *only* level ``L``'s PV/θ piece;
 * ``pv_anom_p(_3d)`` / ``pv_anom_e(_3d)`` — planetary/eddy split of the
   **archived** PV anomaly (scale mode; k1–4 zonal filter + near-centre
   object mask, seeded on the archive anomaly). ``p + e`` equals
   ``pv_anom(_3d)`` exactly on disk. ``pv_split_mask_3d`` (uint8) stores
   the object mask; ``ppvi_split_arch_{q_min,thresh}`` the contour
-  scalars. New in v2.17.
-  wind induced by inverting *only* level ``L``'s PV/θ piece;
+  scalars. New in v2.17;
 * ``u/v_rot_anom_residual_ppvi`` — observed minus :math:`\sum_L` pieces;
-* ``pv_anom_wu`` — the Wu PV anomaly that is inverted.
+* ``pv_anom_wu`` — the PV anomaly that is inverted;
+* ``u/v_rot_anom_sph`` — the engine's own observed rotational anomaly, which
+  the pieces close against exactly;
+* ``ppvi_*`` — the convergence record of the Newton iteration and its inner
+  solves, so a file that did not converge can be told from one that did
+  without reading a cube.
 
 PPVI is produced by :meth:`~pvtend.TendencyComputer.process_event` (``compute
 --with-ppvi``, on by default) and appended/replaced in existing NPZ by
 :meth:`~pvtend.TendencyComputer.compute_ppvi_for_event` (the ``ppvi`` CLI
 subcommand).
 
-:func:`~pvtend.ppvi.solver.invert_piecewise` is grid-agnostic: it accepts any
-regular grid, including **anisotropic** ones (Δlat≠Δlon, e.g. CESM f09 — the
-``zhdr`` spacings are reordered internally to the Fortran's HDR(5)=Δlon /
-HDR(6)=Δlat convention), and by default hydrostatically gap-fills below-ground
-NaN via :func:`~pvtend.ppvi.solver.fill_below_ground` (a no-op on already-filled
-ERA5 pressure-level data). On the isotropic, gap-free ERA5 path the output is
-byte-identical to earlier releases.
-
-.. currentmodule:: pvtend.ppvi.solver
-
-.. autosummary::
-   :toctree: generated/
-
-   invert_piecewise
-   fill_below_ground
-
-.. currentmodule:: pvtend.ppvi.winds
-
-.. autosummary::
-   :toctree: generated/
-
-   psi_to_winds
+The solver grid is its own: ``--ppvi-solver-grid NLAT NLON`` sets the Gaussian
+grid, and hence the truncation, independently of the archive grid the event is
+read from and cropped back onto.  Levels that lie below ground (CESM f09 under
+high terrain) are gap-filled hydrostatically before the state is prepared, a
+no-op on already-filled ERA5 pressure-level data.
 
 Two decompositions: the planetary/eddy scale split
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``--ppvi-pieces`` selects what the balanced field is decomposed *into*.
-``per_level`` (the default) gives the nine single-level pieces above.
-``scale`` instead gives **four**: ``surface``, ``lower``, and the upper levels
+``per_level`` gives the nine single-level pieces above.  ``scale`` (the
+default) instead gives **four**: ``surface``, ``lower``, and the upper levels
 split into a planetary part ``upper_p`` and an eddy part ``upper_e``.
 
 The planetary part is the zonal-wavenumber :math:`k\le4` PV anomaly *confined
@@ -397,7 +384,6 @@ asked for, so switching modes re-runs rather than silently skipping.
    seed_from_box_min
    component_containing
    zonal_filter
-   fill_seam_columns
 
 .. currentmodule:: pvtend
 

@@ -1,39 +1,18 @@
-"""Wu piecewise potential-vorticity inversion (PPVI) for pvtend.
+"""Piecewise potential-vorticity inversion (PPVI) for pvtend.
 
-This subpackage ports the Wu/Davis serial Gauss–Seidel SOR inversion
-solver (``pvpialln`` → ``qinvert21`` → ``qinvertp21``) into pure,
-I/O-free Fortran cores compiled with f2py into the ``_wuppvi`` extension.
+The inversion is global: the balanced rotational-wind anomaly of an event is
+attributed to its PV and boundary-θ sources on the closed sphere, so there is
+no lateral boundary and no piece standing for one.
 
-The extension is **built locally on the HPC host only** (it is not part of
-the pure-Python PyPI wheel).  It is imported lazily via :func:`load_ext`,
-so importing :mod:`pvtend` never requires the compiled module unless the
-``ppvi`` functionality is actually used.
-
-Public API
-----------
-- :func:`pvtend.ppvi.solver.invert_piecewise` — chain the three cores.
-- :func:`pvtend.ppvi.winds.psi_to_winds` — ψ → (u_rot, v_rot).
+Modules
+-------
+- :mod:`pvtend.ppvi.spherical` — the spectral Newton–Krylov solver, vendored
+  verbatim from ``pv_inversion_spherical`` (see ``spherical/VENDORED.md``);
+  it is re-copied from there rather than edited here.
+- :mod:`pvtend.ppvi.spherical_engine` — the adapter that puts an archive
+  hemisphere on the solver's grid and brings the pieces back.
+- :mod:`pvtend.ppvi.scale_split` — the planetary/eddy split of a PV anomaly
+  (zonal k1–4 inside the tracked object), pure numpy and independent of any
+  solver, used for the archived PV the NPZ records carry.
 """
 from __future__ import annotations
-
-from .solver import (
-    PR,
-    PIECES,
-    PassABParams,
-    PassCParams,
-    PassDParams,
-    invert_piecewise,
-    fill_below_ground,
-)
-from .winds import psi_to_winds
-
-__all__ = [
-    "PR",
-    "PIECES",
-    "PassABParams",
-    "PassCParams",
-    "PassDParams",
-    "invert_piecewise",
-    "fill_below_ground",
-    "psi_to_winds",
-]

@@ -7,12 +7,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-import xarray as xr
 
 from pvtend.tendency import (
     TendencyComputer,
     TendencyConfig,
-    _band_row_index,
     _circ_nearest_lon,
     load_climatology,
     month_keys_for_window,
@@ -175,117 +173,6 @@ class TestCrossTermCatalog:
             load_climatology(tmp_path / "no_such_dir" / "clim.nc")
 
 
-# ── PPVI inversion-band geometry ─────────────────────────────────────
-
-class TestPPVIBandGeometry:
-    """The Wu cores never receive latitudes — they rebuild row I's as
-    ``lat_n-(I-1)*dlat`` and key cos(phi) and the Coriolis f off that index.
-    Row 0 must therefore be the northernmost, whatever order the source file
-    happens to use. ERA5 is stored N->S and satisfies it for free; CESM f09 is
-    stored S->N, which fed the inversion an upside-down f and left every
-    cropped PPVI field 100 % NaN.
-    """
-
-    @staticmethod
-    def _ds(lat, dlon=1.25):
-        lon = np.arange(0.0, 360.0, dlon)
-        return xr.Dataset(coords={"latitude": lat, "longitude": lon,
-                                  "level": np.array([1000, 500, 100])})
-
-    # f09 NH subset as written by 07_isobaric_nh: ascending, 0.47 -> 90.
-    F09_LAT = 0.47120419 + np.arange(96) * (180.0 / 191.0)
-    # ERA5 1.5 deg NH: descending, 90 -> 0.
-    ERA5_LAT = np.arange(90.0, -0.1, -1.5)
-
-    def _geom(self, lat):
-        tc = TendencyComputer(TendencyConfig())
-        return tc._ppvi_geom(self._ds(lat), 90.0)
-
-    def test_ascending_grid_is_reordered_north_first(self):
-        g = self._geom(self.F09_LAT)
-        assert g["band_lats"][0] > g["band_lats"][-1], "band must run N->S"
-        assert g["ny"] == 80
-
-    def test_descending_grid_is_left_alone(self):
-        g = self._geom(self.ERA5_LAT)
-        assert g["band_lats"][0] > g["band_lats"][-1]
-        np.testing.assert_allclose(g["band_lats"][0], 85.5)
-
-    def test_band_latitudes_are_grid_latitudes(self):
-        """Reordering must permute the band, never resample it."""
-        for lat in (self.F09_LAT, self.ERA5_LAT):
-            g = self._geom(lat)
-            np.testing.assert_array_equal(np.sort(g["band_lats"]),
-                                          np.sort(lat[np.sort(g["band_idx"])]))
-
-    def test_zhdr_edges_match_actual_band(self):
-        """zhdr's span contract (lat_n-lat_s == (ny-1)*dlat) must hold, or
-        invert_piecewise refuses the header."""
-        for lat in (self.F09_LAT, self.ERA5_LAT):
-            g = self._geom(lat)
-            lat_s, lat_n, dlat, ny = (g["zhdr"][0], g["zhdr"][2],
-                                      g["zhdr"][4], int(g["zhdr"][7]))
-            assert abs((lat_n - lat_s) - (ny - 1) * dlat) < 0.5 * dlat
-
-
-class TestBandRowIndex:
-    """Regression for the all-NaN PPVI crop: patch rows are matched to band
-    rows by value, so neither ordering nor an off-nominal band edge can leave
-    the mapping empty.
-    """
-
-    DLAT = 180.0 / 191.0
-    BAND_DESC = (0.47120419 + np.arange(11, 91) * DLAT)[::-1]   # 85.29 -> 10.84
-
-    def _patch(self, ilat=66, pad=32):
-        lat = 0.47120419 + np.arange(96) * self.DLAT
-        out = np.full(2 * pad + 1, np.nan)
-        for j, k in enumerate(range(ilat - pad, ilat + pad + 1)):
-            if 0 <= k < lat.size:
-                out[j] = lat[k]
-        return out
-
-    def test_f09_patch_rows_are_matched(self):
-        """The bug: 0 of 62 finite rows matched, so the crop was pure NaN."""
-        row_for = _band_row_index(self._patch(), self.BAND_DESC, self.DLAT)
-        assert (row_for >= 0).sum() == 57
-
-    def test_rows_beyond_the_band_edge_are_unmatched(self):
-        lat_vec = self._patch()
-        unmatched = lat_vec[_band_row_index(lat_vec, self.BAND_DESC,
-                                            self.DLAT) < 0]
-        unmatched = unmatched[np.isfinite(unmatched)]
-        assert unmatched.min() > self.BAND_DESC[0], \
-            "only rows poleward of the band's north edge may go unmatched"
-
-    def test_no_two_patch_rows_share_a_band_row(self):
-        row_for = _band_row_index(self._patch(), self.BAND_DESC, self.DLAT)
-        hit = row_for[row_for >= 0]
-        assert hit.size == np.unique(hit).size
-
-    def test_matches_are_exact(self):
-        lat_vec = self._patch()
-        row_for = _band_row_index(lat_vec, self.BAND_DESC, self.DLAT)
-        m = row_for >= 0
-        np.testing.assert_array_equal(self.BAND_DESC[row_for[m]], lat_vec[m])
-
-    def test_ordering_agnostic(self):
-        """The same patch rows resolve to the same latitudes whichever way the
-        band is stored; only the row numbers differ."""
-        lat_vec = self._patch()
-        asc = self.BAND_DESC[::-1]
-        r_desc = _band_row_index(lat_vec, self.BAND_DESC, self.DLAT)
-        r_asc = _band_row_index(lat_vec, asc, self.DLAT)
-        np.testing.assert_array_equal(r_desc >= 0, r_asc >= 0)
-        m = r_desc >= 0
-        np.testing.assert_array_equal(self.BAND_DESC[r_desc[m]], asc[r_asc[m]])
-
-    def test_nan_patch_rows_are_unmatched(self):
-        lat_vec = np.array([np.nan, self.BAND_DESC[3], np.nan])
-        np.testing.assert_array_equal(
-            _band_row_index(lat_vec, self.BAND_DESC, self.DLAT), [-1, 3, -1])
-
-
 class TestPPVIPieceKeys:
     """The key set that ``--skip-existing`` tests and that
     ``compute_ppvi_for_event`` asserts on afterwards must follow the configured
@@ -306,37 +193,20 @@ class TestPPVIPieceKeys:
         assert "u_rot_anom_ppvi_1000_3d" in keys
 
     def test_scale_covers_the_four_scale_pieces(self):
-        """The spherical engine has no wall: a closed domain has no boundary
-        for a response to come from."""
+        """A closed domain has no boundary for a response to come from, so
+        there is no wall piece among them."""
         assert set(self._keys("scale")) == {
             "u_rot_anom_ppvi_surface_3d", "u_rot_anom_ppvi_lower_3d",
             "u_rot_anom_ppvi_upper_p_3d", "u_rot_anom_ppvi_upper_e_3d"}
-
-    def test_windowed_scale_adds_the_wall(self):
-        keys = TendencyComputer(TendencyConfig(
-            ppvi_pieces="scale", ppvi_engine="windowed"))._ppvi_piece_keys()
-        assert "u_rot_anom_ppvi_wall_3d" in keys
-        assert len(keys) == 5
 
     def test_scale_claims_no_per_level_key(self):
         """The exact confusion behind the bug."""
         assert "u_rot_anom_ppvi_250_3d" not in self._keys("scale")
 
-    def test_default_is_spherical_scale(self):
+    def test_default_is_scale(self):
         cfg = TendencyConfig()
-        assert cfg.ppvi_engine == "spherical"
         assert cfg.ppvi_pieces == "scale"
         assert self._keys("scale") == TendencyComputer(cfg)._ppvi_piece_keys()
-
-    def test_unknown_engine_is_refused_by_the_geometry(self):
-        import pytest
-        import xarray as xr
-        lat = np.arange(90.0, -0.1, -1.5)
-        ds = xr.Dataset(coords={"latitude": lat,
-                                "longitude": np.arange(0.0, 360.0, 1.5),
-                                "level": np.array([1000, 500, 100])})
-        with pytest.raises(ValueError, match="ppvi_engine"):
-            TendencyComputer(TendencyConfig(ppvi_engine="cartesian"))._ppvi_geom(ds, 90.0)
 
 
 class TestCircNearestLon:
@@ -454,10 +324,15 @@ class TestArchiveSplitKeys:
     def test_arch_keys_identity_and_shapes(self):
         """p + e == stored total exactly; mask uint8; wavg keys present."""
         import pvtend.tendency as T
+        from pvtend.ppvi import spherical_engine as sph
         ny, nx, nlev = 21, 33, 9
         levels = np.array([1000, 850, 700, 500, 400, 300, 250, 200, 100])
-        band_lats = 80.0 - np.arange(60) * 0.9375          # N->S band
-        lat_vec = 60.0 - np.arange(ny) * 0.9375            # patch rows in band
+        # f09 NH as the archive stores it: ascending, 0.47 -> 90.
+        lat_all = 0.47120419 + np.arange(96) * (180.0 / 191.0)
+        lon_all = np.arange(0.0, 360.0, 1.25)
+        axes = sph.hemisphere_axes(lat_all, lon_all)
+        ilat = int(np.abs(lat_all - 60.0).argmin())
+        lat_vec = lat_all[ilat - ny // 2:ilat + ny // 2 + 1][::-1]  # patch, N->S
         rng = np.random.default_rng(0)
         total = rng.standard_normal((nlev, ny, nx))
         store = dict(
@@ -469,11 +344,12 @@ class TestArchiveSplitKeys:
             z_3d=np.linspace(100, 16000, nlev)[:, None, None]
             * np.ones((nlev, ny, nx)),
         )
-        geom = dict(band_lats=band_lats, dlat=0.9375, dlon=1.25,
-                    lon_all=np.arange(0.0, 360.0, 1.25), nlon=288)
+        geom = dict(sph_axes=axes, dlat=180.0 / 191.0, dlon=1.25,
+                    lon_all=lon_all, nlon=288)
+        nring = len(axes.lat_nh)
         arch = dict(
-            q_p=rng.standard_normal((nlev, len(band_lats), 288)),
-            mask=(rng.random((nlev, len(band_lats), 288)) > 0.9),
+            q_p=rng.standard_normal((nlev, nring, 288)),
+            mask=(rng.random((nlev, nring, 288)) > 0.9),
             q_min=-5.0, thresh=-1.75)
         cfg = T.TendencyConfig(source="cesm", member=91)
         comp = T.TendencyComputer.__new__(T.TendencyComputer)

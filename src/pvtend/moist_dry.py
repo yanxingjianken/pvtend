@@ -88,14 +88,13 @@ def solve_chi_from_omega(
     if method in ("spectral", "sh"):
         from .sh_ops import invert_laplacian_sh, gradient_sh, _SPHARM_AVAILABLE
         if not _SPHARM_AVAILABLE:
-            import warnings
-            warnings.warn(
-                "pyspharm not installed; falling back to FD for "
-                "solve_chi_from_omega. Install via `pip install pvtend[sh]`.",
-                RuntimeWarning,
-                stacklevel=2,
+            raise RuntimeError(
+                "pyspharm/windspharm is not installed: the spectral Poisson "
+                "inverse is required for solve_chi_from_omega (the "
+                "finite-difference path is not pole-safe and is never taken "
+                "silently). Install via `pip install pvtend[sh]`, or pass "
+                "method='fd' explicitly."
             )
-            return _solve_chi_from_omega_fd(rhs_poisson, lat, lon)
 
         chi_out = np.zeros_like(omega)
         u_div_out = np.zeros_like(omega)

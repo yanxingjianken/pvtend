@@ -71,10 +71,10 @@ THRESH = None
 SEED_RADIUS_DEG = 20.0
 
 
-#: The four-piece decomposition, as 1-based Wu level indices. ``upper_p`` and
+#: The four-piece decomposition, as 1-based level indices. ``upper_p`` and
 #: ``upper_e`` cover the same levels; what separates them is the PV anomaly each
-#: is given (see :func:`split_at_box_minimum`), which is why the split has to go
-#: through ``invert_piecewise``'s ``qp_anoms`` rather than a level list.
+#: is given (see :func:`split_at_box_minimum`), which is why the split has to be
+#: handed to the inversion as a PV source and not as a level list.
 PIECES_SCALE: dict[str, list[int]] = {
     "surface": [1],
     "lower": [2, 3, 4],
@@ -89,33 +89,6 @@ PIECES_SCALE: dict[str, list[int]] = {
 #: level and carries the θ anomaly instead.
 UPPER_INTERIOR_IDX = [4, 5, 6, 7]
 TOP_IDX = 8
-
-
-def fill_seam_columns(q: np.ndarray) -> np.ndarray:
-    """Interpolate across the two flagged columns at the wrap seam.
-
-    ``pvpialln`` stamps Wu's missing-value flag on all four lateral boundaries
-    of its window (``wuppvi.f:93-102``), so a pass run over the **whole**
-    longitude circle comes back with its first and last columns flagged — and
-    those two are *adjacent*, across the dateline. Differencing event against
-    mean turns both into exact zeros, and :func:`zonal_filter`, which requires
-    its last axis to span 360°, then transforms across a full-amplitude notch
-    and reports planetary amplitude that is not in the field.
-
-    Fills them from their circular neighbours (columns 1 and −2, three grid
-    steps apart the short way). Latitude boundaries get no equivalent: they are
-    genuine domain edges, not a seam, so an object touching the top or bottom of
-    the inversion band simply cannot be masked there.
-
-    Operates on the last axis. Returns a copy.
-    """
-    q = np.array(q, dtype=float, copy=True)
-    if q.shape[-1] < 4:
-        return q
-    east, west = q[..., 1], q[..., -2]          # nearest valid either side
-    q[..., -1] = west + (east - west) / 3.0
-    q[..., 0] = west + (east - west) * (2.0 / 3.0)
-    return q
 
 
 def zonal_filter(field: np.ndarray, kmin: int = KMIN, kmax: int = KMAX) -> np.ndarray:

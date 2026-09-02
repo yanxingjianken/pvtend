@@ -7,14 +7,15 @@ per-track maximum exceeds the per-field threshold in any scanned field.
 
 Three field groups (select with --fields):
 
-  ppvi     max_abs_{u,v}_rot_anom_ppvi_{surface,lower,upper_p,upper_e,wall}
+  ppvi     max_abs_{u,v}_rot_anom_ppvi_{surface,lower,upper_p,upper_e}
            max_abs_{u,v}_rot_anom_residual_ppvi
            Peak magnitude of each PPVI piece and of the inversion residual,
-           over all 9 levels. Catches a diverged SOR solve, which the solver
-           reports no error for and which otherwise enters the composites as
-           a plausible-looking field. Cut 300 m/s (real events: p99.9 =
-           221 m/s; diverged solves: 8 000-24 000 m/s). NPZs written before
-           these scalars existed fall back to reducing the cubes.
+           over all 9 levels. Catches an inversion that did not converge,
+           which the solver reports no error for and which otherwise enters
+           the composites as a plausible-looking field. Cut 300 m/s (real
+           events: p99.9 = 221 m/s; diverged solves: 8 000-24 000 m/s). NPZs
+           written before these scalars existed fall back to reducing the
+           cubes.
 
   omega    max_abs_w_{adiabatic,diabatic,qg_diabatic,lhr_moist}
            All-level solver-omega maxima (falls back to the legacy
@@ -70,27 +71,21 @@ _DIV_FIELDS = {
     for c in ("u", "v") for b, t in _DIV_THRESH.items()
 }
 #: PPVI piece and residual fields, checked as whole cubes rather than as
-#: embedded scalars: a diverged SOR solve reports no error and writes a
-#: complete-looking NPZ, so the only signal is the magnitude itself. The cut is
-#: far above any balanced wind — measured over the CESM 6-hourly blocking-peak
-#: store, the all-level p99.9 of real events is 221 m/s, while the diverged
-#: solves reach 8 000–24 000 m/s.
+#: embedded scalars: an inversion that did not converge reports no error and
+#: writes a complete-looking NPZ, so the only signal is the magnitude itself.
+#: The cut is far above any balanced wind — measured over the CESM 6-hourly
+#: blocking-peak store, the all-level p99.9 of real events is 221 m/s, while
+#: the diverged solves reach 8 000–24 000 m/s.
 _PPVI_BLOWUP_MS = 300.0
-_PPVI_PARTS = ("surface", "lower", "upper_p", "upper_e", "wall")
-#: Pieces a store may lack without being incomplete: the ``wall`` piece exists
-#: only for the windowed engine, since only a bounded domain has a wall; the
-#: spherical engine (the default since v2.22) writes no such key.
-_PPVI_OPTIONAL_PARTS = ("wall",)
-_OPTIONAL_KEYS = {
-    f"max_abs_{c}_rot_anom_ppvi_{p}" for c in ("u", "v") for p in _PPVI_OPTIONAL_PARTS
-}
+_PPVI_PARTS = ("surface", "lower", "upper_p", "upper_e")
 #: SIP convergence of the three omega solves (v2.23+): the residual ratio the
 #: solver finished with. A converged solve sits at 1e-11 or below; a solve that
 #: diverged and could not be rescued by the alpha retry is above one. Stores
 #: written before v2.23 have no such scalar and are not counted as lacking it.
 _SIP_BRANCHES = ("adiabatic", "qg_diabatic", "lhr_moist")
 _SIP_FIELDS = {f"omega_sip_final_residual_{b}": 1e-6 for b in _SIP_BRANCHES}
-_OPTIONAL_KEYS |= set(_SIP_FIELDS)
+#: Keys a store may lack without being counted as incomplete.
+_OPTIONAL_KEYS = set(_SIP_FIELDS)
 _PPVI_FIELDS = {
     **{f"max_abs_{c}_rot_anom_ppvi_{p}": _PPVI_BLOWUP_MS
        for c in ("u", "v") for p in _PPVI_PARTS},

@@ -307,14 +307,12 @@ def second_derivs(
     if method in ("spectral", "sh"):
         from .sh_ops import second_derivs_sh, _SPHARM_AVAILABLE
         if not _SPHARM_AVAILABLE:
-            import warnings
-            warnings.warn(
-                "pyspharm not installed; falling back to method='fd' for "
-                "second_derivs. Install via `pip install pvtend[sh]`.",
-                RuntimeWarning,
-                stacklevel=2,
+            raise RuntimeError(
+                "pyspharm/windspharm is not installed: the spectral second "
+                "derivatives are required (the finite-difference path is not "
+                "pole-safe and is never taken silently). Install via `pip "
+                "install pvtend[sh]`, or pass method='fd' explicitly."
             )
-            method = "fd"
         else:
             if field.ndim == 3:
                 fxx = np.empty_like(field, dtype=np.float64)

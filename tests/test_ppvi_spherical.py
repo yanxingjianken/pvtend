@@ -58,9 +58,9 @@ class TestCrop:
     LAT_NH = np.arange(0.0, 90.1, 5.0)   # 19 rows
     LON = np.arange(0.0, 360.0, 5.0)     # 72 columns
 
-    def test_rows_by_value_columns_by_index_nan_past_the_pole(self):
+    def test_rows_by_value_columns_by_index(self):
         field = (self.LAT_NH[:, None] * 1000.0 + self.LON[None, :])[None]
-        # A patch stored north to south whose first two rows lie past the pole.
+        # A patch stored north to south whose first two rows are off the grid.
         lat_vec = np.array([np.nan, np.nan, 90.0, 85.0, 80.0, 75.0])
         row_for = sph.patch_row_index(lat_vec, self.LAT_NH, 5.0)
         np.testing.assert_array_equal(row_for, [-1, -1, 18, 17, 16, 15])
@@ -70,6 +70,27 @@ class TestCrop:
         assert np.isnan(out[0, :2]).all()
         np.testing.assert_array_equal(out[0, 2], 90000.0 + np.array([350, 355, 0, 5, 10]))
         np.testing.assert_array_equal(out[0, 5], 75000.0 + np.array([350, 355, 0, 5, 10]))
+
+    def test_rows_past_the_pole_read_the_antimeridian_and_change_sign(self):
+        """A row at nominal 95 N is the grid row at 85 N, half a turn away."""
+        field = (self.LAT_NH[:, None] * 1000.0 + self.LON[None, :])[None]
+        lat_vec = np.array([100.0, 95.0, 90.0, 85.0])          # north first
+        row_for = sph.patch_row_index(
+            np.where(lat_vec > 90.0, 180.0 - lat_vec, lat_vec), self.LAT_NH, 5.0)
+        np.testing.assert_array_equal(row_for, [16, 17, 18, 17])
+        near = np.array([0, 1, 2])
+        far = (near + self.LON.size // 2) % self.LON.size
+        past = lat_vec > 90.0
+        cols = np.where(past[:, None], far[None, :], near[None, :])
+        sign = np.where(past, -1.0, 1.0)
+        scalar = sph.crop_to_patch(field, row_for, cols)
+        vector = sph.crop_to_patch(field, row_for, cols, sign)
+        # 80 N at longitudes 180, 185, 190 -- the far side of 0, 5, 10.
+        np.testing.assert_array_equal(scalar[0, 0], 80000.0 + np.array([180, 185, 190]))
+        np.testing.assert_array_equal(vector[0, 0], -scalar[0, 0])
+        # The rows this side of the pole are untouched by either.
+        np.testing.assert_array_equal(scalar[0, 3], 85000.0 + np.array([0, 5, 10]))
+        np.testing.assert_array_equal(vector[0, 3], scalar[0, 3])
 
     def test_off_grid_row_is_unmatched(self):
         row_for = sph.patch_row_index(np.array([42.0, 40.0]), self.LAT_NH, 5.0)
@@ -147,10 +168,15 @@ class TestSphericalKeys:
         # centre, north first on this archive, NaN past the pole.
         ilat = int(np.argmin(np.abs(self.LAT - center_lat)))
         pad = (yp - 1) // 2
+        # Rows past the pole carry their nominal latitude, 90 + m*dlat, as
+        # the patch builder writes them; the continuation reads the mirrored
+        # row on the antimeridian.
         lat_vec = np.full(yp, np.nan)
         for j, k in enumerate(range(ilat - pad, ilat + pad + 1)):
             if 0 <= k < self.LAT.size:
                 lat_vec[j] = self.LAT[k]
+            elif k < 0:
+                lat_vec[j] = 90.0 - k * 5.0
         rng = np.random.default_rng(0)
         return {
             "center_lat": np.float64(center_lat),
@@ -163,20 +189,22 @@ class TestSphericalKeys:
 
     def _run(self, pieces, center_lat=80.0, center_lon=357.5):
         cfg = TendencyConfig(
-            source="era5", ppvi_engine="spherical", ppvi_pieces=pieces,
+            source="era5", ppvi_pieces=pieces,
             ppvi_solver_nlat=32, ppvi_solver_nlon=64, ppvi_lmax=20,
             ppvi_newton_max_steps=3,
         )
         tc = TendencyComputer(cfg)
         ds = _event_ds(self.LAT, self.LON, self.TS, vortex=(center_lat, center_lon))
         clim = _clim_ds(self.LAT, self.LON, self.TS)
-        geom = tc._ppvi_geom(ds, 90.0)
+        geom = tc._ppvi_geom(ds)
         yp, xp = 13, 25                      # +-30 x +-60 degrees at 5 degrees
         store = self._store(center_lat, center_lon, yp, xp)
         new = tc._ppvi_compute_keys(store, self.TS, ds, clim, _plev_name(clim), geom)
         return tc, store, new
 
-    def test_scale_pieces_close_on_the_record_and_blank_past_the_pole(self):
+    def test_scale_pieces_close_on_the_record_across_the_pole(self):
+        """The event sits at 80 N, so four rows of its patch lie past the pole
+        and the fifth is the pole itself: all of them carry data."""
         tc, store, new = self._run("scale")
         for key in tc._ppvi_piece_keys():
             assert key in new
@@ -185,21 +213,16 @@ class TestSphericalKeys:
         summed = sum(new[f"u_rot_anom_ppvi_{p}_3d"] for p in pieces)
         resid = new["u_rot_anom_residual_ppvi_3d"]
         assert resid.shape == (len(WU), 13, 25)
-        # Rows 0-3 lie past the pole, row 4 is the pole itself: no components.
-        assert np.isnan(resid[:, :5, :]).all()
-        finite = np.isfinite(resid)
-        assert finite[:, 5:, :].all()
-        np.testing.assert_array_equal(
-            resid[finite], (store["u_rot_anom_3d"] - summed)[finite])
+        assert np.isfinite(resid).all()
+        np.testing.assert_array_equal(resid, store["u_rot_anom_3d"] - summed)
         # The engine's own anomaly and its column average are delivered.
-        assert np.isfinite(new["u_rot_anom_sph_3d"][:, 5:, :]).all()
+        assert np.isfinite(new["u_rot_anom_sph_3d"]).all()
         assert new["u_rot_anom_sph"].shape == (13, 25)
-        assert np.isnan(new["u_rot_anom_sph"][:5]).all()
-        assert np.isfinite(new["u_rot_anom_sph"][5:]).all()
-        # Potential vorticity: interior levels only.
+        assert np.isfinite(new["u_rot_anom_sph"]).all()
+        # Potential vorticity: interior levels only, every row.
         pv = new["pv_anom_wu_3d"]
         assert np.isnan(pv[0]).all() and np.isnan(pv[-1]).all()
-        assert np.isfinite(pv[1:-1, 5:, :]).all()
+        assert np.isfinite(pv[1:-1]).all()
         # The convergence record.
         assert str(new["ppvi_engine"]) == "spherical"
         assert str(new["ppvi_pieces"]) == "scale"
@@ -223,12 +246,4 @@ class TestSphericalKeys:
         engine = tc._sph_engine
         assert engine is not None
         ds = _event_ds(self.LAT, self.LON, self.TS)
-        assert tc._spherical_engine(tc._ppvi_geom(ds, 90.0)["sph_axes"]) is engine
-
-    def test_nested_is_refused_on_the_sphere(self):
-        cfg = TendencyConfig(ppvi_engine="spherical", ppvi_pieces="scale", ppvi_nested=True)
-        tc = TendencyComputer(cfg)
-        ds = _event_ds(self.LAT, self.LON, self.TS)
-        geom = tc._ppvi_geom(ds, 90.0)
-        with pytest.raises(ValueError, match="windowed engine only"):
-            tc._ppvi_compute_keys({}, self.TS, ds, ds, "level", geom)
+        assert tc._spherical_engine(tc._ppvi_geom(ds)["sph_axes"]) is engine

@@ -48,24 +48,15 @@ def _add_ppvi_pieces_arg(p: argparse.ArgumentParser) -> None:
     """The PPVI flags shared by ``compute`` and ``ppvi``.
 
     The two subcommands must offer the same choices or a catalogue could be
-    started with one engine or decomposition and appended to in another.
+    started with one decomposition and appended to in another.
     """
-    p.add_argument(
-        "--ppvi-engine", choices=("spherical", "windowed"), default="spherical",
-        help="Which inversion solves the pieces.  'spherical' (default) "
-             "inverts on the closed sphere with the spectral Newton-Krylov "
-             "solver: no lateral wall and no 'wall' piece, ordinary points at "
-             "the pole, float64.  'windowed' is the Wu/Davis Fortran "
-             "relaxation on the fixed 10.5-85.5N band with an event-centred "
-             "longitude window, which stores a 'wall' piece.",
-    )
     p.add_argument(
         "--ppvi-pieces", choices=("per_level", "scale"), default="scale",
         help="How to split the PV/theta anomaly before inverting.  "
              "'scale' (default) gives four pieces surface / lower / upper_p / "
              "upper_e, splitting the upper levels into a planetary (zonal "
              "k<=4, inside the tracked object) and an eddy part.  'per_level' "
-             "gives one piece per Wu level, keys u/v_rot_anom_ppvi_{1000..100}. "
+             "gives one piece per level, keys u/v_rot_anom_ppvi_{1000..100}. "
              "The two write different keys — do not mix them within one "
              "output directory.",
     )
@@ -79,22 +70,6 @@ def _add_ppvi_pieces_arg(p: argparse.ArgumentParser) -> None:
         "--ppvi-newton-max-steps", type=int, default=60,
         help="Cap on the spherical engine's Newton iteration (default 60; "
              "real events take 4-10).",
-    )
-    p.add_argument(
-        "--ppvi-nested", action=argparse.BooleanOptionalAction, default=False,
-        help="Nested lateral boundary conditions for the scale pieces "
-             "(requires --ppvi-pieces scale): solve the pieces first on a "
-             "zonally wider window (ibc=1 + wall), then feed each outer "
-             "corrected piece to the event window as that piece's ibc=2 "
-             "boundary values.  The stored 'wall' piece becomes the smaller "
-             "remainder the outer window could not attribute.  Roughly "
-             "doubles the PPVI cost per event.",
-    )
-    p.add_argument(
-        "--ppvi-nested-lon-margin", type=float, default=60.0,
-        help="Extra zonal half-width of the outer nesting window, degrees "
-             "per side (default 60: a +-90 deg event window nests inside "
-             "+-150 deg).",
     )
 
 
@@ -187,8 +162,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     compute.add_argument(
         "--with-ppvi", action=argparse.BooleanOptionalAction, default=True,
-        help="Also compute the per-level Wu piecewise PV-inversion rotational "
-             "winds (u/v_rot_anom_ppvi_{L}) in each NPZ written from scratch "
+        help="Also compute the piecewise PV-inversion rotational winds "
+             "(u/v_rot_anom_ppvi_*) in each NPZ written from scratch "
              "(default: enabled).  Use --no-with-ppvi to skip.",
     )
     compute.add_argument(
@@ -201,7 +176,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── ppvi ─────────────────────────────────────────────────────
     ppvi = sub.add_parser(
         "ppvi",
-        help="Add Wu piecewise PV-inversion rotational winds to NPZ files: "
+        help="Add piecewise PV-inversion rotational winds to NPZ files: "
              "append in-place to existing NPZ, or write base + PPVI "
              "together for missing NPZ.",
     )
@@ -246,11 +221,6 @@ def _build_parser() -> argparse.ArgumentParser:
     ppvi.add_argument(
         "--dh-range", type=str, default="-12:13:1",
         help="Hour offsets as start:stop[:step]  (default: -12:13:1).",
-    )
-    ppvi.add_argument(
-        "--inv-lon-half", type=float, default=90.0,
-        help="Inversion longitude half-width in degrees (default: 90 → "
-             "NX=121). The latitude band is fixed at 85.5N→10.5N (NY=51).",
     )
     ppvi.add_argument(
         "--center-mode", choices=["eulerian", "lagrangian"],
@@ -546,13 +516,9 @@ def _process_one_event(arg_tuple):
         return 0
 
 
-# Inversion longitude half-width for the ppvi worker (set per-run).
-_WORKER_INV_LON_HALF = 90.0
-
-
-def _init_ppvi_worker(cfg, inv_lon_half):
+def _init_ppvi_worker(cfg):
     """Pool initializer for the ppvi subcommand (persistent computer)."""
-    global _WORKER_CFG, _WORKER_INV_LON_HALF, _WORKER_COMPUTER
+    global _WORKER_CFG, _WORKER_COMPUTER
     try:
         from threadpoolctl import threadpool_limits
         threadpool_limits(1)
@@ -571,7 +537,6 @@ def _init_ppvi_worker(cfg, inv_lon_half):
     except Exception:
         pass
     _WORKER_CFG = cfg
-    _WORKER_INV_LON_HALF = inv_lon_half
     from pvtend.tendency import TendencyComputer
     _WORKER_COMPUTER = TendencyComputer(cfg)
     try:  # warm the climatology once per worker (small-chunked for PPVI so
@@ -586,15 +551,13 @@ def _ppvi_one_event(arg_tuple):
     evt_name, track_id, lat0, lon0, base_ts = arg_tuple
     try:
         return _ppvi_run_event(
-            _WORKER_COMPUTER, evt_name, track_id, lat0, lon0, base_ts,
-            _WORKER_INV_LON_HALF)
+            _WORKER_COMPUTER, evt_name, track_id, lat0, lon0, base_ts)
     except Exception as exc:
         print(f"    ERROR [{track_id} {evt_name}]: {exc}", flush=True)
         return 0
 
 
-def _ppvi_run_event(computer, evt_name, track_id, lat0, lon0, base_ts,
-                    inv_lon_half):
+def _ppvi_run_event(computer, evt_name, track_id, lat0, lon0, base_ts):
     """Run PPVI for one event: append to existing NPZ, write-together fresh.
 
     1. ``compute_ppvi_for_event`` appends the PPVI fields to any base NPZ
@@ -609,16 +572,13 @@ def _ppvi_run_event(computer, evt_name, track_id, lat0, lon0, base_ts,
     if not computer.cfg.skip_existing:
         return computer.process_event(
             evt_name=evt_name, track_id=track_id,
-            lat0=lat0, lon0=lon0, base_ts=base_ts,
-            also_ppvi=True, inv_lon_half=inv_lon_half)
+            lat0=lat0, lon0=lon0, base_ts=base_ts, also_ppvi=True)
     n = computer.compute_ppvi_for_event(
         evt_name=evt_name, track_id=track_id,
-        lat0=lat0, lon0=lon0, base_ts=base_ts,
-        inv_lon_half=inv_lon_half)
+        lat0=lat0, lon0=lon0, base_ts=base_ts)
     n += computer.process_event(
         evt_name=evt_name, track_id=track_id,
-        lat0=lat0, lon0=lon0, base_ts=base_ts,
-        also_ppvi=True, inv_lon_half=inv_lon_half)
+        lat0=lat0, lon0=lon0, base_ts=base_ts, also_ppvi=True)
     return n
 
 
@@ -627,7 +587,7 @@ def _run_resilient_pool(event_args, n_workers, initializer, initargs,
                         unit="NPZ", max_tasks_per_child=None):
     """Run ``worker_fn`` over ``event_args`` in a fault-tolerant process pool.
 
-    A single worker dying (e.g. a C-level segfault in the Fortran Wu solver
+    A single worker dying (e.g. a C-level segfault in a compiled kernel
     that Python cannot catch) marks a :class:`ProcessPoolExecutor` as
     *broken* and poisons **every** outstanding future.  A naive
     ``future.result()`` loop therefore aborts the whole run on the first bad
@@ -880,13 +840,10 @@ def _cmd_compute(args: argparse.Namespace) -> None:
         center_mode=args.center_mode,
         skip_existing=args.skip_existing,
         n_workers=args.n_workers,
-        ppvi_engine=args.ppvi_engine,
         ppvi_pieces=args.ppvi_pieces,
         ppvi_solver_nlat=int(args.ppvi_solver_grid[0]),
         ppvi_solver_nlon=int(args.ppvi_solver_grid[1]),
         ppvi_newton_max_steps=int(args.ppvi_newton_max_steps),
-        ppvi_nested=args.ppvi_nested,
-        ppvi_nested_lon_margin=args.ppvi_nested_lon_margin,
         clim_helmholtz_dir=(
             args.clim_helmholtz_dir
             if args.clim_helmholtz_dir is not None
@@ -904,17 +861,10 @@ def _cmd_compute(args: argparse.Namespace) -> None:
     print(f"[pvtend] Processing {len(event_args)} events, "
           f"dh={dh_values[0]}..{dh_values[-1]}, qg_method={qg}, "
           f"ppvi={'on' if args.with_ppvi else 'off'} "
-          f"({args.ppvi_engine}, {args.ppvi_pieces})")
+          f"({args.ppvi_pieces})")
 
     if config.n_workers > 1:
         _pin_threads_for_pool()
-        if args.with_ppvi and args.ppvi_engine == "windowed":
-            # Build the f2py extension once in the parent; otherwise every
-            # spawned worker races to build into the same directory on the
-            # first run after a wuppvi.f change.  The spherical engine is
-            # pure Python and needs no build.
-            from pvtend.ppvi._ext import load_ext
-            load_ext()
         print(f"[pvtend] Using {config.n_workers} parallel workers "
               f"(fault-tolerant pool)")
         n_total, _quarantined = _run_resilient_pool(
@@ -970,13 +920,10 @@ def _cmd_ppvi(args: argparse.Namespace) -> None:
         center_mode=args.center_mode,
         skip_existing=args.skip_existing,
         n_workers=args.n_workers,
-        ppvi_engine=args.ppvi_engine,
         ppvi_pieces=args.ppvi_pieces,
         ppvi_solver_nlat=int(args.ppvi_solver_grid[0]),
         ppvi_solver_nlon=int(args.ppvi_solver_grid[1]),
         ppvi_newton_max_steps=int(args.ppvi_newton_max_steps),
-        ppvi_nested=args.ppvi_nested,
-        ppvi_nested_lon_margin=args.ppvi_nested_lon_margin,
         clim_helmholtz_dir=(
             args.clim_helmholtz_dir
             if args.clim_helmholtz_dir is not None
@@ -993,8 +940,7 @@ def _cmd_ppvi(args: argparse.Namespace) -> None:
 
     print(f"[pvtend] PPVI for {len(event_args)} events, "
           f"dh={dh_values[0]}..{dh_values[-1]}, "
-          f"engine={args.ppvi_engine}, pieces={args.ppvi_pieces}, "
-          f"inv_lon_half={args.inv_lon_half}")
+          f"pieces={args.ppvi_pieces}")
 
     if config.n_workers > 1:
         _pin_threads_for_pool()
@@ -1002,7 +948,7 @@ def _cmd_ppvi(args: argparse.Namespace) -> None:
               f"(fault-tolerant pool)")
         n_total, _quarantined = _run_resilient_pool(
             event_args, config.n_workers,
-            _init_ppvi_worker, (config, args.inv_lon_half),
+            _init_ppvi_worker, (config,),
             _ppvi_one_event,
             failures_path=args.out_dir / "ppvi_failures.txt",
             unit="NPZ",
@@ -1018,8 +964,7 @@ def _cmd_ppvi(args: argparse.Namespace) -> None:
                   f"track_id={track_id}  {evt_name}  {base_ts}")
             try:
                 n_total += _ppvi_run_event(
-                    computer, evt_name, track_id, lat0, lon0, base_ts,
-                    args.inv_lon_half)
+                    computer, evt_name, track_id, lat0, lon0, base_ts)
             except Exception as exc:
                 print(f"    ERROR: {exc}")
                 continue

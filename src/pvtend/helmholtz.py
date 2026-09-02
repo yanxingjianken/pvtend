@@ -538,16 +538,13 @@ def helmholtz_decomposition(
     if method in ("spectral", "sh", "spherical-harmonics"):
         from .sh_ops import helmholtz_sh, _SPHARM_AVAILABLE
         if not _SPHARM_AVAILABLE:
-            import warnings
-            warnings.warn(
-                "pyspharm/windspharm not installed; falling back to "
-                "method='fd'. Install via `pip install pvtend[sh]` or "
-                "`micromamba install -c conda-forge windspharm pyspharm` "
-                "to use the SH backend.",
-                RuntimeWarning,
-                stacklevel=2,
+            raise RuntimeError(
+                "pyspharm/windspharm is not installed: the spectral Helmholtz "
+                "decomposition is required (the finite-difference path is not "
+                "pole-safe and is never taken silently). Install via `pip "
+                "install pvtend[sh]` or `micromamba install -c conda-forge "
+                "windspharm pyspharm`, or pass method='fd' explicitly."
             )
-            return _helmholtz_decomposition_fd(u, v, lat, lon, R_earth=R_earth)
         kw = dict(solver_kw or {})
         return helmholtz_sh(u, v, lat, lon, R_earth=R_earth, **kw)
 

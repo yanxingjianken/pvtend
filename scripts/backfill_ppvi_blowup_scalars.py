@@ -34,7 +34,7 @@ from pathlib import Path
 
 import numpy as np
 
-PARTS = ("surface", "lower", "upper_p", "upper_e", "wall")
+PARTS = ("surface", "lower", "upper_p", "upper_e")
 SENTINEL = "max_abs_u_rot_anom_ppvi_surface"
 
 
