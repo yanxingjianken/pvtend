@@ -75,21 +75,13 @@ def zonal_filter(
     """
     if not 0 <= kmin <= kmax:
         raise ValueError(f"need 0 <= kmin <= kmax, got {kmin}, {kmax}")
-    single = field.ndim == 2
-    stack = field[None] if single else field
-    out = np.stack(
-        [
-            ops.synth(_band(ops.analyze(stack[k]), kmin, kmax))
-            for k in range(stack.shape[0])
-        ]
-    )
-    return out[0] if single else out
+    return ops.synth(_band(ops.analyze(field), kmin, kmax))
 
 
 def _band(spec: np.ndarray, kmin: int, kmax: int) -> np.ndarray:
     keep = np.zeros_like(spec)
     upper = min(kmax, spec.shape[-2] - 1)
-    keep[kmin : upper + 1, :] = spec[kmin : upper + 1, :]
+    keep[..., kmin : upper + 1, :] = spec[..., kmin : upper + 1, :]
     return keep
 
 

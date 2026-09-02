@@ -57,10 +57,13 @@ def streamfunction_ghost(
     convention -- the operator's right-hand side, the nonlinear residual, and the
     reconstruction of the boundary levels -- and any two of them disagreeing leaves
     a balanced state failing its own equations.
+
+    ``theta`` may carry leading axes; each of its grids then gets its own area
+    mean, which is what a column of ghosts needs.
     """
     zonal = theta.mean(axis=-1)
-    mean = float(np.sum(weights * zonal) / np.sum(weights))
-    return (theta - mean) / f
+    mean = np.sum(weights * zonal, axis=-1) / np.sum(weights)
+    return (theta - mean[..., None, None]) / f
 
 
 class VerticalOperator:

@@ -106,15 +106,16 @@ class FrozenState:
             (ops.grid.nlat, ops.grid.nlon),
         ).copy()
 
-        zeta = np.stack([ops.synth(ops.lap(psi_spec[k])) for k in interior])
-        phi_grid = np.stack([ops.synth(phi_spec[k]) for k in range(nlev)])
-        stb = np.stack(
-            [
-                levels.bl[k] * phi_grid[k - 1]
-                + levels.bb[k] * phi_grid[k]
-                + levels.bh[k] * phi_grid[k + 1]
-                for k in interior
-            ]
+        zeta = ops.synth(ops.lap(psi_spec[interior]))
+        phi_grid = ops.synth(phi_spec)
+        below, here, above = (
+            weight[interior].reshape(-1, 1, 1)
+            for weight in (levels.bl, levels.bb, levels.bh)
+        )
+        stb = (
+            below * phi_grid[interior - 1]
+            + here * phi_grid[interior]
+            + above * phi_grid[interior + 1]
         )
 
         # The equatorial taper.  Only the coefficients are tapered, never the
@@ -136,7 +137,7 @@ class FrozenState:
         zeta = weight[None] * zeta
         self.stb_limit = self._area_mean(stb).reshape(-1, 1, 1)
         stb = self.stb_limit + weight[None] * (stb - self.stb_limit)
-        self.psi_ref_spec = np.stack([psi_spec[k] for k in interior])
+        self.psi_ref_spec = psi_spec[interior]
 
         avo = self.f_grid[None, :, :] + zeta
         self.avo, avo_hit = self._floor(avo, self.clamps.avo_min)
@@ -156,9 +157,7 @@ class FrozenState:
         # limited-area code's clamp on its balance-equation coefficient; the
         # vorticity part, which is what gradient-wind balance lives on, is kept.
         if deformation_limit is None:
-            deform = np.stack(
-                [self._deformation_magnitude(psi_spec[k]) for k in interior]
-            )
+            deform = self._deformation_magnitude(psi_spec[interior])
             margin = self.clamps.deformation_margin
             denom = weight[None] * deform
             allowed = (1.0 - margin) * self.avo
@@ -178,8 +177,8 @@ class FrozenState:
         # derivatives of the reference state, tapered on the same band.
         dpsi = self._d_dpi_reference(psi_spec)
         dphi = self._d_dpi_reference(phi_spec)
-        self.dpsi_x, self.dpsi_y = self._grad_stack(dpsi)
-        self.dphi_x, self.dphi_y = self._grad_stack(dphi)
+        self.dpsi_x, self.dpsi_y = self.ops.grad(dpsi)
+        self.dphi_x, self.dphi_y = self.ops.grad(dphi)
         for arr in (self.dpsi_x, self.dpsi_y, self.dphi_x, self.dphi_y):
             arr *= weight[None]
 
@@ -209,11 +208,9 @@ class FrozenState:
     def _d_dpi_reference(self, spec: np.ndarray) -> np.ndarray:
         """Centred ``d/dPi`` of a reference field, which is known at every level."""
         interior = self.levels.interior
-        return np.stack(
-            [
-                (spec[k + 1] - spec[k - 1]) / (2.0 * self.levels.dpi2[k])
-                for k in interior
-            ]
+        two_dpi = 2.0 * self.levels.dpi2[interior]
+        return (spec[interior + 1] - spec[interior - 1]) / two_dpi.reshape(
+            (-1,) + (1,) * (spec.ndim - 1)
         )
 
     def _deformation_magnitude(self, spec: np.ndarray) -> np.ndarray:
@@ -233,17 +230,9 @@ class FrozenState:
         d2 = zeta * zeta - form - 2.0 * speed2 / ops.sht.radius**2
         return np.sqrt(np.clip(d2, 0.0, None))
 
-    def _grad_stack(self, spec: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        gx, gy = [], []
-        for k in range(spec.shape[0]):
-            x, y = self.ops.grad(spec[k])
-            gx.append(x)
-            gy.append(y)
-        return np.stack(gx), np.stack(gy)
-
     def _area_mean(self, field: np.ndarray) -> np.ndarray:
         w = self.ops.grid.weights
-        return np.einsum("kij,i->k", field, w) / (w.sum() * field.shape[-1])
+        return np.einsum("...ij,i->...", field, w) / (w.sum() * field.shape[-1])
 
 
 class PiecewiseOperator:
@@ -304,67 +293,53 @@ class PiecewiseOperator:
         """
         ops = self.ops
         frozen = self.frozen
-        out = np.empty_like(phi)
-        for k in range(self.nint):
-            weight = frozen.weight
-            limit = frozen.deform_limit[k]
-            zeta_ref = frozen.avo[k] - frozen.f_grid
-            linear = ops.div_c_grad(frozen.f_grid, psi[k])
-            zeta_p = ops.synth(ops.lap(psi[k]))
-            rx, ry = ops.grad(frozen.psi_ref_spec[k])
-            px, py = ops.grad(psi[k])
-            full = ops.synth(
-                ops.div(frozen.zeta_raw[k] * px, frozen.zeta_raw[k] * py)
-                + ops.div(zeta_p * rx, zeta_p * ry)
-                - ops.lap(ops.analyze(rx * px + ry * py))
-            )
-            # ``zeta_ref`` already carries the equatorial weight (and the floor
-            # where it bit); the deformation part takes the weight here.
-            vorticity_part = zeta_ref * zeta_p
-            deformation_part = full - frozen.zeta_raw[k] * zeta_p
-            tangent = ops.analyze(
-                vorticity_part + weight * limit * deformation_part
-            )
-            out[k] = ops.lap(phi[k]) - linear - tangent
-        return out
+        zeta_ref = frozen.avo - frozen.f_grid
+        linear = ops.div_c_grad(frozen.f_grid, psi)
+        zeta_p = ops.synth(ops.lap(psi))
+        rx, ry = ops.grad(frozen.psi_ref_spec)
+        px, py = ops.grad(psi)
+        full = ops.synth(
+            ops.div(frozen.zeta_raw * px, frozen.zeta_raw * py)
+            + ops.div(zeta_p * rx, zeta_p * ry)
+            - ops.lap(ops.analyze(rx * px + ry * py))
+        )
+        # ``zeta_ref`` already carries the equatorial weight (and the floor
+        # where it bit); the deformation part takes the weight here.
+        vorticity_part = zeta_ref * zeta_p
+        deformation_part = full - frozen.zeta_raw * zeta_p
+        tangent = ops.analyze(
+            vorticity_part + frozen.weight * frozen.deform_limit * deformation_part
+        )
+        return ops.lap(phi) - linear - tangent
 
     def _row2(self, phi: np.ndarray, psi: np.ndarray) -> np.ndarray:
         """Linearised potential-vorticity equation, with the column coupled."""
-        phi_grid = np.stack([self.ops.synth(phi[k]) for k in range(self.nint)])
-        zeta_grid = np.stack(
-            [self.ops.synth(self.ops.lap(psi[k])) for k in range(self.nint)]
-        )
+        phi_grid = self.ops.synth(phi)
+        zeta_grid = self.ops.synth(self.ops.lap(psi))
         d2phi = self.vert.d2(phi_grid)
 
         dphi_dpi = self.vert.d_dpi(phi)
         dpsi_dpi = self.vert.d_dpi(psi)
 
-        out = np.empty_like(phi)
-        for k in range(self.nint):
-            px, py = self.ops.grad(dphi_dpi[k])
-            sx, sy = self.ops.grad(dpsi_dpi[k])
-            cross = (
-                self.frozen.dpsi_x[k] * px
-                + self.frozen.dpsi_y[k] * py
-                + self.frozen.dphi_x[k] * sx
-                + self.frozen.dphi_y[k] * sy
-            )
-            field = (
-                self.frozen.avo[k] * d2phi[k]
-                + self.frozen.stb[k] * zeta_grid[k]
-                - cross
-            )
-            # The static stability is tapered towards its level mean, an affine
-            # map of the reference; the symmetric bilinear form that goes with it
-            # carries the perturbation's level-mean stratification against the
-            # untapered reference vorticity where the taper acts.
-            field += (
-                (1.0 - self.frozen.weight)
-                * self.frozen.zeta_raw[k]
-                * self.frozen._area_mean(d2phi[k : k + 1])[0]
-            )
-            out[k] = self.ops.analyze(field)
-        return out
+        px, py = self.ops.grad(dphi_dpi)
+        sx, sy = self.ops.grad(dpsi_dpi)
+        cross = (
+            self.frozen.dpsi_x * px
+            + self.frozen.dpsi_y * py
+            + self.frozen.dphi_x * sx
+            + self.frozen.dphi_y * sy
+        )
+        field = self.frozen.avo * d2phi + self.frozen.stb * zeta_grid - cross
+        # The static stability is tapered towards its level mean, an affine
+        # map of the reference; the symmetric bilinear form that goes with it
+        # carries the perturbation's level-mean stratification against the
+        # untapered reference vorticity where the taper acts.
+        field += (
+            (1.0 - self.frozen.weight)
+            * self.frozen.zeta_raw
+            * self.frozen._area_mean(d2phi).reshape(-1, 1, 1)
+        )
+        return self.ops.analyze(field)
 
     def apply(self, phi: np.ndarray, psi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Apply the operator, with both gauge conditions folded in.
@@ -449,12 +424,11 @@ class PiecewiseOperator:
         forcing = self.vert.theta_forcing(tb, tt)
         b2_grid -= self.frozen.avo * forcing
         forcing_mean = self.frozen._area_mean(forcing)
-        for k in range(self.nint):
-            b2_grid[k] -= (
-                (1.0 - self.frozen.weight[:, 0])[:, None]
-                * self.frozen.zeta_raw[k]
-                * forcing_mean[k]
-            )
+        b2_grid -= (
+            (1.0 - self.frozen.weight)
+            * self.frozen.zeta_raw
+            * forcing_mean.reshape(-1, 1, 1)
+        )
 
         # Ghost contribution to the cross terms: d/dPi of a zero field with the
         # boundary temperature attached is exactly the part that belongs on the
@@ -473,28 +447,22 @@ class PiecewiseOperator:
         # grad(g)/f.
         zero_col = np.zeros((self.nint, self.ops.grid.nlat, self.ops.grid.nlon))
         ghost_phi = self.vert.d_dpi(zero_col, tb, tt)
-        ghost_psi = np.stack(
-            [
-                streamfunction_ghost(
-                    ghost_phi[k], self.frozen.f_grid, self.ops.grid.weights
-                )
-                for k in range(self.nint)
-            ]
+        ghost_psi = streamfunction_ghost(
+            ghost_phi, self.frozen.f_grid, self.ops.grid.weights
         )
-        for k in range(self.nint):
-            gx, gy = self.ops.grad(self.ops.analyze(ghost_phi[k]))
-            sx, sy = self.ops.grad(self.ops.analyze(ghost_psi[k]))
-            b2_grid[k] += (
-                self.frozen.dpsi_x[k] * gx
-                + self.frozen.dpsi_y[k] * gy
-                + self.frozen.dphi_x[k] * sx
-                + self.frozen.dphi_y[k] * sy
-            )
+        gx, gy = self.ops.grad(self.ops.analyze(ghost_phi))
+        sx, sy = self.ops.grad(self.ops.analyze(ghost_psi))
+        b2_grid += (
+            self.frozen.dpsi_x * gx
+            + self.frozen.dpsi_y * gy
+            + self.frozen.dphi_x * sx
+            + self.frozen.dphi_y * sy
+        )
 
         b1 = np.zeros(
             (self.nint, self.lmax + 1, self.lmax + 1), dtype=np.complex128
         )
-        b2 = np.stack([self.ops.analyze(b2_grid[k]) for k in range(self.nint)])
+        b2 = self.ops.analyze(b2_grid)
         b1[:, 0, 0] = 0.0  # the gauge rows ask for a zero mean streamfunction
         b2[:, 0, 0] = b2[:, 0, 0].real
         return b1, b2

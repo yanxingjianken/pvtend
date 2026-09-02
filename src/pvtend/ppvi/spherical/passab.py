@@ -149,14 +149,11 @@ def diagnose(
             f"points; check that temperature, not theta, was supplied"
         )
 
-    zeta = np.empty_like(u)
-    psi_spec = np.empty((nlev, ops.sht.lmax + 1, ops.sht.lmax + 1), dtype=complex)
-    for k in range(nlev):
-        zeta_spec = ops.sht.vorticity(u[k], v[k])
-        psi_spec[k] = ops.inv_lap(zeta_spec)
-        zeta[k] = ops.synth(zeta_spec)
+    zeta_spec = ops.sht.vorticity(u, v)
+    psi_spec = ops.inv_lap(zeta_spec)
+    zeta = ops.synth(zeta_spec)
 
-    phi_spec = np.stack([ops.analyze(geopotential[k]) for k in range(nlev)])
+    phi_spec = ops.analyze(geopotential)
 
     lat = ops.grid.lat[:, None]
     f = np.broadcast_to(
@@ -164,34 +161,33 @@ def diagnose(
     )
 
     interior = levels.interior
-    q_hat = np.empty((interior.size, ops.grid.nlat, ops.grid.nlon))
     if pv_source == "operator":
         vert = VerticalOperator(levels)
         bot_spec, top_spec = theta_from_geopotential(phi_spec, levels)
         theta_bot = ops.synth(bot_spec)
         theta_top = ops.synth(top_spec)
-        phi_grid = np.stack([ops.synth(phi_spec[k]) for k in range(nlev)])
+        phi_grid = ops.synth(phi_spec)
         d2phi = vert.d2(phi_grid[interior]) + vert.theta_forcing(theta_bot, theta_top)
         dphi_dpi = vert.d_dpi(phi_spec[interior], bot_spec, top_spec)
         weights = ops.grid.weights
         psi_bot = ops.analyze(streamfunction_ghost(theta_bot, f, weights))
         psi_top = ops.analyze(streamfunction_ghost(theta_top, f, weights))
         dpsi_dpi = vert.d_dpi(psi_spec[interior], psi_bot, psi_top)
-        for i, k in enumerate(interior):
-            px, py = ops.grad(dphi_dpi[i])
-            sx, sy = ops.grad(dpsi_dpi[i])
-            q_hat[i] = (f + zeta[k]) * d2phi[i] - (sx * px + sy * py)
+        px, py = ops.grad(dphi_dpi)
+        sx, sy = ops.grad(dpsi_dpi)
+        q_hat = (f + zeta[interior]) * d2phi - (sx * px + sy * py)
     else:
-        theta_spec = np.stack([ops.analyze(theta[k]) for k in range(nlev)])
-        for i, k in enumerate(interior):
-            two_dpi = 2.0 * levels.dpi2[k]
-            dtheta_dpi = (theta[k + 1] - theta[k - 1]) / two_dpi
-            du_dpi = (u[k + 1] - u[k - 1]) / two_dpi
-            dv_dpi = (v[k + 1] - v[k - 1]) / two_dpi
-            dtheta_dx, dtheta_dy = ops.grad(theta_spec[k])
-            q_hat[i] = -(
-                (f + zeta[k]) * dtheta_dpi + du_dpi * dtheta_dy - dv_dpi * dtheta_dx
-            )
+        theta_spec = ops.analyze(theta)
+        two_dpi = (2.0 * levels.dpi2[interior]).reshape(-1, 1, 1)
+        dtheta_dpi = (theta[interior + 1] - theta[interior - 1]) / two_dpi
+        du_dpi = (u[interior + 1] - u[interior - 1]) / two_dpi
+        dv_dpi = (v[interior + 1] - v[interior - 1]) / two_dpi
+        dtheta_dx, dtheta_dy = ops.grad(theta_spec[interior])
+        q_hat = -(
+            (f + zeta[interior]) * dtheta_dpi
+            + du_dpi * dtheta_dy
+            - dv_dpi * dtheta_dx
+        )
         theta_bot = 0.5 * (theta[0] + theta[1])
         theta_top = 0.5 * (theta[nlev - 2] + theta[nlev - 1])
 

@@ -186,7 +186,7 @@ class BalancedInversion:
         interior = lev.interior
         f = self.frozen_f()
 
-        phi_grid_all = np.stack([ops.synth(phi_spec[k]) for k in range(lev.nlev)])
+        phi_grid_all = ops.synth(phi_spec)
         d2phi = self.vert.d2(phi_grid_all[interior]) + self.vert.theta_forcing(
             theta_bot, theta_top
         )
@@ -203,15 +203,12 @@ class BalancedInversion:
         psi_top = ops.analyze(streamfunction_ghost(theta_top, f, ops.grid.weights))
         dpsi_dpi = self.vert.d_dpi(psi_spec[interior], psi_bot, psi_top)
 
-        r1 = np.empty((interior.size, ops.sht.lmax + 1, ops.sht.lmax + 1), complex)
-        r2 = np.empty_like(r1)
-        for i, k in enumerate(interior):
-            zeta = ops.synth(ops.lap(psi_spec[k]))
-            r1[i] = ops.lap(phi_spec[k]) - ops.balance_nonlinear(psi_spec[k], f)
-            px, py = ops.grad(dphi_dpi[i])
-            sx, sy = ops.grad(dpsi_dpi[i])
-            field = (f + zeta) * d2phi[i] - (sx * px + sy * py) - q_hat[i]
-            r2[i] = ops.analyze(field)
+        psi_interior = psi_spec[interior]
+        zeta = ops.synth(ops.lap(psi_interior))
+        r1 = ops.lap(phi_spec[interior]) - ops.balance_nonlinear(psi_interior, f)
+        px, py = ops.grad(dphi_dpi)
+        sx, sy = ops.grad(dpsi_dpi)
+        r2 = ops.analyze((f + zeta) * d2phi - (sx * px + sy * py) - q_hat)
         return r1, r2
 
     def residual_norms(
@@ -239,13 +236,9 @@ class BalancedInversion:
         from .levels import G, pv_rhs_scale
 
         r1, r2 = self.residual(psi_spec, phi_spec, q_hat, theta_bot, theta_top)
-        height = np.stack(
-            [self.ops.synth(self.ops.inv_lap(r1[k])) for k in range(r1.shape[0])]
-        )
+        height = self.ops.synth(self.ops.inv_lap(r1))
         scale = pv_rhs_scale(self.levels.p_hpa[self.levels.interior])
-        pv = np.stack(
-            [self.ops.synth(r2[k]) / scale[k] for k in range(r2.shape[0])]
-        )
+        pv = self.ops.synth(r2) / scale.reshape(-1, 1, 1)
         outside = np.abs(self.ops.grid.lat) >= self.mirror.blend_north
         return {
             "balance_m": float(np.abs(height).max() / G),
@@ -439,9 +432,7 @@ class BalancedInversion:
         final = FrozenState(
             self.ops, lev, psi, phi, clamps=self.clamps, mirror=self.mirror
         )
-        deform = np.stack(
-            [final._deformation_magnitude(psi[k]) for k in interior]
-        )
+        deform = final._deformation_magnitude(psi[interior])
         smallest = final.avo - limiter * final.weight[None] * deform
         report.final_nonelliptic_fraction = [
             float(v) for v in np.mean(smallest < 0.0, axis=(1, 2))

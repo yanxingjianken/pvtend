@@ -68,8 +68,11 @@ class SeparablePreconditioner:
         bar = a * a / s
         eig = op.ops.sht.laplacian_eigen  # length lmax+1, entry 0 is zero
         self._inv = np.empty((lmax + 1, nint, nint))
-        for n in range(1, lmax + 1):
-            self._inv[n] = np.linalg.inv(bar[:, None] * t_full + eig[n] * np.eye(nint))
+        # One column matrix per degree, inverted as a stack: they differ only in
+        # the scalar on the diagonal.
+        self._inv[1:] = np.linalg.inv(
+            bar[:, None] * t_full + eig[1:, None, None] * np.eye(nint)
+        )
         gauge = op.gauge_scale / nint
         self._inv[0] = np.linalg.inv(
             a[:, None] * t_full + gauge * np.ones((nint, nint))
@@ -87,14 +90,16 @@ class SeparablePreconditioner:
         phi[:, 0, 0] = self._inv[0] @ (self._row_unscale * r2[:, 0, 0])
         psi[:, 0, 0] = self.f0 * r1[:, 0, 0]
 
-        for n in range(1, self.op.lmax + 1):
-            r1n = r1[:, : n + 1, n]
-            r2n = r2[:, : n + 1, n]
-            rhs = self._row_ratio[:, None] * r2n + r1n
-            phin = self._inv[n] @ rhs
-            phi[:, : n + 1, n] = phin
-            psi[:, : n + 1, n] = self.f0 * (
-                phin / self.a_level[:, None]
-                - r1n / (self.a_level[:, None] * self._eig[n])
-            )
+        # Every degree at once: the column solve is a matrix product batched over
+        # the degree, and the orders above it carry no information, so the whole
+        # rectangle goes through one call.  The unused entries are zero on the
+        # way in and stay zero, which is what the packer reads back.
+        a_level = self.a_level[:, None, None]
+        rhs = self._row_ratio[:, None, None] * r2 + r1
+        phi[..., 1:] = (self._inv[1:] @ rhs[..., 1:].transpose(2, 0, 1)).transpose(
+            1, 2, 0
+        )
+        psi[..., 1:] = self.f0 * (
+            phi[..., 1:] / a_level - r1[..., 1:] / (a_level * self._eig[1:])
+        )
         return self.packer.pack(phi, psi)

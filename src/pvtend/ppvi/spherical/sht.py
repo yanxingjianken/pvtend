@@ -266,6 +266,13 @@ class SHT:
         self._h = np.ascontiguousarray(
             np.transpose(legendre_derivative_table(p_ext, self.lmax), (1, 0, 2))
         )
+        # The quadrature carries the weights and the transpose that analysis
+        # contracts in, applied once here rather than at every transform.
+        if grid.weights is None:
+            self._p_quad = self._h_quad = None
+        else:
+            self._p_quad = self._quadrature(self._p)
+            self._h_quad = self._quadrature(self._h)
         self._analysis = self._build_analysis()
 
         n = np.arange(self.lmax + 1, dtype=np.float64)
@@ -278,48 +285,39 @@ class SHT:
 
     # -- construction -------------------------------------------------------
 
-    def _build_analysis(self) -> list[np.ndarray]:
-        """Per-``m`` analysis operators mapping Fourier coefficients to spectra.
+    def _quadrature(self, table: np.ndarray) -> np.ndarray:
+        """``(1/2) table W`` in the ``[m, j, n]`` layout analysis contracts in."""
+        return np.ascontiguousarray(
+            (0.5 * table * self.grid.weights).transpose(0, 2, 1)
+        )
 
-        On a Gaussian grid this is the exact quadrature ``(1/2) P W``.  Elsewhere
-        it is the weighted least-squares pseudo-inverse of the synthesis matrix,
-        which reproduces any field the grid can resolve to machine precision and
-        otherwise returns the best area-weighted fit.
+    def _build_analysis(self) -> np.ndarray:
+        """Operator taking Fourier coefficients to spectra, laid out ``[m, j, n]``.
+
+        On a Gaussian grid this is the exact quadrature ``(1/2) P W``, the same
+        array the scalar transforms already hold, so it is shared rather than
+        built again (the derivative table has a quadrature of its own, with
+        different values).  Elsewhere it is the weighted least-squares
+        pseudo-inverse of the synthesis matrix, which reproduces any field the
+        grid can resolve to machine precision and otherwise returns the best
+        area-weighted fit.  Entries whose degree is below the order are zero, so
+        the whole triangle passes through one contraction.
         """
-        ops: list[np.ndarray] = []
         if self.grid.weights is not None:
-            w = self.grid.weights
-            for m in range(self.lmax + 1):
-                ops.append(0.5 * self._p[m, m:] * w[None, :])
-            return ops
-
+            return self._p_quad
         w = np.maximum(self.grid.cos_lat, 1e-6)
         sqrt_w = np.sqrt(w)
+        out = np.zeros((self.lmax + 1, self.grid.nlat, self.lmax + 1))
         for m in range(self.lmax + 1):
             a = self._p[m, m:].T * sqrt_w[:, None]  # (nlat, n_count)
-            ops.append(np.linalg.pinv(a, rcond=1e-12) * sqrt_w[None, :])
-        return ops
+            out[m, :, m:] = (np.linalg.pinv(a, rcond=1e-12) * sqrt_w[None, :]).T
+        return out
 
     # -- core transforms ----------------------------------------------------
 
     def analyze(self, field: np.ndarray) -> np.ndarray:
         """Grid to spectrum."""
-        field = np.asarray(field, dtype=np.float64)
-        if field.shape[-2:] != (self.grid.nlat, self.grid.nlon):
-            raise ValueError(
-                f"field trailing shape {field.shape[-2:]} does not match grid "
-                f"({self.grid.nlat}, {self.grid.nlon})"
-            )
-        fourier = np.fft.rfft(field, axis=-1) / self.grid.nlon  # (..., nlat, nfreq)
-        lead = field.shape[:-2]
-        spec = np.zeros(lead + (self.lmax + 1, self.lmax + 1), dtype=np.complex128)
-        for m in range(self.lmax + 1):
-            if m >= fourier.shape[-1]:
-                break
-            spec[..., m, m:] = np.einsum(
-                "nj,...j->...n", self._analysis[m], fourier[..., m]
-            )
-        return spec
+        return self._analyze_with(field, self._analysis)
 
     def synthesize(self, spec: np.ndarray) -> np.ndarray:
         """Spectrum to grid."""
@@ -336,13 +334,17 @@ class SHT:
     def _synth_with(self, spec: np.ndarray, table: np.ndarray) -> np.ndarray:
         """Spectrum to grid against an arbitrary Legendre-like table.
 
-        The whole triangle is contracted at once rather than one zonal order at a
-        time.  Writing the loop is the natural thing to do -- each order has its
-        own length, ``lmax + 1 - m`` -- but the pieces are small enough that the
-        cost is entirely in getting into and out of the contraction, and there are
-        ``lmax + 1`` of them per transform.  The table is zero wherever the degree
-        is below the order, so padding the triangle out to a full rectangle
-        changes no result and lets the whole thing go through one call.
+        The zonal order is the batch index and the degree the contracted one, so
+        every order of every leading level meets its table in a single batched
+        matrix product.  Two things make that the right shape.  The table is zero
+        wherever the degree is below the order, so padding each order's triangle
+        out to a full rectangle changes no result and lets the orders share one
+        call -- writing the loop is the natural thing to do, each order having its
+        own length ``lmax + 1 - m``, but then the cost is entirely in getting into
+        and out of ``lmax + 1`` small contractions.  And the real and imaginary
+        parts are contracted separately: a real table meeting a complex spectrum
+        would otherwise be widened to a complex copy, twice the size of the table
+        itself, on every transform.
         """
         spec = np.asarray(spec, dtype=np.complex128)
         if spec.shape[-2:] != (self.lmax + 1, self.lmax + 1):
@@ -354,8 +356,14 @@ class SHT:
         nfreq = self.grid.nlon // 2 + 1
         keep = min(self.lmax + 1, nfreq)
         fourier = np.zeros(lead + (self.grid.nlat, nfreq), dtype=np.complex128)
-        fourier[..., :keep] = np.einsum(
-            "mnj,...mn->...jm", table[:keep], spec[..., :keep, :], optimize=True
+        # (m, levels, n) against (m, n, j), then back to (levels, j, m).
+        by_order = spec.reshape((-1,) + spec.shape[-2:])[:, :keep].transpose(1, 0, 2)
+        shape = lead + (self.grid.nlat, keep)
+        fourier.real[..., :keep] = (
+            (by_order.real @ table[:keep]).transpose(1, 2, 0).reshape(shape)
+        )
+        fourier.imag[..., :keep] = (
+            (by_order.imag @ table[:keep]).transpose(1, 2, 0).reshape(shape)
         )
         return np.fft.irfft(fourier * self.grid.nlon, n=self.grid.nlon, axis=-1)
 
@@ -407,8 +415,8 @@ class SHT:
             )
         cos_lat = self.grid.cos_lat[:, None]
         inv_c2 = 1.0 / (cos_lat**2)
-        u_hat = self._analyze_with(np.asarray(fx) * cos_lat * inv_c2, self._p)
-        v_hat = self._analyze_with(np.asarray(fy) * cos_lat * inv_c2, self._h)
+        u_hat = self._analyze_with(np.asarray(fx) * cos_lat * inv_c2, self._p_quad)
+        v_hat = self._analyze_with(np.asarray(fy) * cos_lat * inv_c2, self._h_quad)
         return (self.dlon_spec(u_hat) - v_hat) / self.radius
 
     def vorticity(self, fx: np.ndarray, fy: np.ndarray) -> np.ndarray:
@@ -419,26 +427,39 @@ class SHT:
             )
         cos_lat = self.grid.cos_lat[:, None]
         inv_c2 = 1.0 / (cos_lat**2)
-        u_hat = self._analyze_with(np.asarray(fx) * cos_lat * inv_c2, self._h)
-        v_hat = self._analyze_with(np.asarray(fy) * cos_lat * inv_c2, self._p)
+        u_hat = self._analyze_with(np.asarray(fx) * cos_lat * inv_c2, self._h_quad)
+        v_hat = self._analyze_with(np.asarray(fy) * cos_lat * inv_c2, self._p_quad)
         return (self.dlon_spec(v_hat) + u_hat) / self.radius
 
-    def _analyze_with(self, field: np.ndarray, table: np.ndarray) -> np.ndarray:
-        """Quadrature analysis against an arbitrary Legendre-like table.
+    def _analyze_with(self, field: np.ndarray, operator: np.ndarray) -> np.ndarray:
+        """Grid to spectrum against an analysis operator laid out ``[m, j, n]``.
 
-        One contraction over the whole triangle, for the reason given in
-        :meth:`_synth_with`.  The entries with degree below order come out as
-        zero because the table is zero there, so they need not be masked.
+        The mirror image of :meth:`_synth_with`: one batched matrix product over
+        the zonal orders, contracting latitude, with the real and imaginary parts
+        of the Fourier coefficients taken separately against the real operator.
+        The entries with degree below order come out as zero because the operator
+        is zero there, so they need not be masked.
         """
         field = np.asarray(field, dtype=np.float64)
-        fourier = np.fft.rfft(field, axis=-1) / self.grid.nlon
+        if field.shape[-2:] != (self.grid.nlat, self.grid.nlon):
+            raise ValueError(
+                f"field trailing shape {field.shape[-2:]} does not match grid "
+                f"({self.grid.nlat}, {self.grid.nlon})"
+            )
+        fourier = np.fft.rfft(field, axis=-1) / self.grid.nlon  # (..., nlat, nfreq)
         lead = field.shape[:-2]
         keep = min(self.lmax + 1, fourier.shape[-1])
         spec = np.zeros(lead + (self.lmax + 1, self.lmax + 1), dtype=np.complex128)
-        spec[..., :keep, :] = 0.5 * np.einsum(
-            "mnj,j,...jm->...mn",
-            table[:keep], self.grid.weights, fourier[..., :keep],
-            optimize=True,
+        # (m, levels, j) against (m, j, n), then back to (levels, m, n).
+        by_order = fourier.reshape((-1,) + fourier.shape[-2:])[..., :keep].transpose(
+            2, 0, 1
+        )
+        shape = lead + (keep, self.lmax + 1)
+        spec.real[..., :keep, :] = (
+            (by_order.real @ operator[:keep]).transpose(1, 0, 2).reshape(shape)
+        )
+        spec.imag[..., :keep, :] = (
+            (by_order.imag @ operator[:keep]).transpose(1, 0, 2).reshape(shape)
         )
         return spec
 

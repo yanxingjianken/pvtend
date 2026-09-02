@@ -396,10 +396,7 @@ def invert_hemisphere(
     u_obs, v_obs = rotational_wind_on_regular_grid(
         out_sht, event.psi_spec - mean.psi_spec
     )
-    height = (
-        np.stack([out_sht.synthesize(event.phi_spec[k]) for k in range(levels.nlev)])
-        / 9.81
-    )
+    height = out_sht.synthesize(event.phi_spec) / 9.81
 
     def cartesian_on_output(u_solver: np.ndarray, v_solver: np.ndarray):
         """Cartesian wind components on the output grid, finite at the poles.
@@ -461,8 +458,7 @@ def invert_hemisphere(
     scaffold = out_grid.lat < float(np.min(lat_nh)) - 1e-9
     pv_anom = np.full((levels.nlev, out_grid.nlat, out_grid.nlon), np.nan)
     anomaly_si = ertel_pv_si(event.q_hat - mean.q_hat, levels)
-    for position, k in enumerate(levels.interior):
-        pv_anom[k] = out_sht.synthesize(ops.analyze(anomaly_si[position]))
+    pv_anom[levels.interior] = out_sht.synthesize(ops.analyze(anomaly_si))
     pv_anom[..., scaffold, :] = np.nan
 
     lat0, lon0 = float(centre[0]), float(centre[1])

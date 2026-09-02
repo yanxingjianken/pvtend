@@ -194,20 +194,9 @@ def prepare_state(
         data_sht.regrid_to(ops.sht, v_global * cos_data) / cos_solver
     )
 
-    zeta = np.stack(
-        [
-            ops.synth(ops.sht.vorticity(u_solver[k], v_solver[k]))
-            for k in range(levels.nlev)
-        ]
-    )
-    zeta = symmetrize_even(zeta)
-    psi_spec = np.stack(
-        [ops.inv_lap(ops.analyze(zeta[k])) for k in range(levels.nlev)]
-    )
-    u_even = np.empty_like(zeta)
-    v_even = np.empty_like(zeta)
-    for k in range(levels.nlev):
-        u_even[k], v_even[k] = ops.rotational_wind(psi_spec[k])
+    zeta = symmetrize_even(ops.synth(ops.sht.vorticity(u_solver, v_solver)))
+    psi_spec = ops.inv_lap(ops.analyze(zeta))
+    u_even, v_even = ops.rotational_wind(psi_spec)
 
     # Scalars are mirrored evenly from the outset.
     height_solver = data_sht.regrid_to(ops.sht, mirror_even(height, lat_nh))

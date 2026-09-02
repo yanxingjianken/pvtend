@@ -52,12 +52,7 @@ def rotational_wind_stack(
     ops: SphereOps, psi_spec: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     """``(u, v)`` on the solver grid for a stack of streamfunction spectra."""
-    nlev = psi_spec.shape[0]
-    u = np.empty((nlev, ops.grid.nlat, ops.grid.nlon))
-    v = np.empty_like(u)
-    for k in range(nlev):
-        u[k], v[k] = ops.rotational_wind(psi_spec[k])
-    return u, v
+    return ops.rotational_wind(psi_spec)
 
 
 @dataclass
