@@ -54,6 +54,9 @@ mark()   { echo "$1" >> "$STATE"; }
 # comparable to its worker count is not going faster by being larger.
 sample_health() {
     local tag=$1 seconds=$2 out="$LOG_DIR/health_$tag.log"
+    # The sampler writes to its own file and its inherited standard output is
+    # closed below: a background job that keeps the pipe of this function's
+    # command substitution open would make the caller wait for the whole run.
     (
         local end=$((SECONDS + seconds))
         while (( SECONDS < end )); do
@@ -63,7 +66,7 @@ sample_health() {
             echo "$(date '+%F %T') D=$d R=$r load=$(cut -d' ' -f1 /proc/loadavg)" >> "$out"
             sleep 30
         done
-    ) &
+    ) > /dev/null 2>&1 &
     echo $!
 }
 
