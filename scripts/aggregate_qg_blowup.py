@@ -84,6 +84,13 @@ _PPVI_OPTIONAL_PARTS = ("wall",)
 _OPTIONAL_KEYS = {
     f"max_abs_{c}_rot_anom_ppvi_{p}" for c in ("u", "v") for p in _PPVI_OPTIONAL_PARTS
 }
+#: SIP convergence of the three omega solves (v2.23+): the residual ratio the
+#: solver finished with. A converged solve sits at 1e-11 or below; a solve that
+#: diverged and could not be rescued by the alpha retry is above one. Stores
+#: written before v2.23 have no such scalar and are not counted as lacking it.
+_SIP_BRANCHES = ("adiabatic", "qg_diabatic", "lhr_moist")
+_SIP_FIELDS = {f"omega_sip_final_residual_{b}": 1e-6 for b in _SIP_BRANCHES}
+_OPTIONAL_KEYS |= set(_SIP_FIELDS)
 _PPVI_FIELDS = {
     **{f"max_abs_{c}_rot_anom_ppvi_{p}": _PPVI_BLOWUP_MS
        for c in ("u", "v") for p in _PPVI_PARTS},
@@ -102,10 +109,11 @@ _CUBE_FALLBACK = {
 }
 
 _GROUPS = {
-    "omega": _OMEGA_FIELDS,
+    "omega": {**_OMEGA_FIELDS, **_SIP_FIELDS},
     "divwind": _DIV_FIELDS,
     "ppvi": _PPVI_FIELDS,
-    "all": {**_OMEGA_FIELDS, **_DIV_FIELDS, **_PPVI_FIELDS},
+    "sip": _SIP_FIELDS,
+    "all": {**_OMEGA_FIELDS, **_SIP_FIELDS, **_DIV_FIELDS, **_PPVI_FIELDS},
 }
 
 # ERA5 ids are bare ints; CESM ids are m<member>_t<track> strings.
@@ -201,7 +209,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--npz-dir", required=True, type=Path)
     ap.add_argument("--fields", default="omega",
-                    help="Field group to scan: omega | divwind | ppvi | all, "
+                    help="Field group to scan: omega | divwind | ppvi | sip | all, "
                          "or a comma-separated list of explicit key names "
                          "(default: omega). 'ppvi' reads the piece/residual "
                          "cubes and flags diverged inversions by magnitude.")

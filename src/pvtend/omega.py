@@ -824,8 +824,29 @@ def solve_qg_omega_sip(
     alpha: float = 0.93,
     resmax: float = 1e-14,
     w_physical_max: float | None = None,
+    retry_alpha: float | None = 0.5,
+    retry_maxit: int | None = None,
 ) -> tuple[np.ndarray, dict]:
     """Solve the QG omega equation using the SIP (Strongly Implicit Procedure).
+
+    **Divergence guard.** Stone's procedure with the partial-cancellation
+    parameter ``alpha`` = 0.93 diverges on some events: the anisotropic
+    rows at 75-85 N (AE/AN of order 20-60 on the f09 grid) feed a growing
+    mode at 850 hPa that reaches 1e25-1e44 by 300 sweeps and leaves a
+    complete-looking field of 1e38 Pa/s. The same system converges at a
+    smaller ``alpha`` to the same solution (measured on three diverged CESM
+    events: alpha 0.5 converges all three; on a converged event the two
+    alphas differ by 1.7e-10 Pa/s). So the solve is judged by its final
+    residual ratio: if it is not finite, or larger than one (the residual
+    grew from the first sweep), or the field is not finite, the iteration
+    is restarted from the same initial state with ``retry_alpha`` and
+    ``retry_maxit`` (default twice ``maxit``). A solve that converged at
+    ``alpha`` is untouched, so the output is byte-identical to the
+    unguarded solver wherever that solver converged. ``info`` records
+    ``alpha`` (the one the returned field was solved with), ``retried``,
+    ``diverged`` (still not converged after the retry, or no retry allowed),
+    ``final_residual`` and ``iters`` of the returned solve, and
+    ``first_final_residual`` / ``first_iters`` of the abandoned one.
 
     Matches the Li & O'Gorman (2020) solver from
     ``dante831/QG-omega/source/SIP_inversion.m``.
@@ -1098,12 +1119,32 @@ def solve_qg_omega_sip(
         if south_polar:
             T_sol[:,  0, :] = np.nanmean(lat_src[:,  0, :], axis=-1, keepdims=True)
 
-    # --- 5. Solve with SIP core ---
+    # --- 5. Solve with SIP core, with the divergence guard ---
+    T_init = T_sol.copy()
     n_iters, final_res = _sip_core(
         AP, AE, AW, AN, AS, AT, AB, rhs, T_sol,
         nlev, nlat, nlon, alpha, maxit, resmax,
         periodic_lon,
     )
+
+    def _diverged(residual_ratio: float, field: np.ndarray) -> bool:
+        return (not np.isfinite(residual_ratio)) or residual_ratio > 1.0 \
+            or (not np.all(np.isfinite(field)))
+
+    alpha_used = float(alpha)
+    retried = False
+    first_iters, first_res = n_iters, float(final_res)
+    if _diverged(final_res, T_sol) and retry_alpha is not None:
+        T_sol = T_init
+        n_iters, final_res = _sip_core(
+            AP, AE, AW, AN, AS, AT, AB, rhs, T_sol,
+            nlev, nlat, nlon, float(retry_alpha),
+            int(retry_maxit if retry_maxit is not None else 2 * maxit),
+            resmax, periodic_lon,
+        )
+        alpha_used = float(retry_alpha)
+        retried = True
+    diverged = _diverged(final_res, T_sol)
 
     omega_out = T_sol
 
@@ -1152,6 +1193,11 @@ def solve_qg_omega_sip(
     info = {
         "iters": n_iters,
         "final_residual": float(final_res),
+        "alpha": alpha_used,
+        "retried": retried,
+        "diverged": bool(diverged),
+        "first_iters": first_iters,
+        "first_final_residual": first_res,
         "numba": _HAS_NUMBA,
         "solve_time": elapsed,
         "terms": terms_used,

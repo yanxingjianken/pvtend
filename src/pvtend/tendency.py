@@ -896,8 +896,12 @@ def _qg_diabatic_adiabatic_on_patch(
     qg_method: str = "log20",
     nh_data: dict | None = None,
     phi_factor: float = 1.0,
-) -> None:
+) -> dict:
     """QG omega + 4-way adiabatic/diabatic decomposition on the event patch.
+
+    Returns the SIP convergence record of each elliptic solve, keyed
+    ``adiabatic`` / ``qg_diabatic`` / ``lhr_moist`` (the ``info`` dict of
+    :func:`pvtend.omega.solve_qg_omega_sip`); empty when no solve ran.
 
     When *qg_method* is ``"log20"`` (default), performs three full SIP
     solves on the NH domain to separate vertical velocity into four
@@ -939,7 +943,7 @@ def _qg_diabatic_adiabatic_on_patch(
                   "u_div_qg_diabatic", "v_div_qg_diabatic",
                   "u_div_lhr_moist", "v_div_lhr_moist"):
             cube3d[k] = zeros.copy()
-        return
+        return {}
 
     lat_v = lat_vec[valid]
     psort = np.argsort(plevs_hpa)
@@ -1013,7 +1017,7 @@ def _qg_diabatic_adiabatic_on_patch(
         cube3d["v_div_qg_diabatic"] = cube3d["v_div_diabatic"].copy()
         cube3d["u_div_adiabatic"]  = unpack(udd_nh[ix])
         cube3d["v_div_adiabatic"]  = unpack(vdd_nh[ix])
-        return
+        return {}
 
     # ---- LOG20 (default): Full SIP solve on NH domain ----
     # nh_data is required — all solves run on the full NH domain
@@ -1062,7 +1066,8 @@ def _qg_diabatic_adiabatic_on_patch(
     sigma_3d_nh = np.maximum(sigma_3d_nh, 1e-7)
 
     # ── Solve 1: QG omega terms A+B → ω_dry ──
-    od_nh, _ = solve_qg_omega_sip(
+    sip_info: dict[str, dict] = {}
+    od_nh, sip_info["adiabatic"] = solve_qg_omega_sip(
         ug_nh, vg_nh, t_nh,
         lat_nh_asc, lon_nh, plevs_pa,
         center_lat=center_lat,
@@ -1083,7 +1088,7 @@ def _qg_diabatic_adiabatic_on_patch(
             t_nh, dTdt_nh, u_nh, v_nh, w_nh,
             sigma_3d_nh, plevs_pa,
             lat_nh_asc, lon_nh)
-        w_qg_diabatic_nh, _ = solve_qg_omega_sip(
+        w_qg_diabatic_nh, sip_info["qg_diabatic"] = solve_qg_omega_sip(
             u_zero, v_zero, t_nh,
             lat_nh_asc, lon_nh, plevs_pa,
             center_lat=center_lat,
@@ -1103,7 +1108,7 @@ def _qg_diabatic_adiabatic_on_patch(
         C_em = _compute_diabatic_rhs_emanuel(
             tdot_nh, t_nh, theta_nh,
             plevs_pa, lat_nh_asc, lon_nh)
-        w_em_diabatic_nh, _ = solve_qg_omega_sip(
+        w_em_diabatic_nh, sip_info["lhr_moist"] = solve_qg_omega_sip(
             u_zero, v_zero, t_nh,
             lat_nh_asc, lon_nh, plevs_pa,
             center_lat=center_lat,
@@ -1160,6 +1165,36 @@ def _qg_diabatic_adiabatic_on_patch(
     cube3d["v_div_lhr_moist"]        = unpack(vdem_sv)
     cube3d["u_div_adiabatic"]        = unpack(udd_sv)
     cube3d["v_div_adiabatic"]        = unpack(vdd_sv)
+    return sip_info
+
+
+_SIP_BRANCHES = ("adiabatic", "qg_diabatic", "lhr_moist")
+
+
+def _omega_sip_scalars(sip_info: dict | None) -> dict:
+    """Per-solve SIP convergence scalars for the NPZ.
+
+    ``omega_sip_final_residual_{branch}`` is the residual ratio the returned
+    solve finished with (1e-11 or below when converged, above one when the
+    iteration ran away and the retry could not rescue it),
+    ``omega_sip_alpha_{branch}`` the relaxation parameter it was solved with
+    (0.93, or the retry's 0.5), ``omega_sip_retried_{branch}`` and
+    ``omega_sip_diverged_{branch}`` the guard's verdicts, and
+    ``omega_sip_iters_{branch}`` its sweep count. A branch that did not run
+    (sp19, or a missing forcing) carries NaN / False / 0, so the aggregator can
+    read every file the same way.
+    """
+    out: dict = {}
+    sip_info = sip_info or {}
+    for branch in _SIP_BRANCHES:
+        info = sip_info.get(branch)
+        out[f"omega_sip_final_residual_{branch}"] = np.float32(
+            info["final_residual"] if info else np.nan)
+        out[f"omega_sip_alpha_{branch}"] = np.float32(info["alpha"] if info else np.nan)
+        out[f"omega_sip_iters_{branch}"] = np.int32(info["iters"] if info else 0)
+        out[f"omega_sip_retried_{branch}"] = np.bool_(bool(info["retried"]) if info else False)
+        out[f"omega_sip_diverged_{branch}"] = np.bool_(bool(info["diverged"]) if info else False)
+    return out
 
 
 # ============================================================================
@@ -1825,7 +1860,7 @@ class TendencyComputer:
                     "lat": ds.latitude.values,
                     "lon": ds.longitude.values,
                 }
-            _qg_diabatic_adiabatic_on_patch(
+            omega_sip_info = _qg_diabatic_adiabatic_on_patch(
                 cube3d, lat_vec_full, lon_unwrapped,
                 plevs_hpa, center_lat=current_lat,
                 qg_method=self.cfg.qg_omega_method,
@@ -2240,6 +2275,9 @@ class TendencyComputer:
                     w_lhr_moist_pv_bar_dp_3d=w_em_pvbar_dp_3d,
                     w_lhr_moist_pv_anom_dp_3d=w_em_pvanom_dp_3d,
                 )
+
+            # ── SIP convergence of the three omega solves ──
+            record.update(_omega_sip_scalars(omega_sip_info))
 
             # ── Optionally compute + merge PPVI fields (write together) ──
             if also_ppvi:
