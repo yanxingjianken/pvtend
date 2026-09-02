@@ -5,7 +5,7 @@ that still sum exactly.  That is what makes a scale split a legitimate piecewise
 inversion rather than a decomposition applied after the fact -- and it is why the
 split goes through the source rather than through a level list.
 
-Four things here are easy to get wrong, and each is easy to get wrong quietly.
+Five things here are easy to get wrong, and each is easy to get wrong quietly.
 
 **The filter has to be global.**  Zonal wavenumber only exists on a full circle.
 A sixty-degree box has a fundamental of global wavenumber three, so filtering
@@ -24,10 +24,20 @@ component covering a large part of the hemisphere -- every anomaly of that sign,
 not this event.  A seed alone is not enough on a global domain; the box is what
 bounds it.
 
-**The mask has to be filtered again.**  A hard mask edge puts power back into
-every wavenumber, so a merely masked field is not wavenumber-limited whatever it
-is called.  Filtering again costs some of the planetary amplitude, which leaks
-outside the mask; that is the price of the piece being what its name says.
+**The box's columns must run around the circle, not up the index axis.**  A
+boolean test over a longitude axis returns *sorted* indices, so a box spanning
+the prime meridian arrives as ``[0..k, m..nlon-1]``: the two halves of the
+object land at opposite ends of the sub-array, where the labelling -- which is
+not periodic -- both severs the object at the seam and invents an adjacency in
+the middle between longitudes far apart.  Building the columns as an offset
+range modulo the grid gives the same columns in circular order.
+
+**The seed goes at the tracked centre, not at the box minimum.**  The box is
+sixty degrees wide and routinely holds something deeper than the event; keying
+off the box minimum then inverts an unrelated system while every residual
+diagnostic still balances, because the eddy part is defined as the remainder.
+The halo bounds only where the search *starts* -- the fill still spreads across
+the whole box, so the object keeps its natural extent.
 """
 from __future__ import annotations
 
@@ -41,14 +51,17 @@ from .sphere import SphereOps
 #: meridional-only offset carrying no wave structure at all.
 KMIN, KMAX = 1, 4
 
-#: Contour defining the object, as a fraction of the event's own extremum.  The
-#: form matters more than the value: anchoring on the event's own amplitude is
-#: scale-free, where an absolute threshold cannot serve both ends of a life cycle
-#: and a percentile pins the object's area by construction.
+#: Contour defining the object, as a fraction of the local minimum at the seed.
+#: The form matters more than the value: anchoring on the event's own amplitude
+#: is scale-free, where an absolute threshold cannot serve both ends of a life
+#: cycle and a percentile pins the object's area by construction.
 OBJ_FRAC = 0.35
 
 #: Half-width of the event box, in degrees, within which the object is sought.
 BOX_LAT_HALF, BOX_LON_HALF = 30.0, 60.0
+
+#: Half-width of the seed window about the tracked centre, in degrees.
+SEED_HALO_LAT, SEED_HALO_LON = 10.0, 20.0
 
 
 def zonal_filter(
@@ -89,6 +102,18 @@ def great_circle_degrees(ops: SphereOps, lat0: float, lon0: float) -> np.ndarray
     return np.degrees(np.arccos(np.clip(cos_c, -1.0, 1.0)))
 
 
+def centre_indices(ops: SphereOps, lat0: float, lon0: float) -> tuple[int, int]:
+    """Row and column of the grid point nearest the tracked centre.
+
+    Longitude is matched the short way round, so a centre at 359.9 degrees finds
+    the column at 0 rather than the one at 358.
+    """
+    lat, lon = ops.grid.lat, ops.grid.lon
+    row = int(np.argmin(np.abs(lat - lat0)))
+    col = int(np.argmin(np.abs((lon - lon0 + 180.0) % 360.0 - 180.0)))
+    return row, col
+
+
 def event_box(
     ops: SphereOps,
     lat0: float,
@@ -98,15 +123,24 @@ def event_box(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Row and column indices of the box the object is sought in.
 
-    Longitude is taken the short way round, so a box across the seam is one box
-    and not two.  Latitude is clipped at the pole: a box reaching past it simply
-    stops, because there is nothing beyond.
+    The columns come back **in circular order** -- an offset range about the
+    centre column, taken modulo the number of longitudes -- so that consecutive
+    entries are neighbours on the globe even where the box spans the prime
+    meridian.  Sorted indices would not be: they put the two halves of such a
+    box at opposite ends of the sub-array.
+
+    Latitude is clipped at the pole: a box reaching past it simply stops,
+    because there is nothing beyond.  A box clipped that way is also cut in
+    longitude, so an object spreading across the pole is seen only on the near
+    side of it; the rotated-frame output exists for events where that matters.
     """
     lat, lon = ops.grid.lat, ops.grid.lon
     rows = np.flatnonzero((lat >= lat0 - lat_half) & (lat <= lat0 + lat_half))
-    offset = (lon - lon0 + 180.0) % 360.0 - 180.0
-    cols = np.flatnonzero(np.abs(offset) <= lon_half)
-    if rows.size == 0 or cols.size == 0:
+    _, centre_col = centre_indices(ops, lat0, lon0)
+    pad = int(round(lon_half / (360.0 / lon.size)))
+    pad = min(pad, (lon.size - 1) // 2)  # never list a column twice
+    cols = (np.arange(-pad, pad + 1) + centre_col) % lon.size
+    if rows.size == 0:
         raise ValueError(f"the box around ({lat0}, {lon0}) is empty on this grid")
     return rows, cols
 
@@ -134,25 +168,57 @@ def component_containing(
     return labels == label
 
 
-def seed_from_box_minimum(
-    filtered: np.ndarray, rows: np.ndarray, cols: np.ndarray
+def seed_near_centre(
+    filtered: np.ndarray,
+    rows: np.ndarray,
+    cols: np.ndarray,
+    centre_row: int,
+    centre_col: int,
+    halo_rows: int,
+    halo_cols: int,
 ) -> tuple[tuple[int, int, int], float]:
-    """The most negative point of the filtered field inside the box.
+    """Most negative filtered point within a halo of the tracked centre.
 
-    Nothing here needs tuning per event: the box comes from the tracking, so it
-    holds an anticyclone, so its minimum is negative, so the contour taken as a
-    fraction of that minimum has the minimum inside it by construction, and the
-    flood fill always succeeds.
+    Works in positions within the box, so it inherits the circular ordering of
+    ``cols`` and needs no longitude arithmetic of its own.
+
+    Args:
+        filtered: The filtered anomaly on the upper levels, ``(nup, nlat, nlon)``.
+        rows, cols: The box, ordered as the flood fill will see it.
+        centre_row, centre_col: Grid row and column of the tracked centre.
+        halo_rows, halo_cols: Half-width of the seed window, in grid cells.
+
+    Returns:
+        The seed as ``(position within the upper levels, row, column)``, and the
+        local minimum there -- which is what sets the contour, so that the depth
+        scale comes from the event rather than from whatever deeper system
+        happens to share its box.
+
+    Raises:
+        ValueError: If the centre is outside the box, or the halo holds no
+            negative anomaly at all -- the tracked feature then has no
+            upper-level signature to invert, which is worth surfacing rather
+            than seeding somewhere else.
     """
-    sub = filtered[:, rows, :][:, :, cols]
-    if np.nanmin(sub) >= 0:
+    jp = np.flatnonzero(rows == int(centre_row))
+    ip = np.flatnonzero(cols == int(centre_col))
+    if jp.size == 0 or ip.size == 0:
         raise ValueError(
-            "the box holds no negative anomaly at the planetary scales, which "
-            "contradicts the event having been tracked as an anticyclone"
+            f"the tracked centre (row {centre_row}, column {centre_col}) is not "
+            f"inside the event box, so the object cannot be seeded near it"
         )
-    flat = int(np.nanargmin(sub))
-    k, j, i = np.unravel_index(flat, sub.shape)
-    return (int(k), int(rows[j]), int(cols[i])), float(sub[k, j, i])
+    j0 = slice(max(0, int(jp[0]) - halo_rows), int(jp[0]) + halo_rows + 1)
+    i0 = slice(max(0, int(ip[0]) - halo_cols), int(ip[0]) + halo_cols + 1)
+    near_rows, near_cols = rows[j0], cols[i0]
+    sub = filtered[np.ix_(np.arange(filtered.shape[0]), near_rows, near_cols)]
+    k, a, b = np.unravel_index(int(np.nanargmin(sub)), sub.shape)
+    value = float(sub[k, a, b])
+    if not value < 0:
+        raise ValueError(
+            f"no negative planetary-scale anomaly within the seed halo of the "
+            f"tracked centre (the local minimum there is {value:+.4g})"
+        )
+    return (int(k), int(near_rows[a]), int(near_cols[b])), value
 
 
 def split_planetary_eddy(
@@ -167,8 +233,14 @@ def split_planetary_eddy(
     obj_frac: float = OBJ_FRAC,
     lat_half: float = BOX_LAT_HALF,
     lon_half: float = BOX_LON_HALF,
+    halo_lat: float = SEED_HALO_LAT,
+    halo_lon: float = SEED_HALO_LON,
 ) -> dict:
     """Split the upper source into a planetary part and the remainder.
+
+    The order of the steps matters and they are not interchangeable: filter on
+    the whole circle, seed near the tracked centre, take the contour from the
+    local minimum at that seed, fill across the whole box, then filter again.
 
     Args:
         ops: Operators on the solver grid.
@@ -177,30 +249,42 @@ def split_planetary_eddy(
         theta_top_anom: Top boundary temperature anomaly, ``(nlat, nlon)``.
         upper_positions: Positions within ``q_anom`` of the upper levels, which
             are the ones that take part in the flood fill.
-        lat0, lon0: Event centre.
-        obj_frac: Contour, as a fraction of the box minimum.
+        lat0, lon0: Tracked event centre.
+        obj_frac: Contour, as a fraction of the local minimum at the seed.
+        halo_lat, halo_lon: Seed window half-widths, in degrees.
 
     Returns:
         ``q_p``, ``q_e`` on the interior levels -- both zero outside the upper
         ones -- ``theta_p``, ``theta_e`` for the top boundary, the ``mask``, the
-        box minimum ``q_min`` and the ``contour`` actually used.  The two parts
-        of each source sum to it on the levels they cover.
+        local minimum ``q_min`` and the ``contour`` actually used.  The two
+        parts of each source sum to it on the levels they cover.
     """
     upper = np.asarray(upper_positions, dtype=int)
     rows, cols = event_box(ops, lat0, lon0, lat_half, lon_half)
+    centre_row, centre_col = centre_indices(ops, lat0, lon0)
+    dlat = float(np.mean(np.diff(ops.grid.lat)))
+    dlon = 360.0 / ops.grid.lon.size
 
     # 1. filter globally, on the upper levels that take part
     filtered = zonal_filter(ops, q_anom[upper], kmin, kmax)
 
-    # 2. seed at the box minimum, contour at a fraction of it
-    seed, q_min = seed_from_box_minimum(filtered, rows, cols)
+    # 2. seed within a halo of the tracked centre; the contour is a fraction of
+    #    the local minimum there, not of the box minimum
+    seed, q_min = seed_near_centre(
+        filtered,
+        rows,
+        cols,
+        centre_row,
+        centre_col,
+        int(round(halo_lat / dlat)),
+        int(round(halo_lon / dlon)),
+    )
     contour = obj_frac * q_min
-    level_of_seed = int(np.nonzero(upper == seed[0])[0][0]) if seed[0] in upper else seed[0]
 
-    # 3. the connected body holding the seed, sought inside the box only
+    # 3. the connected body holding the seed, filled across the whole box
     inside = filtered[:, rows, :][:, :, cols] < -abs(contour)
-    j = int(np.nonzero(rows == seed[1])[0][0])
-    i = int(np.nonzero(cols == seed[2])[0][0])
+    j = int(np.flatnonzero(rows == seed[1])[0])
+    i = int(np.flatnonzero(cols == seed[2])[0])
     box_mask = component_containing(inside, (seed[0], j, i))
 
     # 4. put it back on the globe; outside the box is not the object
