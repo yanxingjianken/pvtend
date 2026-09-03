@@ -264,6 +264,41 @@ def crop_contour_to_patch(
 # =====================================================================
 # Legacy helper (backward compatibility)
 # =====================================================================
+def _runs_off_the_fill(trace, finite):
+    """The runs of a contour trace that do not touch cells the field was missing.
+
+    A vertex sits between grid cells, so it is kept only where all four cells it
+    interpolates from held data.
+
+    Args:
+        trace: ``(n, 2)`` array of (row, column) vertices in index space.
+        finite: Boolean array, ``True`` where the field had a value.
+
+    Returns:
+        A list of ``(rows, columns)`` pairs, one per surviving run, in order.
+    """
+    rows, cols = trace[:, 0], trace[:, 1]
+    if finite.all():
+        return [(rows, cols)]
+    r0 = np.clip(np.floor(rows).astype(int), 0, finite.shape[0] - 1)
+    c0 = np.clip(np.floor(cols).astype(int), 0, finite.shape[1] - 1)
+    r1 = np.clip(r0 + 1, 0, finite.shape[0] - 1)
+    c1 = np.clip(c0 + 1, 0, finite.shape[1] - 1)
+    keep = finite[r0, c0] & finite[r0, c1] & finite[r1, c0] & finite[r1, c1]
+    if keep.all():
+        return [(rows, cols)]
+    pieces, start = [], None
+    for i, ok in enumerate(keep):
+        if ok and start is None:
+            start = i
+        elif not ok and start is not None:
+            pieces.append((rows[start:i], cols[start:i]))
+            start = None
+    if start is not None:
+        pieces.append((rows[start:], cols[start:]))
+    return pieces
+
+
 def sampled_longest_contours(
     field2d: np.ndarray,
     x_coords: np.ndarray,
@@ -288,12 +323,18 @@ def sampled_longest_contours(
     Returns:
         List of dicts with keys: 'lev', 'x', 'y'.
     """
-    # Safe field for contours
+    # Where the field is missing it is filled with the median so that the
+    # contour tracer, which cannot take a mask, runs at all -- and every vertex
+    # that lands beside a filled cell is then thrown away. The fill is a plateau
+    # with a step around it, and a step is a contour: left in, it manufactures
+    # bays along the edge of the missing region and the overturning test reads
+    # them as wave breaking. A contour crossing the region comes back as the
+    # pieces either side, and a piece too short to be a contour falls to
+    # `min_vertices`.
     arr = np.array(field2d, dtype=float, copy=True)
-    if not np.isfinite(arr).all():
-        finite = np.isfinite(arr)
-        fill = np.nanmedian(arr[finite]) if np.any(finite) else 0.0
-        arr[~finite] = fill
+    finite = np.isfinite(arr)
+    if not finite.all():
+        arr[~finite] = np.nanmedian(arr[finite]) if finite.any() else 0.0
 
     if find_contours is None:
         raise ImportError(
@@ -316,10 +357,12 @@ def sampled_longest_contours(
         cmax = max(cs, key=len)
         if len(cmax) < min_vertices:
             continue
-        rows, cols = cmax[:, 0], cmax[:, 1]
-        xline = np.interp(cols, c_index, x_coords)
-        yline = np.interp(rows, r_index, y_coords)
-        candidates.append({"lev": float(lev), "x": xline, "y": yline})
+        for rows, cols in _runs_off_the_fill(cmax, finite):
+            if len(rows) < min_vertices:
+                continue
+            xline = np.interp(cols, c_index, x_coords)
+            yline = np.interp(rows, r_index, y_coords)
+            candidates.append({"lev": float(lev), "x": xline, "y": yline})
 
     if not candidates:
         return []
