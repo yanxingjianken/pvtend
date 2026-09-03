@@ -105,24 +105,34 @@ sample_health() {
     echo $!
 }
 
-# ---- A pool that has stopped producing --------------------------------------
+# ---- A pool that has stopped working ----------------------------------------
 # The worker pool can wedge: every worker gone, the parent alive with its
-# management threads asleep and no processor time accruing. Nothing in it times
-# out, so the block would sit there until someone looked. This samples the
-# block's own output and kills a compute that has produced nothing for
-# STALL_MIN minutes, which fails the block: the supervisor logs it, leaves it
-# unmarked, and moves on. A rerun picks it up where it stopped.
-STALL_MIN="${STALL_MIN:-20}"
+# management threads asleep. Nothing in it times out, so the block would sit
+# there until someone looked. The test is processor time, not output: a wedged
+# pool accrues none, while a pool resuming a block accrues plenty while it skips
+# events that already have their NPZ and produces nothing for many minutes.
+# A compute that has not used a processor for STALL_MIN minutes is killed, which
+# fails the block: the supervisor logs it, leaves it unmarked, and moves on.
+STALL_MIN="${STALL_MIN:-10}"
+
+cpu_ticks() {
+    # The pipeline, its children and the pool's workers, in clock ticks.
+    local pid=$1 total=0 t p
+    for p in $pid $(pgrep -P "$pid" 2>/dev/null) \
+             $(ps -u "$USER" -o pid=,args= | awk '/spawn_main/ {print $1}'); do
+        t=$(awk '{print $14 + $15}' "/proc/$p/stat" 2>/dev/null) && total=$((total + t))
+    done
+    echo "$total"
+}
 
 watch_stall() {
-    local pid=$1 dir=$2 tag=$3 last=-1 same=0 need=$((STALL_MIN / 2))
+    local pid=$1 tag=$2 last=-1 same=0 need=$((STALL_MIN / 2)) now
     while kill -0 "$pid" 2>/dev/null; do
         sleep 120
-        local n
-        n=$(find "$dir" -name 'track_*.npz' 2>/dev/null | wc -l)
-        if [ "$n" = "$last" ]; then same=$((same + 1)); else same=0; last=$n; fi
+        now=$(cpu_ticks "$pid")
+        if [ "$now" = "$last" ]; then same=$((same + 1)); else same=0; last=$now; fi
         if [ "$same" -ge "$need" ]; then
-            log "$tag: no output for $STALL_MIN min at $n files; the pool is wedged"
+            log "$tag: no processor time for $STALL_MIN min; the pool is wedged"
             pkill -TERM -P "$pid" 2>/dev/null
             kill -TERM "$pid" 2>/dev/null
             sleep 15
@@ -160,7 +170,7 @@ run_block() {
         --skip-existing \
         >> "$LOG_DIR/$tag.log" 2>&1 &
     local pid=$!
-    watch_stall "$pid" "$out/$stage/dh=+0" "$tag" &
+    watch_stall "$pid" "$tag" &
     local watcher=$!
     wait "$pid"
     local rc=$?
