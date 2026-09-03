@@ -37,9 +37,12 @@ from pathlib import Path
 from typing import Sequence
 
 import numpy as np
+import pandas as pd
 
 from .rwb import (
     RWBConfig,
+    circumpolar_contours,
+    crop_contour_to_patch,
     sampled_longest_contours,
     overturn_x_intervals,
     envelope_polygon,
@@ -89,6 +92,15 @@ class ClassifyConfig:
         n_workers: Parallel worker processes for the per-file
             classification loop (1 = serial). Files are independent, so
             this only shards the loop; results are merged in the parent.
+        contours: Where the contours come from. ``"circumpolar"`` finds them
+            on the hemisphere and crops them to the patch, which is what wave
+            breaking means and needs *archive_dir*; ``"patch"`` contours the
+            patch itself, which is all a caller without the archive can do;
+            ``"auto"`` is the first when an archive is given and the second
+            when it is not.
+        source: Which archive the hemisphere field comes from, ``"era5"`` or
+            ``"cesm"``.
+        archive_dir: Root of that archive.
     """
 
     npz_dir: Path = Path(".")
@@ -105,6 +117,23 @@ class ClassifyConfig:
     )
     exclude_file: Path | None = None
     n_workers: int = 1
+    contours: str = "auto"
+    source: str = "era5"
+    archive_dir: Path | None = None
+
+    def contour_source(self) -> str:
+        """``"circumpolar"`` or ``"patch"``, with the reason a choice is refused."""
+        if self.contours == "auto":
+            return "circumpolar" if self.archive_dir else "patch"
+        if self.contours == "circumpolar" and not self.archive_dir:
+            raise ValueError(
+                "circumpolar contours are found on the hemisphere, which is not in "
+                "a per-event record: give archive_dir, or ask for contours='patch'"
+            )
+        if self.contours not in ("circumpolar", "patch"):
+            raise ValueError(
+                f"contours must be circumpolar, patch or auto, got {self.contours!r}")
+        return self.contours
 
 
 # ── Excluded track loader ─────────────────────────────────────────────
@@ -153,24 +182,68 @@ def _load_excluded(p: Path | None) -> set[int | str]:
 
 # ── Single-level bay classifier ───────────────────────────────────────
 
-def _classify_bays_z2d(
-    z2d: np.ndarray,
+def _patch_axes(x_rel: np.ndarray, y_rel: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The patch's own relative axes, whether they arrive as vectors or as grids."""
+    x = x_rel[0, :] if x_rel.ndim == 2 else x_rel
+    y = y_rel[:, 0] if y_rel.ndim == 2 else y_rel
+    return x, y
+
+
+def _circumpolar_on_patch(
+    field_nh: np.ndarray,
+    lat_nh: np.ndarray,
+    lon_nh: np.ndarray,
+    centre_lat: float,
+    centre_lon: float,
     x_rel: np.ndarray,
     y_rel: np.ndarray,
     cfg: RWBConfig,
-) -> tuple[bool, bool]:
-    """Detect AWB / CWB bays on one 2-D Z field (relative coords)."""
-    if not np.isfinite(z2d).any():
-        return False, False
-    x = x_rel[0, :] if x_rel.ndim == 2 else x_rel
-    y = y_rel[:, 0] if y_rel.ndim == 2 else y_rel
+    max_keep: int = 12,
+) -> list[dict]:
+    """Contours that encircle the pole, cropped to the event's patch.
 
-    contours = sampled_longest_contours(
-        z2d, x, y,
+    Wave breaking is the overturning of a contour that goes round the hemisphere,
+    so the contour is found on the hemisphere and only then cut to the patch. A
+    contour that does not span ``cfg.circumpolar_min_lon_span`` is not one of
+    those and is dropped, and so is a crop that keeps too little of one to have a
+    shape.
+
+    The survivors are then thinned to *max_keep*, evenly across the levels they
+    came from, exactly as the patch's own contours are. Without it the hemisphere
+    hands over two to three hundred contours where the patch hands over twelve,
+    and twenty times the contours is twenty times the chances of finding a bay --
+    which would make this look better for a reason that has nothing to do with
+    being circumpolar.
+    """
+    x, y = _patch_axes(x_rel, y_rel)
+    circ = circumpolar_contours(
+        field_nh, lat_nh, lon_nh,
         try_levels=cfg.try_levels,
-        max_keep=12,
         min_vertices=cfg.min_vertices,
+        min_lon_span=cfg.circumpolar_min_lon_span,
     )
+    half_dlat = float(np.max(np.abs(y)))
+    half_dlon = float(np.max(np.abs(x)))
+    out = []
+    for cc in circ:
+        cropped = crop_contour_to_patch(
+            cc, float(centre_lat), float(centre_lon),
+            half_dlat=half_dlat, half_dlon=half_dlon,
+        )
+        if cropped is not None:
+            out.append(cropped)
+    if len(out) <= max_keep:
+        return out
+    idx = np.linspace(0, len(out) - 1, num=max_keep).round().astype(int)
+    return [out[i] for i in idx]
+
+
+def _classify_bays(contours: list[dict], cfg: RWBConfig) -> tuple[bool, bool]:
+    """Whether a set of contours overturns anticyclonically, cyclonically, or both.
+
+    This is the whole of the classification: which contours it is given is the
+    only thing that distinguishes a circumpolar run from a patch one.
+    """
     if not contours:
         return False, False
 
@@ -212,6 +285,27 @@ def _classify_bays_z2d(
             if is_awb and is_cwb:
                 return True, True
     return is_awb, is_cwb
+
+
+def _classify_bays_z2d(
+    z2d: np.ndarray,
+    x_rel: np.ndarray,
+    y_rel: np.ndarray,
+    cfg: RWBConfig,
+) -> tuple[bool, bool]:
+    """Detect AWB / CWB bays from the patch's own contours (relative coords)."""
+    if not np.isfinite(z2d).any():
+        return False, False
+    x, y = _patch_axes(x_rel, y_rel)
+    return _classify_bays(
+        sampled_longest_contours(
+            z2d, x, y,
+            try_levels=cfg.try_levels,
+            max_keep=12,
+            min_vertices=cfg.min_vertices,
+        ),
+        cfg,
+    )
 
 
 def classify_z_field(
@@ -277,19 +371,31 @@ def _classify_multilevel(
     threshold: int,
     cfg: RWBConfig,
     z2d_wavg: np.ndarray | None = None,
+    hemisphere: tuple | None = None,
+    centre: tuple[float, float] | None = None,
 ) -> tuple[bool, bool]:
     """Multi-level classification; require *threshold* levels to agree.
 
     *classify_levels* may contain integer hPa values or the string
     ``"wavg"``; the latter uses the pre-computed weighted-average 2-D
-    Z field (*z2d_wavg*).
+    Z field (*z2d_wavg*), and takes its contours from the hemisphere when
+    *hemisphere* -- ``(field, lat, lon)`` -- and *centre* are given. The
+    individual pressure levels are only in the record's own patch, so they are
+    contoured there whatever the wavg level does.
     """
     awb_count = cwb_count = 0
     for lev in classify_levels:
         if isinstance(lev, str) and lev.lower() == "wavg":
             if z2d_wavg is None:
                 continue
-            awb, cwb = _classify_bays_z2d(z2d_wavg, x_rel, y_rel, cfg)
+            if hemisphere is not None and centre is not None:
+                awb, cwb = _classify_bays(
+                    _circumpolar_on_patch(*hemisphere, centre[0], centre[1],
+                                          x_rel, y_rel, cfg),
+                    cfg,
+                )
+            else:
+                awb, cwb = _classify_bays_z2d(z2d_wavg, x_rel, y_rel, cfg)
         else:
             if z3d is None or levels_file is None:
                 continue
@@ -419,9 +525,49 @@ class ClassifyResult:
 
 # ── Main entry point ──────────────────────────────────────────────────
 
+#: One hemisphere reader per worker process, keyed by the archive it reads.
+#: A pool worker classifies many events and the reader holds the open files;
+#: rebuilding it per event would reopen the archive every time.
+_HEMISPHERE: dict = {}
+
+_STAMP = re.compile(r"_(\d{10})_dh")
+
+
+def _event_time(path: Path):
+    """The event's own time, from the name the writer gave the record."""
+    m = _STAMP.search(path.name)
+    if m is None:
+        return None
+    return pd.Timestamp(
+        f"{m.group(1)[:4]}-{m.group(1)[4:6]}-{m.group(1)[6:8]} {m.group(1)[8:10]}:00")
+
+
+def _hemisphere_for(source, archive_dir, path, tid):
+    """``(field, lat, lon)`` for this event, or ``None`` if it cannot be had.
+
+    A record whose time the archive does not hold is an error worth seeing, not
+    an event quietly classified from nothing, so the caller turns it into a
+    failed file rather than a Neutral label.
+    """
+    from .hemisphere import HemisphereFields, member_of
+
+    key = (source, str(archive_dir))
+    reader = _HEMISPHERE.get(key)
+    if reader is None:
+        reader = _HEMISPHERE[key] = HemisphereFields(
+            source=source, data_dir=Path(archive_dir))
+    when = _event_time(path)
+    if when is None:
+        raise ValueError(f"no event time in {path.name}")
+    return reader.wavg_height(when, member=member_of(tid))
+
+
 def _classify_one_file(item, *, classify_levels, threshold, rwb_cfg,
-                       need_3d, need_wavg):
+                       need_3d, need_wavg, source=None, archive_dir=None):
     """Classify a single NPZ; picklable unit for the run_pass1 pool.
+
+    With *archive_dir* the wavg level takes its contours from the hemisphere at
+    the event's time; without it, from the patch.
 
     Returns ``(tid, awb, cwb, h_scale, status)`` with status ``"ok"``,
     ``"noz"`` (file lacks the requested Z fields — not an error) or
@@ -446,12 +592,19 @@ def _classify_one_file(item, *, classify_levels, threshold, rwb_cfg,
             if z3d is None and z2d_wavg is None:
                 return (tid, False, False, h_scale, "noz")
 
+            hemisphere = centre = None
+            if archive_dir is not None and need_wavg:
+                hemisphere = _hemisphere_for(source, archive_dir, Path(fp), tid)
+                centre = (float(Z["center_lat"]), float(Z["center_lon"]))
+
             awb, cwb = _classify_multilevel(
                 z3d, levels_file, x_rel, y_rel,
                 classify_levels=classify_levels,
                 threshold=threshold,
                 cfg=rwb_cfg,
                 z2d_wavg=z2d_wavg,
+                hemisphere=hemisphere,
+                centre=centre,
             )
             return (tid, awb, cwb, h_scale, "ok")
     except Exception:
@@ -468,6 +621,7 @@ def run_pass1(cfg: ClassifyConfig) -> ClassifyResult:
         :class:`ClassifyResult` holding variant sets.
     """
     excluded = _load_excluded(cfg.exclude_file)
+    _contours = cfg.contour_source()
     if excluded:
         print(f"[exclude] {len(excluded)} track IDs", flush=True)
 
@@ -521,6 +675,8 @@ def run_pass1(cfg: ClassifyConfig) -> ClassifyResult:
             rwb_cfg=cfg.rwb_cfg,
             need_3d=_need_3d,
             need_wavg=_need_wavg,
+            source=cfg.source,
+            archive_dir=cfg.archive_dir if _contours == "circumpolar" else None,
         )
         if cfg.n_workers > 1:
             from concurrent.futures import ProcessPoolExecutor

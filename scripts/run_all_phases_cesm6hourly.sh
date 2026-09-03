@@ -318,6 +318,9 @@ for evt in blocking prp; do
              --output '$out/rwb_variant_tracksets_wavg.pkl' \
              --levels wavg \
              --threshold 1 \
+             --contours circumpolar \
+             --source cesm \
+             --archive-dir '$ARCHIVE' \
              --n-workers $CLASSIFY_WORKERS \
              --exclude-file '$EXC_DIR/exclude_tracks_cesm6hourly_${evt}.csv'"
 

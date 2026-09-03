@@ -205,6 +205,9 @@ run_variant() {
              --output '$out/rwb_variant_tracksets_wavg.pkl' \
              --levels wavg \
              --threshold 1 \
+             --contours circumpolar \
+             --source era5 \
+             --archive-dir '$ERA5_DIR' \
              --exclude-file '$EXC_DIR/exclude_tracks_${evt}.csv'"
 
     run_stage "p8_composite_${evt}" "composite ${evt}" \

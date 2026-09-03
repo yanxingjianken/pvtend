@@ -322,6 +322,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="CSV listing track IDs to exclude.",
     )
     classify.add_argument(
+        "--contours", choices=("auto", "circumpolar", "patch"), default="auto",
+        help="Where the contours come from at the weighted-average level.  "
+             "'circumpolar' finds them on the northern hemisphere and crops "
+             "them to the event patch, which is what wave breaking means; it "
+             "needs --archive-dir, since a per-event record holds only the "
+             "patch.  'patch' contours the patch itself, which is all a run "
+             "without the archive can do, and finds bays in structure that "
+             "never encircled the pole.  'auto' (default) is the first when an "
+             "archive is given and the second when it is not.",
+    )
+    classify.add_argument(
+        "--source", choices=("era5", "cesm"), default="era5",
+        help="Which archive --archive-dir holds (default: era5).",
+    )
+    classify.add_argument(
+        "--archive-dir", type=Path, default=None,
+        help="Root of the archive the hemisphere field is read from: the "
+             "directory of per-variable monthly files for ERA5, or of the "
+             "per-member-year files for CESM.",
+    )
+    classify.add_argument(
         "--n-workers", type=int, default=1,
         help="Parallel worker processes for the per-file classification "
              "loop (NPZ-tree mode only; default 1 = serial).",
@@ -1101,7 +1122,12 @@ def _cmd_classify(args: argparse.Namespace) -> None:
         rwb_cfg=RWBConfig(area_min_deg2=20.0, try_levels=400),
         exclude_file=args.exclude_file,
         n_workers=args.n_workers,
+        contours=args.contours,
+        source=args.source,
+        archive_dir=args.archive_dir,
     )
+    print(f"[pvtend] contours: {cfg.contour_source()}"
+          + (f" from {args.source} at {args.archive_dir}" if args.archive_dir else ""))
     result = run_pass1(cfg)
     result.save(cfg.output_path)
 

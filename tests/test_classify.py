@@ -427,3 +427,90 @@ class TestClassifyPatchesCLI:
             rows = list(csv.DictReader(f))
         assert len(rows) == 1
         assert rows[0]["label"] in {"AWB", "CWB", "Omega", "NEUTRAL"}
+
+
+class TestContourSource:
+    """Where the weighted-average level takes its contours from."""
+
+    def test_auto_is_the_patch_without_an_archive(self):
+        from pvtend.classify import ClassifyConfig
+
+        assert ClassifyConfig().contour_source() == "patch"
+
+    def test_auto_is_circumpolar_with_one(self, tmp_path):
+        from pvtend.classify import ClassifyConfig
+
+        assert ClassifyConfig(archive_dir=tmp_path).contour_source() == "circumpolar"
+
+    def test_circumpolar_without_an_archive_is_refused(self):
+        from pvtend.classify import ClassifyConfig
+
+        with pytest.raises(ValueError, match="archive_dir"):
+            ClassifyConfig(contours="circumpolar").contour_source()
+
+    def test_an_unknown_source_is_refused(self):
+        from pvtend.classify import ClassifyConfig
+
+        with pytest.raises(ValueError, match="circumpolar, patch or auto"):
+            ClassifyConfig(contours="global").contour_source()
+
+    def test_the_patch_can_be_asked_for_even_with_an_archive(self, tmp_path):
+        from pvtend.classify import ClassifyConfig
+
+        cfg = ClassifyConfig(contours="patch", archive_dir=tmp_path)
+        assert cfg.contour_source() == "patch"
+
+
+class TestCircumpolarContoursOnPatch:
+    """The hemisphere's contours, cut to an event's patch."""
+
+    @staticmethod
+    def _hemisphere(nlat=61, nlon=240):
+        """A zonal field whose contours all go round: height falling poleward."""
+        lat = np.linspace(90.0, 0.0, nlat)
+        lon = np.linspace(0.0, 360.0, nlon, endpoint=False)
+        field = 8000.0 + 20.0 * lat[:, None] + 0.0 * lon[None, :]
+        return field, lat, lon
+
+    @staticmethod
+    def _patch_axes(half_lat=30.0, half_lon=60.0, ny=41, nx=81):
+        return (np.linspace(-half_lon, half_lon, nx),
+                np.linspace(half_lat, -half_lat, ny))
+
+    def test_no_more_contours_than_the_patch_path_keeps(self):
+        from pvtend.classify import _circumpolar_on_patch
+        from pvtend.rwb import RWBConfig
+
+        field, lat, lon = self._hemisphere()
+        x, y = self._patch_axes()
+        got = _circumpolar_on_patch(field, lat, lon, 55.0, 100.0, x, y,
+                                    RWBConfig(try_levels=400, min_vertices=30))
+        assert 0 < len(got) <= 12
+        for c in got:
+            assert {"lev", "x", "y"} <= set(c)
+
+    def test_the_thinning_spans_the_levels_it_kept(self):
+        from pvtend.classify import _circumpolar_on_patch
+        from pvtend.rwb import RWBConfig
+
+        field, lat, lon = self._hemisphere()
+        x, y = self._patch_axes()
+        got = _circumpolar_on_patch(field, lat, lon, 55.0, 100.0, x, y,
+                                    RWBConfig(try_levels=400, min_vertices=30))
+        levels = [c["lev"] for c in got]
+        assert levels == sorted(levels) or levels == sorted(levels, reverse=True)
+        assert len(set(levels)) == len(levels)
+
+    def test_a_field_with_no_circumpolar_contour_gives_nothing(self):
+        from pvtend.classify import _circumpolar_on_patch
+        from pvtend.rwb import RWBConfig
+
+        # A single bump: its contours close on themselves and none goes round.
+        lat = np.linspace(90.0, 0.0, 61)
+        lon = np.linspace(0.0, 360.0, 240, endpoint=False)
+        la, lo = np.meshgrid(lat, lon, indexing="ij")
+        field = 9000.0 + 300.0 * np.exp(-(((la - 55.0) / 8.0) ** 2 + ((lo - 100.0) / 15.0) ** 2))
+        x, y = self._patch_axes()
+        got = _circumpolar_on_patch(field, lat, lon, 55.0, 100.0, x, y,
+                                    RWBConfig(try_levels=200, min_vertices=30))
+        assert got == []
