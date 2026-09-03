@@ -56,6 +56,16 @@ RAMP="${RAMP:-}"                              # set to re-measure it
 RAMP_SIZES="${RAMP_SIZES:-360 720 1080 1620}" # catalogue ROWS per rung; a third of them
                                               # are the stage being computed
 PIECES="${PIECES:-scale}"
+# Worker recycling. The pool wedges -- every worker gone, the parent asleep with
+# no processor time accruing and nothing timing out -- and on the other archive
+# it did so three times out of three, always in a block long enough to reach the
+# recycling point and never in one that was not: three blocks stopped at 1533,
+# 1534 and 1536 events with 96 workers, which is 96 x 16, the default. Recycling
+# bounds per-worker memory, so it is not removed but pushed past the longest
+# block here (about 1,900 events, twenty per worker); a block boundary still
+# gives every worker a fresh process. Setting this to 0 would also silently
+# switch the pool from spawn to fork, which is worse.
+RECYCLE="${RECYCLE:-64}"
 
 ENV_RUN="micromamba run -n blocking"
 PIPELINE="$ENV_RUN pvtend-pipeline"
@@ -86,7 +96,9 @@ sample_health() {
             local d r
             d=$(ps -u "$USER" -o state= | grep -c '^D')
             r=$(ps -u "$USER" -o state= | grep -c '^R')
-            echo "$(date '+%F %T') D=$d R=$r load=$(cut -d' ' -f1 /proc/loadavg)" >> "$out"
+            local rss
+            rss=$(ps -u "$USER" -o rss=,args= | awk '/spawn_main/ {s += $1} END {printf "%.0f", s / 1048576}')
+            echo "$(date '+%F %T') D=$d R=$r load=$(cut -d' ' -f1 /proc/loadavg) workerRSS=${rss}G" >> "$out"
             sleep 30
         done
     ) > /dev/null 2>&1 &
@@ -144,6 +156,7 @@ run_block() {
         --qg-method log20 \
         --ppvi-pieces "$PIECES" \
         --n-workers "$workers" \
+        --max-tasks-per-child "$RECYCLE" \
         --skip-existing \
         >> "$LOG_DIR/$tag.log" 2>&1 &
     local pid=$!
