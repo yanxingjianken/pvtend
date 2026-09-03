@@ -571,7 +571,9 @@ def _classify_one_file(item, *, classify_levels, threshold, rwb_cfg,
 
     Returns ``(tid, awb, cwb, h_scale, status)`` with status ``"ok"``,
     ``"noz"`` (file lacks the requested Z fields — not an error) or
-    ``"fail"``.
+    ``"fail: <reason>"``. The reason travels with the status because a
+    misconfigured archive and a corrupt record fail identically otherwise, and a
+    bare count of failures says nothing about which one happened.
     """
     fp, tid = item
     try:
@@ -607,8 +609,8 @@ def _classify_one_file(item, *, classify_levels, threshold, rwb_cfg,
                 centre=centre,
             )
             return (tid, awb, cwb, h_scale, "ok")
-    except Exception:
-        return (tid, False, False, None, "fail")
+    except Exception as exc:  # noqa: BLE001 - one bad record must not stop the pass
+        return (tid, False, False, None, f"fail: {type(exc).__name__}: {exc}")
 
 
 def run_pass1(cfg: ClassifyConfig) -> ClassifyResult:
@@ -659,6 +661,7 @@ def run_pass1(cfg: ClassifyConfig) -> ClassifyResult:
 
         npz_files = sorted(dh0_dir.glob("*.npz"))
         n_ok = n_fail = 0
+        reasons: dict[str, int] = {}
 
         todo = []
         for fp in npz_files:
@@ -687,8 +690,12 @@ def run_pass1(cfg: ClassifyConfig) -> ClassifyResult:
             results = map(work, todo)
 
         for tid, awb, cwb, hs, status in results:
-            if status == "fail":
+            if status.startswith("fail"):
                 n_fail += 1
+                reason = status[6:] or "unknown"
+                if reason not in reasons:
+                    reasons[reason] = 0
+                reasons[reason] += 1
                 continue
             if h_scale is None and hs is not None:
                 h_scale = hs
@@ -701,6 +708,19 @@ def run_pass1(cfg: ClassifyConfig) -> ClassifyResult:
             n_ok += 1
 
         print(f"[classify] {evt}: ok={n_ok}  fail={n_fail}", flush=True)
+        for reason, count in sorted(reasons.items(), key=lambda kv: -kv[1])[:3]:
+            print(f"[classify]   {count:>7d} x {reason}", flush=True)
+        # A stage that classified nothing still writes a pickle in which every event
+        # is Neutral -- a result-shaped object built from no measurement at all. The
+        # first time this happened it was one wrong --archive-dir, and the run went on
+        # to composite 28,000 events against it. Refuse instead.
+        attempted = n_ok + n_fail
+        if attempted and n_fail > 0.5 * attempted:
+            worst = max(reasons.items(), key=lambda kv: kv[1])[0] if reasons else "unknown"
+            raise RuntimeError(
+                f"{evt}: {n_fail} of {attempted} events failed to classify "
+                f"({100.0 * n_fail / attempted:.0f}%); most common reason: {worst}"
+            )
 
     for evt in cfg.stages:
         stage_neu[evt] = stage_all[evt] - (

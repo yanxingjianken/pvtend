@@ -514,3 +514,32 @@ class TestCircumpolarContoursOnPatch:
         got = _circumpolar_on_patch(field, lat, lon, 55.0, 100.0, x, y,
                                     RWBConfig(try_levels=200, min_vertices=30))
         assert got == []
+
+
+class TestPassRefusesToSucceedOnNothing:
+    """A pass that classified nothing must not write a pickle."""
+
+    def test_the_reason_travels_with_the_status(self, tmp_path):
+        from pvtend.classify import _classify_one_file
+        from pvtend.rwb import RWBConfig
+
+        missing = tmp_path / "track_1_2013042615_dh+0.npz"
+        tid, awb, cwb, hs, status = _classify_one_file(
+            (str(missing), 1), classify_levels=["wavg"], threshold=1,
+            rwb_cfg=RWBConfig(), need_3d=False, need_wavg=True)
+        assert status.startswith("fail: ")
+        assert status != "fail: "          # the exception said something
+        assert (awb, cwb, hs) == (False, False, None)
+
+    def test_a_pass_that_fails_everything_raises(self, tmp_path):
+        from pvtend.classify import ClassifyConfig, run_pass1
+
+        stage = tmp_path / "peak" / "dh=+0"
+        stage.mkdir(parents=True)
+        for i in range(4):
+            # A file that is not an NPZ at all: every worker fails on it.
+            (stage / f"track_{i}_2013042615_dh+0.npz").write_bytes(b"not an npz")
+        cfg = ClassifyConfig(npz_dir=tmp_path, stages=["peak"],
+                             classify_levels=["wavg"], classify_threshold=1)
+        with pytest.raises(RuntimeError, match="failed to classify"):
+            run_pass1(cfg)
