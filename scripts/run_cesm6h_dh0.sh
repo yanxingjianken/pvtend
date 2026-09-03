@@ -93,6 +93,33 @@ sample_health() {
     echo $!
 }
 
+# ---- A pool that has stopped producing --------------------------------------
+# The worker pool can wedge: every worker gone, the parent alive with its
+# management threads asleep and no processor time accruing. Nothing in it times
+# out, so the block would sit there until someone looked. This samples the
+# block's own output and kills a compute that has produced nothing for
+# STALL_MIN minutes, which fails the block: the supervisor logs it, leaves it
+# unmarked, and moves on. A rerun picks it up where it stopped.
+STALL_MIN="${STALL_MIN:-20}"
+
+watch_stall() {
+    local pid=$1 dir=$2 tag=$3 last=-1 same=0 need=$((STALL_MIN / 2))
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep 120
+        local n
+        n=$(find "$dir" -name 'track_*.npz' 2>/dev/null | wc -l)
+        if [ "$n" = "$last" ]; then same=$((same + 1)); else same=0; last=$n; fi
+        if [ "$same" -ge "$need" ]; then
+            log "$tag: no output for $STALL_MIN min at $n files; the pool is wedged"
+            pkill -TERM -P "$pid" 2>/dev/null
+            kill -TERM "$pid" 2>/dev/null
+            sleep 15
+            kill -KILL "$pid" 2>/dev/null
+            return
+        fi
+    done
+}
+
 # ---- One compute block ----------------------------------------------------
 # Prints the throughput in events per minute so the ramp can compare rungs.
 run_block() {
@@ -118,8 +145,13 @@ run_block() {
         --ppvi-pieces "$PIECES" \
         --n-workers "$workers" \
         --skip-existing \
-        >> "$LOG_DIR/$tag.log" 2>&1
+        >> "$LOG_DIR/$tag.log" 2>&1 &
+    local pid=$!
+    watch_stall "$pid" "$out/$stage/dh=+0" "$tag" &
+    local watcher=$!
+    wait "$pid"
     local rc=$?
+    kill "$watcher" 2>/dev/null
     elapsed=$((SECONDS - start))
     kill "$sampler" 2>/dev/null
     n_after=$(find "$out/$stage/dh=+0" -name "track_${m03}_*.npz" 2>/dev/null | wc -l)
