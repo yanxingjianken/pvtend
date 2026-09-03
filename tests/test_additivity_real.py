@@ -17,6 +17,8 @@ import xarray as xr
 
 ERA5_W = "/net/flood/data2/users/x_yan/era/era5_w_2010_01.nc"
 
+pytest.importorskip("spharm")  # the Poisson inverse is spectral
+
 pytestmark = pytest.mark.skipif(
     not __import__("pathlib").Path(ERA5_W).exists(),
     reason="ERA5 omega file not found (requires local data)",

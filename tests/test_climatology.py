@@ -13,11 +13,17 @@ from pvtend.climatology import (
 
 
 class TestHelmholtzClimatologyRoundTrip:
-    """Write synthetic clim files, compute Helmholtz, then load them."""
+    """Write synthetic clim files, compute Helmholtz, then load them.
+
+    The decomposition is spectral and refuses to run without its backend rather
+    than falling back to a finite-difference path that is not pole-safe, so
+    without ``pvtend[sh]`` there is nothing here to test.
+    """
 
     @pytest.fixture
     def clim_env(self, tmp_path):
         """Create a tiny synthetic climatology for month=1 (jan) only."""
+        pytest.importorskip("spharm")
         nlat, nlon, nlev, nhour, nday = 21, 41, 3, 2, 2
         lat = np.linspace(30, 50, nlat)
         lon = np.linspace(-20, 20, nlon)

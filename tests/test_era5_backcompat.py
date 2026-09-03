@@ -31,6 +31,11 @@ import pandas as pd
 import pytest
 import xarray as xr
 
+# The pipeline's wind decomposition and its omega-derived divergent winds are
+# spectral and refuse a finite-difference substitute, so the whole regression
+# needs the backend.
+pytest.importorskip("spharm")
+
 from pvtend.constants import MONTH_ABBREVS
 
 LEVELS = [1000, 850, 700, 500, 400, 300, 250, 200, 100]
