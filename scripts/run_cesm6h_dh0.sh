@@ -179,12 +179,34 @@ fi
 # ---- The blocks -----------------------------------------------------------
 # Peak first for both event types, so the analyses that need it can start while
 # onset and decay are still running.
+#
+# The first block is also the check on the worker count. The knee it defaults to
+# was measured on the other archive, whose data grid carries about half the
+# points through everything that is not the solver, so this one could saturate
+# earlier. If the first block comes in below FIRST_BLOCK_MIN_RATE events per
+# minute the run stops rather than spending a day at a count that is not the
+# knee; rerun with RAMP set to measure it, and the finished block is skipped.
+FIRST_BLOCK_MIN_RATE="${FIRST_BLOCK_MIN_RATE:-25}"
+first_block=1
+
 for block in blocking:peak prp:peak blocking:onset prp:onset blocking:decay prp:decay; do
     evt="${block%%:*}"; stage="${block##*:}"
     out="$BLK_OUT"; [ "$evt" = prp ] && out="$PRP_OUT"
     for m in $MEMBERS; do
         m03=$(printf 'm%03d' "$m")
-        run_block "${evt}_${stage}_${m03}" "$evt" "$stage" "$m" "$(csv_for "$evt" "$m")" "$out" "$WORKERS"
+        tag="${evt}_${stage}_${m03}"
+        run_block "$tag" "$evt" "$stage" "$m" "$(csv_for "$evt" "$m")" "$out" "$WORKERS"
+        if [ "$first_block" = 1 ] && [ -z "$RAMP" ]; then
+            first_block=0
+            rate=$(cat "$LOG_DIR/rate_$tag" 2>/dev/null || echo 0)
+            if awk -v r="$rate" -v m="$FIRST_BLOCK_MIN_RATE" 'BEGIN{exit !(r < m)}'; then
+                log "=== $tag ran at $rate events/min, below $FIRST_BLOCK_MIN_RATE:"
+                log "===   $WORKERS is not the knee for this archive. Stopping."
+                log "===   Rerun with RAMP=\"48 96 144\" to measure it; this block is done."
+                exit 3
+            fi
+            log "=== first block $rate events/min: $WORKERS workers confirmed"
+        fi
     done
 done
 
