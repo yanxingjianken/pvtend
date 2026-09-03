@@ -195,7 +195,7 @@ run_variant() {
 
     run_stage "p7_excl_${evt}" "aggregate QG blowup → exclude_tracks_${evt}" \
         "$PY $ROOT/scripts/aggregate_qg_blowup.py \
-             --npz-dir '$out' --threshold 25.0 \
+             --npz-dir '$out' --fields all --threshold 25.0 \
              --out '$EXC_DIR/exclude_tracks_${evt}.csv' \
              --report '$EXC_DIR/qg_blowup_report_${evt}.csv'"
 
